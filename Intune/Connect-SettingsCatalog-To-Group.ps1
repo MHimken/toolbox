@@ -4,12 +4,16 @@ Will assign a given set of configuration profiles to a given group.
 .DESCRIPTION
 Needs works by looking for a prefix in the name of configuration profiles and will assign that to a given group.
 .NOTES
-Version: 0.1
+    Version: 0.1
+    Versionname: 
+    Intial creation date: 04.03.2024
+    Last change date: 04.03.2024
 #>
 [CmdletBinding()]
 param(
     [string]$ConfigProfilePrefix = 'CIS',
     [string]$GroupName,
+    [System.IO.DirectoryInfo]$LogDirectory = "C:\Logs\",
     [string[]]$RequiredGraphScopes,
     [string]$CertificateThumbprint,
     [string]$ClientID,
@@ -19,6 +23,9 @@ param(
     [String]$TenantAPIToUse = '/beta',
     [switch]$ToConsole
 )
+if (-not(Test-Path $LogDirectory)) { New-Item $LogDirectory -ItemType Directory -Force | Out-Null }
+$LogPrefix = 'SCToGroup'
+$LogFile = Join-Path -Path $LogDirectory -ChildPath ('{0}_{1}.log' -f $LogPrefix, $DateTime)
 function Write-Log {
     <#
     .DESCRIPTION
