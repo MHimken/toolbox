@@ -1,3 +1,3 @@
 # Warning notice
 
-Tools around Autopilot - use at your own risk!
+Tools around Intune - use at your own risk!
