@@ -9,19 +9,21 @@ This script is specifcally written to run Powershell scripts. The script will
 !!Attention!!
 By default this will use the powershell.exe located in system32 _not_ sysWOW64! If required, change it.
 Every output from the launched script will be written to "Scriptoutput.log" in the same location as this wrapper
+.PARAMETER Usex86PowerShell
+By default the script will use the x64-PowerShell executable.
 .PARAMETER ScriptPath
-The exact path to the .ps1 file - no other files are supported at this time
+The exact path to the .ps1 file - no other files are supported at this time.
 .PARAMETER TimeOutInSeconds
-Specify the timeout for the wrapper to wait until the sub-script is stopped
+Specify the timeout for the wrapper to wait until the sub-script is stopped.
 .PARAMETER ArgumentsForScript
-Pass the arguments exactly as you would when running the script as a string
+Pass the arguments exactly as you would when running the script as a string.
 .EXAMPLE
 .\ScriptWrapper.ps1 -ScriptPath C:\temp\Runner.ps1 -TimeOutInSeconds 9 -ArgumentsForScript "-Time 10"
 This example would start the .ps1 file in C:\temp\ and wait for a maximum of 9 seconds.
 .NOTES
-    Version: 1.0
+    Version: 1.1
     Intial creation date: 01.05.2024
-    Last change date: 01.05.2024
+    Last change date: 02.05.2024
     Latest changes: https://github.com/MHimken/toolbox/tree/main/Intune
 #>
 [CmdletBinding()]
@@ -30,12 +32,18 @@ param(
     [string]$ScriptPath,
     [Parameter(Mandatory = $true)]
     [int]$TimeOutInSeconds,
-    [string]$ArgumentsForScript
+    [string]$ArgumentsForScript,
+    [switch]$Usex86PowerShell
 )
-
+if($Usex86PowerShell){
+    $ChildPath = "\sysWOW64\WindowsPowerShell\v1.0\"
+}
+else{
+    $ChildPath = "\system32\WindowsPowerShell\v1.0\"
+}
 $JobName = New-Guid
 $TimeoutInMilliseconds = [timespan]::FromSeconds($TimeOutInSeconds).TotalMilliseconds
-$ExecutePath = Join-Path $env:Systemroot -ChildPath "\system32\WindowsPowerShell\v1.0\"
+$ExecutePath = Join-Path $env:Systemroot -ChildPath $ChildPath
 $Executable = "powershell.exe"
 $ArgumentListForPowerShell = "-NonInteractive -NoProfile -WindowStyle Hidden -ExecutionPolicy bypass -File $ScriptPath " + $ArgumentsForScript
 $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
