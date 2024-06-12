@@ -4,14 +4,17 @@ This is not finished!
 #TODO: Handle Wildcard URLs
 .DESCRIPTION
 .NOTES
-    Version: 0.1
+    Version: 0.2
     Versionname: 
     Intial creation date: 19.02.2024
-    Last change date: 01.05.2024
+    Last change date: 11.06.2024
     Latest changes: https://github.com/MHimken/WinRE-Customization/blob/main/changelog.md
 #>
 [CmdletBinding()]
 param(
+    [System.IO.DirectoryInfo]$WorkingDirectory = "C:\MEMNR\",
+    [System.IO.DirectoryInfo]$LogDirectory = "C:\MEMNR\",
+    [string]$CSVFile ="Get-MEMNetworkRequirements.csv",
     [switch]$All,
     [switch]$Intune,
     [switch]$Autopilot,
@@ -34,59 +37,10 @@ param(
 )
 $Script:DateTime = Get-Date -Format ddMMyyyy_hhmmss
 $Script:GUID = (New-Guid).Guid
-$Script:MEMURLs = [System.Collections.ArrayList]::new()
+$Script:M365ServiceURLs = [System.Collections.ArrayList]::new()
+$Script:WildCardURLs = [System.Collections.ArrayList]::new()
 $Script:M365URLs = [System.Collections.ArrayList]::new()
 $Script:URLsToVerify = [System.Collections.ArrayList]::new()
-
-function Build-Factory {
-    param(
-        $Inputs
-    )
-    foreach ($Input in $Inputs) {
-        $Script:URLsToVerify.add([PSCustomObject]@{
-                URI      = [string]$Input[0]
-                Ports    = [int[]]$Input[1]
-                Protocol = [string]$Input[2]
-                GCC      = [bool]$Input[3]
-            })
-    }
-}
-function Get-M365Service {
-    param(
-        [switch]$M365,
-        [switch]$MEM
-    )
-    $EndpointURL = "https://endpoints.office.com"
-    #if (Test-HTTP -URL $EndpointURL) {
-    if ($M365) {
-        $M365URLs = Invoke-RestMethod -Uri ("$EndpointURL/endpoints/WorldWide?clientrequestid=$Script:GUID")
-    }
-    if ($MEM) {
-        $MEMURLs = Invoke-RestMethod -Uri ("$EndpointURL/endpoints/WorldWide?ServiceAreas=MEM`&`clientrequestid=$Script:GUID")
-    }
-    foreach ($Object in $MEMURLs) {
-        $Ports = [array](($(if($Object.tcpPorts){$Object.tcpPorts}elseif($Object.udpPorts){$Object.udpPorts}else{'443'})).split(",").trim())
-        foreach ($URL in $Object.urls) {
-            if($URL -match '\*'){
-                $URL
-            }
-            foreach ($Port in $Ports) {
-                $URLObject = [PSCustomObject]@{
-                    id                     = $Object.id
-                    serviceArea            = $Object.serviceArea
-                    serviceAreaDisplayName = $Object.serviceAreaDisplayName
-                    url                    = $URL
-                    tcpPort                = $Port
-                    expressRoute           = $Object.expressroute
-                    category               = $Object.category
-                    required               = $Object.required
-                    notes                  = $Object.notes
-                }
-                $Script:MEMURLs.Add($URLObject)
-            }
-        }
-    }
-}
 function Get-ScriptPath {
     if ($PSScriptRoot) { 
         # Console or VS Code debug/run button/F5 temp console
@@ -106,7 +60,16 @@ function Get-ScriptPath {
     }
     $Script:PathToScript = $ScriptRoot
 }
-
+function Initialize-Script{
+    $Script:DateTime = Get-Date -Format ddMMyyyy_hhmmss
+    if (-not(Test-Path $LogDirectory)) { New-Item $LogDirectory -ItemType Directory -Force | Out-Null }
+    $LogPrefix = 'MEMNR'
+    $Script:LogFile = Join-Path -Path $LogDirectory -ChildPath ('{0}_{1}.log' -f $LogPrefix, $Script:DateTime)
+    if (-not(Test-Path $WorkingDirectory )) { New-Item $WorkingDirectory -ItemType Directory -Force | Out-Null }
+    $Script:CurrentLocation = Get-Location
+    Set-Location $WorkingDirectory
+    Get-ScriptPath
+}
 function Write-Log {
     <#
     .DESCRIPTION
@@ -137,6 +100,70 @@ function Write-Log {
         }
     }
 }
+function Import-NetworkRequirementCSV{
+    $Header = 'URL','Port','Protocol','ID'
+    $Script:ManualURLs = Import-Csv -Path (Join-Path -Path $Script:PathToScript -ChildPath $CSVFile) -Delimiter ',' -Header $Header
+}
+function Build-Factory {
+    param(
+        $Inputs
+    )
+    foreach ($Input in $Inputs) {
+        $Script:URLsToVerify.add([PSCustomObject]@{
+                URI      = [string]$Input[0]
+                Ports    = [int[]]$Input[1]
+                Protocol = [string]$Input[2]
+                GCC      = [bool]$Input[3]
+            })
+    }
+}
+function Find-WildcardURL {
+    Write-Log -Message 'Now searching for nearest match for Wildcards' -Component 'FindWildcardURL'
+    foreach ($URL in $Script:WildCardURLs) { 
+    }
+}
+function Get-URLsFromID{
+
+}
+function Get-M365Service {
+    param(
+        [switch]$M365,
+        [switch]$MEM
+    )
+    $EndpointURL = "https://endpoints.office.com"
+    #if (Test-HTTP -URL $EndpointURL) {
+    if ($M365) {
+        $URLs = Invoke-RestMethod -Uri ("$EndpointURL/endpoints/WorldWide?clientrequestid=$Script:GUID")
+    }
+    if ($MEM) {
+        $URLs = Invoke-RestMethod -Uri ("$EndpointURL/endpoints/WorldWide?ServiceAreas=MEM`&`clientrequestid=$Script:GUID")
+    }
+    foreach ($Object in $URLs) {
+        $Ports = [array](($(if ($Object.tcpPorts) { $Object.tcpPorts }elseif ($Object.udpPorts) { $Object.udpPorts }else { '443' })).split(",").trim())
+        foreach ($URL in $Object.urls) {
+            if ($URL -match '\*') {
+                Write-Log -Message "The URI $URL contains a wildcard - trying to find nearest match later" -Component 'GetM365Service'
+                $Script:WildCardURLs.add($URL)
+            }
+            foreach ($Port in $Ports) {
+                $URLObject = [PSCustomObject]@{
+                    id                     = $Object.id
+                    serviceArea            = $Object.serviceArea
+                    serviceAreaDisplayName = $Object.serviceAreaDisplayName
+                    url                    = $URL
+                    tcpPort                = $Port
+                    expressRoute           = $Object.expressroute
+                    category               = $Object.category
+                    required               = $Object.required
+                    notes                  = $Object.notes
+                }
+                $Script:M365ServiceURLs.Add($URLObject) | Out-Null
+            }
+        }
+    }
+    Find-WildcardURL
+}
+
 # Usage: CheckSSL <fully-qualified-domain-name>
 function Confirm-SSL {
     #[System.Uri] Maybe needed?
@@ -209,7 +236,7 @@ function Test-DNS {
             if ($ARecord.IP4Address) {
                 if ($ARecord.IP4Address -ne '0.0.0.0' -and $ARecord.IP4Address -ne '127.0.0.1' -and $ARecord.IP4Address -ne '::') {
                     return $true
-                } elseif($ARecord.IP4Address -eq '0.0.0.0' -or $ARecord.IP4Address -eq '127.0.0.1' -or $ARecord.IP4Address -eq '::') {
+                } elseif ($ARecord.IP4Address -eq '0.0.0.0' -or $ARecord.IP4Address -eq '127.0.0.1' -or $ARecord.IP4Address -eq '::') {
                     Write-Log -Message "DNS sinkhole detected: Address $Target resolved to an invalid address" -Component 'DNS' -Type 2
                 }
             }
@@ -227,6 +254,8 @@ function Test-Port {
 }
 function Test-CRL {}
 function Test-RemoteHelp {
+    <#
+        #181
     #Remote Help - Default + Required https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#remote-help
     #"*.support.services.microsoft.com", 443 #example see next line
     "remoteassistance.support.services.microsoft.com", 443
@@ -253,29 +282,38 @@ function Test-RemoteHelp {
     "ecs.communication.microsoft.com", 443
     "remotehelp.microsoft.com", 443
     "trouter-azsc-usea-0-a.trouter.skype.com", 443
+    
+    #187
     #"*.webpubsub.azure.com", 443 #example see next line
     "AMSUA0101-RemoteAssistService-pubsub.webpubsub.azure.com", 443
+    
     #GCC
+    #188
     "remoteassistanceweb-gcc.usgov.communication.azure.us", 443
-    "gcc.remotehelp.microsoft.com", 443, "", $true
-    "gcc.relay.remotehelp.microsoft.com", 443, "GCC"
-    #"*.gov.teams.microsoft.us", 443, "GCC" #example see next line
-    "gov.teams.microsoft.us", 443, "GCC"
+    "gcc.remotehelp.microsoft.com", 443,
+    "gcc.relay.remotehelp.microsoft.com", 443
+    #"*.gov.teams.microsoft.us", 443 #example see next line
+    "gov.teams.microsoft.us", 443
+    #>
+    #ServiceIDs 181,187
+    #ServiceIDs GCC 188
 }
 function Test-Autopilot {
+    <#
+        #https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#windows-autopilot-deployment-service
     "https://ztd.dds.microsoft.com", 443 #According to Jason Sandys this is the port
     "https://cs.dds.microsoft.com", 443 #According to Jason Sandys this is the port
     "https://login.live.com", 443
-
     #Autopilot dependencies according to https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#autopilot-dependencies
+    #ServiceIDs 164,165,169,173,182
     #Default+Required
-    "*.download.windowsupdate.com", 443
-    "*.windowsupdate.com", 443
-    "*.dl.delivery.mp.microsoft.com", 443
-    "*.prod.do.dsp.mp.microsoft.com", 443
+    #"*.download.windowsupdate.com", 443
+    #"*.windowsupdate.com", 443
+    #"*.dl.delivery.mp.microsoft.com", 443
+    #"*.prod.do.dsp.mp.microsoft.com", 443
     "emdl.ws.microsoft.com", 443
-    "*.delivery.mp.microsoft.com", 443
-    "*.update.microsoft.com", 443
+    #"*.delivery.mp.microsoft.com", 443
+    #"*.update.microsoft.com", 443
     "tsfe.trafficshaping.dsp.mp.microsoft.com", 443
     "au.download.windowsupdate.com", 443
     "2.dl.delivery.mp.microsoft.com", 443
@@ -294,15 +332,43 @@ function Test-Autopilot {
     "ekcert.spserv.microsoft.com", 443
     "ftpm.amd.com", 443
     "lgmsapeweu.blob.core.windows.net", 433
+    #>
+    #ServiceIDs 164,169,173,182,9999
+    #9999 = Autopilot
+    #Import
+    Test-NTP #165
+    Test-WNS #169
+    Test-TPMAttestation #173
+    Test-DeliveryOptimization #164
+    Test-WNS #169
+}
+function Test-TPMAttestation {
+    <#
+    #https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#autopilot-self-deploying-mode-and-autopilot-pre-provisioning
+    "ekop.intel.com", 443
+    "ekcert.spserv.microsoft.com", 443
+    "ftpm.amd.com", 443
+    "TPMTESTURL.microsoftaik.azure.net", 443 #this will always resolve to at least SOME URL
+    #>
+    #ServiceIDs 164,9998
+    #9998 = TPM Attestation
 }
 function Test-WNS {
+    <#
     #WNS Default+Required https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#windows-push-notification-serviceswns-dependencies
     #"*.notify.windows.com", 443 #example see next line
     "sin.notify.windows.com", 443
     #"*.wns.windows.com", 443 #example see next line
     "sinwns1011421.wns.windows.com", 443
+    #According to AP https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#autopilot-dependencies
+    "clientconfig.passport.net", 443
+    "windowsphone.com", 443
+    "c.s-microsoft.com", 443
+    #>
+    #ServiceIDs 169,171
 }
 function Test-DeviceHealth {
+    <#
     #Microsoft Azure Attestation (formerly Device Health)
     "intunemaape1.eus.attest.azure.net", 443
     "intunemaape2.eus2.attest.azure.net", 443
@@ -320,23 +386,38 @@ function Test-DeviceHealth {
     "intunemaape17.jpe.attest.azure.net", 443
     "intunemaape18.jpe.attest.azure.net", 443
     "intunemaape19.jpe.attest.azure.net", 443
+    #>
+    #ServiceIDs 186
 }
 function Test-DeliveryOptimization {
-    ("*.do.dsp.mp.microsoft.com", (443))
+    <#
+    #("*.do.dsp.mp.microsoft.com", (443))
     "*.dl.delivery.mp.microsoft.com", 443
-    "*.emdl.ws.microsoft.com", 443
+    #"*.emdl.ws.microsoft.com", 443
     "kv801.prod.do.dsp.mp.microsoft.com", 443
     "geo.prod.do.dsp.mp.microsoft.com", 443
     "emdl.ws.microsoft.com", 443
     "2.dl.delivery.mp.microsoft.com", 443
     "bg.v4.emdl.ws.microsoft.com", 443
+    #>
+    #ServiceIDs 172,164
+    #Port 7680 is used to listen to other clients requests (on host)
+    #Port 3544 UDP is needed for Download Mode 2 and 3 in _and_ outbound
+    Write-Log 'Documentation will specify port 7680 TCP. This is used to listen to other clients requests (from the host)' -Component 'TestDO'
+    $Listening = Get-NetTCPConnection -LocalPort 7680
+    if ($Listening) {
+        return $true
+    }
 }
 function Test-Intune {
     param(
         [switch]$Enhanced
     )
     #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints#access-for-managed-devices
-    #Last Checked 23.04.24
+    #Last Checked 11.06.24
+    #ServiceIDs 97,172,163,164,9997
+    #9997 = Defender
+    <#
     #The inspection of SSL traffic is not supported on 'manage.microsoft.com', or 'dm.microsoft.com' endpoints.
     #Allow HTTP Partial response is required for Scripts & Win32 Apps endpoints.
     #Intune core service
@@ -344,7 +425,6 @@ function Test-Intune {
     #"*.azureedge.net", @(443, 80) #Doesn't allow authenticated proxy! 
     "manage.microsoft.com", @(443, 80)
     "EnterpriseEnrollment.manage.microsoft.com", @(443, 80)
-    
     #Default + Required
     #"*.do.dsp.mp.microsoft.com", @(7680, 3544, 443, 80)  #example see next line
     "kv801.prod.do.dsp.mp.microsoft.com", @(7680, 3544, 443, 80)
@@ -368,32 +448,32 @@ function Test-Intune {
     #Default
     "account.live.com", 443
     "login.live.com", 443
+#>
     if ($Enhanced) {
         Test-Autopilot
-        Test-DeliveryOptimization
         Test-RemoteHelp
         Test-DeviceHealth
-        Test-WNS
         Test-AuthenticatedProxy
+        <#
         #Auth
         "login.microsoftonline.com", @(443, 80)
         "graph.windows.net", @(443, 80)
-        <#
-            "*.officeconfig.msocdn.com", @(443,80) #This URL only has Nameservers. Examples below
-            "prod.officeconfig.msocdn.com", @(443,80) #This is not in the list, but should exist
-        #>
+        #    "*.officeconfig.msocdn.com", @(443,80) #This URL only has Nameservers. Examples below
+        #    "prod.officeconfig.msocdn.com", @(443,80) #This is not in the list, but should exist
         "config.office.com", 443
         "enterpriseregistration.windows.net", @(443, 80)
+    
+    #>
     }
-
 }
-
 function Test-Apple {
+    #ServiceIDs 178
     #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#apple-dependencies
+    <#
     "itunes.apple.com", 443
-    "*.itunes.apple.com", 443
-    "*.mzstatic.com", 443
-    "*.phobos.apple.com", 443
+    #"*.itunes.apple.com", 443
+    #"*.mzstatic.com", 443
+    #"*.phobos.apple.com", 443
     "phobos.itunes-apple.com.akadns.net", 443
     "5-courier.push.apple.com", 443
     "phobos.apple.com", 443
@@ -402,30 +482,58 @@ function Test-Apple {
     "ax.itunes.apple.com.edgesuite.net", 443
     "s.mzstatic.com", 443
     "a1165.phobos.apple.com", 443
+    #>
+    Write-Log -Message 'Port 5223 is only used as a fallback for push notifications and only valid for push.apple.com addresses' -Component 'TestApple'
+    Write-Log -Message 'Warning: Other URLs might be required, please also consult https://support.apple.com/de-de/101555' -Component 'TestApple' -Type 2
 }
 function Test-Android {
-    ("intunecdnpeasd.azureedge.net", 443)
+    #ServiceIDs 179
+    #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#android-aosp-dependencies
+    #
+    <#
+    "intunecdnpeasd.azureedge.net", 443
+    #>
+    Write-Log -Message 'Warning: Other URLs might be required, please also consult https://static.googleusercontent.com/media/www.android.com/en//static/2016/pdfs/enterprise/Android-Enterprise-Migration-Bluebook_2019.pdf' -Component 'TestAndroid' -Type 2
 }
 function Test-WindowsActivation {}
 function Test-EntraID {}
-function Test-WindowsUpdate {}
+function Test-WindowsUpdate {
+    #ServiceIDs 164
+    #https://learn.microsoft.com/en-us/troubleshoot/windows-client/installing-updates-features-roles/windows-update-issues-troubleshooting#device-cant-access-update-files
+    <#
+    "download.windowsupdate.com", 80
+    "download.windowsupdate.com", 443
+    "update.microsoft.com", 443
+    "update.microsoft.com", 80
+    #>
+    Test-DeliveryOptimization
+}
 
 function Test-NTP {
+    #ServiceIDs 165
     #probably w32tm /stripchart /computer:time.windows.com /dataonly /samples:3
     #would throw 0x800705B4 if the URL exists but isn't an NTP or 0x80072AF9 for not resolved
-    #TODO: Add check if this server is the current
     #"time.windows.com", "123" #NTP and SNTP both use this
+    Write-Log 'Microsofts JSON claims more URLs for Port 123, where in reality its only time.windows.com' -Component 'TestNTP' -Type 2
     $CurrentTimeServer = w32tm /query /source
-    $Testresult = w32tm /stripchart /computer:time.windows.com /dataonly /samples:3
-    if ($Testresult -like "*80072AF9*" -or $Testresult[3 - ($Testresult.count)] -like "*800705B4*") {
-        "NOT COOL"
-    } else { "SUCCESS" }
-    if ($CurrentTimeServer -eq "time.windows.com") {
+    $TimeTest = w32tm /stripchart /computer:time.windows.com /dataonly /samples:3
+    if ($TimeTest -like "*80072AF9*" -or $TimeTest[3 - ($TimeTest.count)] -like "*800705B4*") {
+        return $false
     }
+    if ($CurrentTimeServer -ne "time.windows.com") { 
+        if($Autopilot){
+            Write-Log 'time.windows.com is currently not the timeserver - this is a requirement for Autopilot' -Component 'TestNTP' -Type 3
+        }
+        return $false 
+    }
+    return $true
 }
 function Test-DiagnosticsData {}
 function Test-NCSI {
-    "www.msftconnecttest.com"
+    #ServiceIDs 165
+    Write-Log 'MSFTConnectTest.com is listed under ID 165, which uses the wrong port' -Component 'TestNCSI'
+    "www.msftconnecttest.com",443
+    "www.msftconnecttest.com",80
 }
 
 function Test-AppInstaller {
@@ -435,7 +543,10 @@ function Test-AppInstaller {
     "storeedgefd.dsx.mp.microsoft.com"
 }
 function Test-MicrosoftStore {
-    Test-WNS
+    #ServiceIDs 9996
+    #https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints 
+    #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#microsoft-store
+    <#
     #From https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints 
     "img-prod-cms-rt-microsoft-com.akamaized.net", 443 #Downloads images
     "img-s-msn-com.akamaized.net", 80 #No explanation
@@ -446,9 +557,8 @@ function Test-MicrosoftStore {
     "manage.devcenter.microsoft.com", 443 #Analytics
     "displaycatalog.mp.microsoft.com", (443, 80) #[...]used to communicate with Microsoft Store
     "share.microsoft.com", 80 #No explanation
-
-    #From the same source, but not listed under Store
-    Test-DeliveryOptimization
+    "manage.devcenter.microsoft.com",443,80
+        #From the same source, but not listed under Store
     #"*.dl.delivery.mp.microsoft.com", (443, 80) # Content
     #"*.delivery.mp.microsoft.com", (443, 80) # Content
 
@@ -456,7 +566,10 @@ function Test-MicrosoftStore {
     #Dupes filtered
     ("purchase.md.mp.microsoft.com", (443, 80))
     ("licensing.mp.microsoft.com", (443, 80))
-
+#>
+    Get-URLsFromID 9996
+    Test-WNS
+    Test-DeliveryOptimization
 }
 function Test-M365 {
 
@@ -502,13 +615,8 @@ function Test-SSLInspection {
 }
 
 #Start coding!
-$CurrentLocation = Get-Location
-$Location = Get-ScriptPath
-Set-Location $Location
-if (-not(Test-Path $Script:PathToScript)) { New-Item $Script:PathToScript -ItemType Directory -Force | Out-Null }
-$LogPrefix = 'MEMNR'
-$LogFile = Join-Path -Path $Script:PathToScript -ChildPath ('{0}_{1}.log' -f $LogPrefix, $Script:DateTime)
-
+Initialize-Script
+Import-NetworkRequirementCSV
 Get-M365Service -MEM
 if ($All) {
     Set-Variable $Intune, $Autopilot, $WindowsActivation, $EntraID, $WindowsUpdate, $DeliveryOptimization, $NTP, $DNS, $DiagnosticsData, $NCSI, $WNS, $WindowsStore, $M365, $CRLs, $SelfDeploying, $Legacy -Value $true
@@ -516,6 +624,6 @@ if ($All) {
 if ($Intune) {
 
 }
-#$Script:MEMURLs
+#$Script:M365ServiceURLs
 
 Set-Location $CurrentLocation
