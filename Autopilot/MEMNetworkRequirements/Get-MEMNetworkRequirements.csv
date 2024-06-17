@@ -138,3 +138,4 @@
 "purchase.md.mp.microsoft.com", 80, TCP, 9996
 "licensing.mp.microsoft.com", 443, TCP, 9996
 "licensing.mp.microsoft.com", 80, TCP, 9996
+"time.windows.com", 123, UDP, 165

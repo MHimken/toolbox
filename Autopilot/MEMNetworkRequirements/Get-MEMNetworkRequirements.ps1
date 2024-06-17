@@ -7,15 +7,18 @@ This is not finished!
     Version: 0.2
     Versionname: 
     Intial creation date: 19.02.2024
-    Last change date: 11.06.2024
+    Last change date: 16.06.2024
     Latest changes: https://github.com/MHimken/WinRE-Customization/blob/main/changelog.md
 #>
 [CmdletBinding()]
 param(
     [System.IO.DirectoryInfo]$WorkingDirectory = "C:\MEMNR\",
     [System.IO.DirectoryInfo]$LogDirectory = "C:\MEMNR\",
-    [string]$CSVFile ="Get-MEMNetworkRequirements.csv",
-    [switch]$All,
+    [string]$CSVFile = "Get-MEMNetworkRequirements.csv",
+    [bool]$UseMSJSON = $true, # make this a switch when finished
+    [bool]$UseCustomCSV = $true, # make this a switch when finished
+    [bool]$AllowBestEffort = $true, # make this a switch when finished
+    [switch]$AllTargetTest,
     [switch]$Intune,
     [switch]$Autopilot,
     [switch]$WindowsActivation,
@@ -32,14 +35,14 @@ param(
     [switch]$CRLs,
     [switch]$SelfDeploying,
     [switch]$Legacy,
-    [switch]$Log, #to log or not to log
-    [switch]$ToConsole
+    [switch]$NoLog,
+    [string[]]$TestMethods,
+    [bool]$ToConsole = $true
 )
 $Script:DateTime = Get-Date -Format ddMMyyyy_hhmmss
 $Script:GUID = (New-Guid).Guid
 $Script:M365ServiceURLs = [System.Collections.ArrayList]::new()
 $Script:WildCardURLs = [System.Collections.ArrayList]::new()
-$Script:M365URLs = [System.Collections.ArrayList]::new()
 $Script:URLsToVerify = [System.Collections.ArrayList]::new()
 function Get-ScriptPath {
     if ($PSScriptRoot) { 
@@ -60,7 +63,7 @@ function Get-ScriptPath {
     }
     $Script:PathToScript = $ScriptRoot
 }
-function Initialize-Script{
+function Initialize-Script {
     $Script:DateTime = Get-Date -Format ddMMyyyy_hhmmss
     if (-not(Test-Path $LogDirectory)) { New-Item $LogDirectory -ItemType Directory -Force | Out-Null }
     $LogPrefix = 'MEMNR'
@@ -84,30 +87,52 @@ function Write-Log {
         # Type: 1 = Normal, 2 = Warning (yellow), 3 = Error (red)
         [ValidateSet('1', '2', '3')][int]$Type
     )
-    $Time = Get-Date -Format 'HH:mm:ss.ffffff'
-    $Date = Get-Date -Format 'MM-dd-yyyy'
-    if (-not($Component)) { $Component = 'Runner' }
-    if (-not($Type)) { $Type = 1 }
-    if (-not($ToConsole)) {
-        $LogMessage = "<![LOG[$Message" + "]LOG]!><time=`"$Time`" date=`"$Date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"`" file=`"`">"
-        $LogMessage | Out-File -Append -Encoding UTF8 -FilePath $LogFile
-    } elseif ($ToConsole) {
-        switch ($type) {
-            1 { Write-Host "T:$Type C:$Component M:$Message" }
-            2 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Yellow -ForegroundColor Black }
-            3 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Red -ForegroundColor White }
-            default { Write-Host "T:$Type C:$Component M:$Message" }
+    if (-not($NoLog)) {
+        $Time = Get-Date -Format 'HH:mm:ss.ffffff'
+        $Date = Get-Date -Format 'MM-dd-yyyy'
+        if (-not($Component)) { $Component = 'Runner' }
+        if (-not($Type)) { $Type = 1 }
+        if (-not($ToConsole)) {
+            $LogMessage = "<![LOG[$Message" + "]LOG]!><time=`"$Time`" date=`"$Date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"`" file=`"`">"
+            $LogMessage | Out-File -Append -Encoding UTF8 -FilePath $LogFile
+        } elseif ($ToConsole) {
+            switch ($type) {
+                1 { Write-Host "T:$Type C:$Component M:$Message" }
+                2 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Yellow -ForegroundColor Black }
+                3 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Red -ForegroundColor White }
+                default { Write-Host "T:$Type C:$Component M:$Message" }
+            }
         }
     }
 }
-function Import-NetworkRequirementCSV{
-    $Header = 'URL','Port','Protocol','ID'
+function Import-NetworkRequirementCSV {
+    $Header = 'URL', 'Port', 'Protocol', 'ID'
     $Script:ManualURLs = Import-Csv -Path (Join-Path -Path $Script:PathToScript -ChildPath $CSVFile) -Delimiter ',' -Header $Header
+}
+function Get-URLsFromID {
+    param(  
+        [int]$ID
+    )
+    $Result = [System.Collections.ArrayList]::new()
+    if ($Script:ManualURLs) {
+        $Script:ManualURLs | Where-Object { $_.id -eq $ID } | ForEach-Object { $Result.Add($_) | Out-Null }
+    }
+    if ($Script:M365ServiceURLs) {
+        $Script:M365ServiceURLs | Where-Object { $_.id -eq $ID } | ForEach-Object { $Result.Add($_) | Out-Null }
+    }
+    if (-not($result)) {
+        return $false
+    }
+    $Script:URLsToVerify.Add($Result)
+    return $true
 }
 function Build-Factory {
     param(
-        $Inputs
+        [string[]]$TestMethods
     )
+    if ($TestMethods -eq 'AllTests') {
+        $TestMethods = 'DNS', 'Port', 'SSLInspection', 'HTTP'
+    }
     foreach ($Input in $Inputs) {
         $Script:URLsToVerify.add([PSCustomObject]@{
                 URI      = [string]$Input[0]
@@ -117,14 +142,55 @@ function Build-Factory {
             })
     }
 }
+
 function Find-WildcardURL {
+    #ID 8888 = Best effort URLs
     Write-Log -Message 'Now searching for nearest match for Wildcards' -Component 'FindWildcardURL'
-    foreach ($URL in $Script:WildCardURLs) { 
+    foreach ($Object in $Script:WildCardURLs) {
+        Write-Log -Message "Searching for $($Object.url)" -Component 'FindWildcardURL'
+        <#
+        if ($Script:ManualURLs) {
+            $ManualURLMatch = $Script:ManualURLs | Where-Object { $_.url -like $URL }
+            if ($ManualURLMatch) {
+                Write-Log -Message 'Found match in CSV list for' -Component 'FindWildcardURL'
+                    $URLObject = [PSCustomObject]@{
+                    id                     = $ManualURLMatch[0].id
+                    serviceArea            = ''
+                    serviceAreaDisplayName = ''
+                    url                    = $ManualURLMatch[0].URL
+                    Port                   = $ManualURLMatch[0].port
+                    Protocol               = $ManualURLMatch[0].protocol
+                    expressRoute           = ''
+                    category               = ''
+                    required               = ''
+                    notes                  = ''
+                }
+                $FoundURL = $true
+            }
+        }
+        #>        
+        if ($($Script:M365ServiceURLs | Where-Object { $_.url -like $Object.url })) {
+            Write-Log -Message 'Found match in M365 service list - looking up next URL' -Component 'FindWildcardURL'
+        } 
+        if (-not($FoundURL)) {
+            $URLObject = [PSCustomObject]@{
+                id                     = 8888
+                serviceArea            = $Object.serviceArea
+                serviceAreaDisplayName = $Object.serviceAreaDisplayName
+                url                    = $Object.url.replace('*.', '')
+                Port                   = $Object.port
+                Protocol               = $Object.protocol
+                expressRoute           = $Object.expressRoute
+                category               = $Object.category
+                required               = $Object.required
+                notes                  = $Object.notes
+            }
+            Write-Log -Message 'We did not find a matching URL using best effort (no wildcard)' -Component 'FindWildcardURL'
+        }
+        $Script:M365ServiceURLs.Add($URLObject) | Out-Null
     }
 }
-function Get-URLsFromID{
 
-}
 function Get-M365Service {
     param(
         [switch]$M365,
@@ -140,28 +206,34 @@ function Get-M365Service {
     }
     foreach ($Object in $URLs) {
         $Ports = [array](($(if ($Object.tcpPorts) { $Object.tcpPorts }elseif ($Object.udpPorts) { $Object.udpPorts }else { '443' })).split(",").trim())
+        $Protocol = $(if ($Object.tcpPorts) { 'TCP' } elseif ($Object.udpPorts) { 'UDP' } else { 'TCP' })
         foreach ($URL in $Object.urls) {
-            if ($URL -match '\*') {
-                Write-Log -Message "The URI $URL contains a wildcard - trying to find nearest match later" -Component 'GetM365Service'
-                $Script:WildCardURLs.add($URL)
-            }
             foreach ($Port in $Ports) {
                 $URLObject = [PSCustomObject]@{
                     id                     = $Object.id
                     serviceArea            = $Object.serviceArea
                     serviceAreaDisplayName = $Object.serviceAreaDisplayName
                     url                    = $URL
-                    tcpPort                = $Port
+                    Port                   = $Port
+                    Protocol               = $Protocol
                     expressRoute           = $Object.expressroute
                     category               = $Object.category
                     required               = $Object.required
                     notes                  = $Object.notes
                 }
+                if ($URL -match '\*') {
+                    Write-Log -Message "The URI $URL contains a wildcard - trying to find nearest match later" -Component 'GetM365Service'
+                    $Script:WildCardURLs.add($URLObject) | Out-Null
+                    continue
+                }
                 $Script:M365ServiceURLs.Add($URLObject) | Out-Null
             }
         }
     }
-    Find-WildcardURL
+    if ($AllowBestEffort) {
+        Write-Log -Message 'Best effort URLs are enabled - this will turn wildcards into regular URLs using a best effort method' -Component 'MEMNRMain'
+        Find-WildcardURL
+    }
 }
 
 # Usage: CheckSSL <fully-qualified-domain-name>
@@ -244,13 +316,61 @@ function Test-DNS {
     }
     return $false
 }
-function Test-Port {
-    
+function Test-TCPPort {
     param(
-        [System.Uri]$Target,
+        [string]$Target,
         [int]$Port
     )
-    (New-Object System.Net.Sockets.TcpClient -ArgumentList $Target, $Port).Connected
+    $TCPClient = New-Object -TypeName System.Net.Sockets.TCPClient
+    $RunningClient = $TCPClient.ConnectAsync($Target, $Port)
+    Start-Sleep -Milliseconds 100
+    $success = $false 
+    if ($RunningClient.IsCompleted) {
+        if ($RunningClient.Status -ne 'RanToCompletion') {
+            Write-Log "TCP Port test failed with $($RunningClient.Status)" -Component 'TestTCPPort' -Type 2
+            if ($RunningClient.Exception.InnerException) {
+                Write-Log "$($RunningClient.Exception.InnerException)" -Component 'TestTCPPort'
+            }
+        } else {
+            $success = $true
+        }
+    } else {
+        Write-Log 'TCP Port did not respond in a timely fashion' -Component 'TestTCPPort' -Type 2
+    }
+    $TCPClient.Close()
+    $TCPClient.Dispose()
+    return $success
+}
+function Test-UDPPort {
+    param(
+        [string]$Target,
+        [int]$Port
+    )
+    #HUGE thanks to https://github.com/proxb/PowerShell_Scripts/blob/master/Test-Port.ps1
+    #Create object for connecting to port on computer 
+    $udpobject = New-Object Net.Sockets.Udpclient([System.Net.Sockets.AddressFamily]::InterNetwork) 
+    #Set a timeout on receiving message
+    #$udpobject.client.SendTimeout = 500 #minimum!
+    $udpobject.Client.Blocking = $False
+    $udpobject.AllowNatTraversal($true)
+    $Error.Clear()
+    $udpobject.Connect($Target, $Port) | Out-Null
+    if($udpobject.client.Connected){
+        $ByteObject = new-object system.text.asciiencoding
+        $ByteString = $ByteObject.GetBytes("MEMNR connection test")
+        Write-Log -Message 'Sending UDP test message' -Component 'TestUDPPort'
+        [void]$udpobject.Send($ByteString, $ByteString.length)
+    }
+    else{
+        Write-Log -Message 'No UDP connection established' -Component 'TestUDPPort'
+        Write-Log -Message "$($Error[0].ErrorRecord)" -Component 'TestUDPPort' -Type 2
+        return $false
+    }
+    $udpobject.client.Connected
+    $udpobject.client.SocketType
+    $udpobject.Close()
+    $udpobject.Dispose()
+    return $true
 }
 function Test-CRL {}
 function Test-RemoteHelp {
@@ -300,47 +420,26 @@ function Test-RemoteHelp {
 }
 function Test-Autopilot {
     <#
-        #https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#windows-autopilot-deployment-service
-    "https://ztd.dds.microsoft.com", 443 #According to Jason Sandys this is the port
-    "https://cs.dds.microsoft.com", 443 #According to Jason Sandys this is the port
-    "https://login.live.com", 443
+    Sources:
+    https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#windows-autopilot-deployment-service
     #Autopilot dependencies according to https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#autopilot-dependencies
-    #ServiceIDs 164,165,169,173,182
-    #Default+Required
-    #"*.download.windowsupdate.com", 443
-    #"*.windowsupdate.com", 443
-    #"*.dl.delivery.mp.microsoft.com", 443
-    #"*.prod.do.dsp.mp.microsoft.com", 443
-    "emdl.ws.microsoft.com", 443
-    #"*.delivery.mp.microsoft.com", 443
-    #"*.update.microsoft.com", 443
-    "tsfe.trafficshaping.dsp.mp.microsoft.com", 443
-    "au.download.windowsupdate.com", 443
-    "2.dl.delivery.mp.microsoft.com", 443
-    "download.windowsupdate.com", 443
-    "dl.delivery.mp.microsoft.com", 443
-    "geo.prod.do.dsp.mp.microsoft.com", 443
-    "catalog.update.microsoft.com", 443
-    #"time.windows.com" #NTP test is seperate
     #"www.msftncsi.com" #Only Windows <10? https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/internet-explorer-edge-open-connect-corporate-public-network#ncsi-active-probes-and-the-network-status-alert
-    "www.msftconnecttest.com", 443
-    "clientconfig.passport.net", 443
-    "windowsphone.com", 443
-    "*.s-microsoft.com", 443
-    "c.s-microsoft.com", 443
-    "ekop.intel.com", 443
-    "ekcert.spserv.microsoft.com", 443
-    "ftpm.amd.com", 443
-    "lgmsapeweu.blob.core.windows.net", 433
     #>
-    #ServiceIDs 164,169,173,182,9999
+    #ServiceIDs 164,165,169,173,182,9999
     #9999 = Autopilot
     #Import
+    $Autopilot = (182, 9999) | ForEach-Object { Get-URLsFromID $_ }
+    foreach ($Object in $Autopilot) {
+        Test-DNS $Object.url
+    }
+    <#
     Test-NTP #165
     Test-WNS #169
     Test-TPMAttestation #173
     Test-DeliveryOptimization #164
     Test-WNS #169
+    #>
+
 }
 function Test-TPMAttestation {
     <#
@@ -521,7 +620,7 @@ function Test-NTP {
         return $false
     }
     if ($CurrentTimeServer -ne "time.windows.com") { 
-        if($Autopilot){
+        if ($Autopilot) {
             Write-Log 'time.windows.com is currently not the timeserver - this is a requirement for Autopilot' -Component 'TestNTP' -Type 3
         }
         return $false 
@@ -532,8 +631,8 @@ function Test-DiagnosticsData {}
 function Test-NCSI {
     #ServiceIDs 165
     Write-Log 'MSFTConnectTest.com is listed under ID 165, which uses the wrong port' -Component 'TestNCSI'
-    "www.msftconnecttest.com",443
-    "www.msftconnecttest.com",80
+    "www.msftconnecttest.com", 443
+    "www.msftconnecttest.com", 80
 }
 
 function Test-AppInstaller {
@@ -616,14 +715,28 @@ function Test-SSLInspection {
 
 #Start coding!
 Initialize-Script
-Import-NetworkRequirementCSV
-Get-M365Service -MEM
-if ($All) {
+Test-UDPPort "noctua.local" -Port 55555
+Test-UDPPort "noctua.local" -Port 7680
+Test-UDPPort "time.windows.com" -Port 123
+Test-UDPPort "5-courier.push.apple.com" -Port 5223
+Test-UDPPort "asdiubfaoisdbfg.com" -Port 15415
+if ($UseCustomCSV) {
+    #Import-NetworkRequirementCSV
+}
+if ($UseMSJSON) {
+    #Get-M365Service -MEM
+}
+if ($AllTargetTest) {
     Set-Variable $Intune, $Autopilot, $WindowsActivation, $EntraID, $WindowsUpdate, $DeliveryOptimization, $NTP, $DNS, $DiagnosticsData, $NCSI, $WNS, $WindowsStore, $M365, $CRLs, $SelfDeploying, $Legacy -Value $true
 }
-if ($Intune) {
-
+if ($AllTests) {
+    $TestMethods = 'AllTests'
 }
-#$Script:M365ServiceURLs
+#Build-Factory $TestMethods #This should create the final URL list and prepare the selected tests
 
+<#if($UseMSJSON -and $UseCustomCSV){
+    Write-Log -Message 'Both Microsoft JSON and custom CSV specified - creating merged ressults. If a URL exists multiple times the CSV wins' -Component 'MEMNRMain'
+}
+#>
+#Test-Autopilot
 Set-Location $CurrentLocation
