@@ -4,10 +4,10 @@ This is not finished!
 #TODO: Handle Wildcard URLs
 .DESCRIPTION
 .NOTES
-    Version: 0.2
+    Version: 0.4
     Versionname: 
     Intial creation date: 19.02.2024
-    Last change date: 16.06.2024
+    Last change date: 26.06.2024
     Latest changes: https://github.com/MHimken/WinRE-Customization/blob/main/changelog.md
 #>
 [CmdletBinding()]
@@ -42,8 +42,11 @@ param(
 $Script:DateTime = Get-Date -Format ddMMyyyy_hhmmss
 $Script:GUID = (New-Guid).Guid
 $Script:M365ServiceURLs = [System.Collections.ArrayList]::new()
+$Script:DNSCache = [System.Collections.ArrayList]::new()
+$Script:TCPCache = [System.Collections.ArrayList]::new()
 $Script:WildCardURLs = [System.Collections.ArrayList]::new()
 $Script:URLsToVerify = [System.Collections.ArrayList]::new()
+$Script:FinalResultList = [System.Collections.ArrayList]::new()
 function Get-ScriptPath {
     if ($PSScriptRoot) { 
         # Console or VS Code debug/run button/F5 temp console
@@ -84,14 +87,14 @@ function Write-Log {
         [Parameter(Mandatory = $false)]
         $Message,
         $Component,
-        # Type: 1 = Normal, 2 = Warning (yellow), 3 = Error (red)
-        [ValidateSet('1', '2', '3')][int]$Type
+        # Type: 1 = Normal, 2 = Warning (yellow), 3 = Error (red), 4 = Explicit Success (not CM!)
+        [ValidateSet('1', '2', '3', '4')][int]$Type
     )
     if (-not($NoLog)) {
         $Time = Get-Date -Format 'HH:mm:ss.ffffff'
         $Date = Get-Date -Format 'MM-dd-yyyy'
         if (-not($Component)) { $Component = 'Runner' }
-        if (-not($Type)) { $Type = 1 }
+        if (-not($Type) -or $Type -eq 4) { $Type = 1 }
         if (-not($ToConsole)) {
             $LogMessage = "<![LOG[$Message" + "]LOG]!><time=`"$Time`" date=`"$Date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"`" file=`"`">"
             $LogMessage | Out-File -Append -Encoding UTF8 -FilePath $LogFile
@@ -100,6 +103,7 @@ function Write-Log {
                 1 { Write-Host "T:$Type C:$Component M:$Message" }
                 2 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Yellow -ForegroundColor Black }
                 3 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Red -ForegroundColor White }
+                4 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Green -ForegroundColor White ; $Type = 1; }
                 default { Write-Host "T:$Type C:$Component M:$Message" }
             }
         }
@@ -107,23 +111,54 @@ function Write-Log {
 }
 function Import-NetworkRequirementCSV {
     $Header = 'URL', 'Port', 'Protocol', 'ID'
-    $Script:ManualURLs = Import-Csv -Path (Join-Path -Path $Script:PathToScript -ChildPath $CSVFile) -Delimiter ',' -Header $Header
+    $Script:ManualURLs = [System.Collections.ArrayList]::new()
+    $TempObjects = Import-Csv -Path (Join-Path -Path $Script:PathToScript -ChildPath $CSVFile) -Delimiter ',' -Header $Header
+    foreach ($Object in $TempObjects) {
+        $URLObject = [PSCustomObject]@{
+            id       = $Object.ID
+            #serviceArea            = $Object.serviceArea
+            #serviceAreaDisplayName = $Object.serviceAreaDisplayName
+            url      = $Object.url.replace('*.', '')
+            Port     = $Object.port
+            Protocol = $Object.protocol
+            #expressRoute           = $Object.expressRoute
+            #category               = $Object.category
+            required = 'true'
+            #notes                  = $Object.notes
+        }
+        $Script:ManualURLs.add($URLObject) | Out-Null
+    }
 }
 function Get-URLsFromID {
     param(  
-        [int]$ID
+        [int]$ID,
+        [int[]]$FilterPort
     )
-    $Result = [System.Collections.ArrayList]::new()
     if ($Script:ManualURLs) {
-        $Script:ManualURLs | Where-Object { $_.id -eq $ID } | ForEach-Object { $Result.Add($_) | Out-Null }
+        $Script:ManualURLs | Where-Object { $_.id -eq $ID -and $_.port -notin $FilterPort } | ForEach-Object { $Script:URLsToVerify.Add($_) | Out-Null }
     }
     if ($Script:M365ServiceURLs) {
-        $Script:M365ServiceURLs | Where-Object { $_.id -eq $ID } | ForEach-Object { $Result.Add($_) | Out-Null }
+        $Script:M365ServiceURLs | Where-Object { $_.id -eq $ID -and $_.port -notin $FilterPort } | ForEach-Object { $Script:URLsToVerify.Add($_) | Out-Null }
     }
-    if (-not($result)) {
+    if (-not($Script:URLsToVerify)) {
         return $false
     }
-    $Script:URLsToVerify.Add($Result)
+    $DuplicateURLsToVerify = [System.Collections.ArrayList]::new()
+    foreach ($IDsFound in $Script:URLsToVerify) {
+        $RemoveMe = $Script:URLsToVerify | Where-Object { $_.id -eq $IDsFound.id -and $_.url -eq $IDsFound.url -and $_.port -eq $IDsFound.port -and $_.protocol -eq $IDsFound.protocol }
+        if ($RemoveMe.count -gt 1) {
+            $counter = 0
+            foreach ($RemoveObject in $RemoveMe) {
+                if ($counter -gt 0) {
+                    $DuplicateURLsToVerify.add($RemoveObject) | Out-Null
+                }
+                $counter++
+            }
+        }
+    }
+    $DuplicateURLsToVerify | ForEach-Object{$Script:URLsToVerify.Remove($_)}
+
+    #Cleanup of dupes
     return $true
 }
 function Build-Factory {
@@ -147,46 +182,26 @@ function Find-WildcardURL {
     #ID 8888 = Best effort URLs
     Write-Log -Message 'Now searching for nearest match for Wildcards' -Component 'FindWildcardURL'
     foreach ($Object in $Script:WildCardURLs) {
-        Write-Log -Message "Searching for $($Object.url)" -Component 'FindWildcardURL'
-        <#
-        if ($Script:ManualURLs) {
-            $ManualURLMatch = $Script:ManualURLs | Where-Object { $_.url -like $URL }
-            if ($ManualURLMatch) {
-                Write-Log -Message 'Found match in CSV list for' -Component 'FindWildcardURL'
-                    $URLObject = [PSCustomObject]@{
-                    id                     = $ManualURLMatch[0].id
-                    serviceArea            = ''
-                    serviceAreaDisplayName = ''
-                    url                    = $ManualURLMatch[0].URL
-                    Port                   = $ManualURLMatch[0].port
-                    Protocol               = $ManualURLMatch[0].protocol
-                    expressRoute           = ''
-                    category               = ''
-                    required               = ''
-                    notes                  = ''
-                }
-                $FoundURL = $true
-            }
+        #Write-Log -Message "Searching for $($Object.url)" -Component 'FindWildcardURL' 
+        if ($($Script:M365ServiceURLs | Where-Object { $_.url -like "*$($Object.url.replace('*.',''))*" })) {
+            #if ($Object.url -in $Script:M365ServiceURLs.url) {
+            #Write-Log -Message 'Found match in M365 service list - looking up next URL' -Component 'FindWildcardURL'
+            continue
         }
-        #>        
-        if ($($Script:M365ServiceURLs | Where-Object { $_.url -like $Object.url })) {
-            Write-Log -Message 'Found match in M365 service list - looking up next URL' -Component 'FindWildcardURL'
-        } 
-        if (-not($FoundURL)) {
-            $URLObject = [PSCustomObject]@{
-                id                     = 8888
-                serviceArea            = $Object.serviceArea
-                serviceAreaDisplayName = $Object.serviceAreaDisplayName
-                url                    = $Object.url.replace('*.', '')
-                Port                   = $Object.port
-                Protocol               = $Object.protocol
-                expressRoute           = $Object.expressRoute
-                category               = $Object.category
-                required               = $Object.required
-                notes                  = $Object.notes
-            }
-            Write-Log -Message 'We did not find a matching URL using best effort (no wildcard)' -Component 'FindWildcardURL'
+        #Write-Log -Message 'We did not find a matching URL using best effort (no wildcard)' -Component 'FindWildcardURL'
+        $URLObject = [PSCustomObject]@{
+            id       = $Object.ID
+            #serviceArea            = $Object.serviceArea
+            #serviceAreaDisplayName = $Object.serviceAreaDisplayName
+            url      = $Object.url.replace('*.', '')
+            Port     = $Object.port
+            Protocol = $Object.protocol
+            #expressRoute           = $Object.expressRoute
+            #category               = $Object.category
+            required = $Object.required
+            #notes                  = $Object.notes
         }
+        
         $Script:M365ServiceURLs.Add($URLObject) | Out-Null
     }
 }
@@ -210,19 +225,22 @@ function Get-M365Service {
         foreach ($URL in $Object.urls) {
             foreach ($Port in $Ports) {
                 $URLObject = [PSCustomObject]@{
-                    id                     = $Object.id
-                    serviceArea            = $Object.serviceArea
-                    serviceAreaDisplayName = $Object.serviceAreaDisplayName
-                    url                    = $URL
-                    Port                   = $Port
-                    Protocol               = $Protocol
-                    expressRoute           = $Object.expressroute
-                    category               = $Object.category
-                    required               = $Object.required
-                    notes                  = $Object.notes
+                    id       = $Object.id
+                    #serviceArea            = $Object.serviceArea
+                    #serviceAreaDisplayName = $Object.serviceAreaDisplayName
+                    url      = $URL
+                    Port     = $Port
+                    Protocol = $Protocol
+                    #expressRoute           = $Object.expressroute
+                    #category               = $Object.category
+                    required = $Object.required
+                    #notes                  = $Object.notes
                 }
                 if ($URL -match '\*') {
-                    Write-Log -Message "The URI $URL contains a wildcard - trying to find nearest match later" -Component 'GetM365Service'
+                    #Write-Log -Message "The URI $URL contains a wildcard - trying to find nearest match later" -Component 'GetM365Service'
+                    if ($URL -in $Script:WildCardURLs.url) {
+                        continue
+                    }
                     $Script:WildCardURLs.add($URLObject) | Out-Null
                     continue
                 }
@@ -302,25 +320,57 @@ function Test-DNS {
     param(
         [string]$Target
     )
-    $ResolvedARecords = Resolve-DnsName -Name $Target -Type A -ErrorAction SilentlyContinue
-    if ($ResolvedARecords.count) {
-        foreach ($ARecord in $ResolvedARecords) {
-            if ($ARecord.IP4Address) {
-                if ($ARecord.IP4Address -ne '0.0.0.0' -and $ARecord.IP4Address -ne '127.0.0.1' -and $ARecord.IP4Address -ne '::') {
-                    return $true
-                } elseif ($ARecord.IP4Address -eq '0.0.0.0' -or $ARecord.IP4Address -eq '127.0.0.1' -or $ARecord.IP4Address -eq '::') {
-                    Write-Log -Message "DNS sinkhole detected: Address $Target resolved to an invalid address" -Component 'DNS' -Type 2
+    $result = $true
+    if ($Target -in $Script:DNSCache.CachedURL) {
+        $CachedResult = $Script:DNSCache | Where-Object { $_.CachedURL -eq $Target } | Select-Object -Property result
+        return $CachedResult.result
+    }
+    $ResolvedDNSRecords = Resolve-DnsName -Name $Target -ErrorAction SilentlyContinue
+    if ($ResolvedDNSRecords.count) {
+        foreach ($DNSARecord in $ResolvedDNSRecords.IP4Address) {
+            if ($DNSARecord.IP4Address) {
+                if ($DNSARecord -eq '0.0.0.0' -or $DNSARecord -eq '127.0.0.1') {
+                    Write-Log -Message "DNS sinkhole detected: Address $Target resolved to an invalid address" -Component 'TestDNS' -Type 2
+                    $result = $false
+                    break
                 }
             }
         }
+        foreach ($DNSAAAARecord in $ResolvedDNSRecords.IP6Address) {
+            if ($DNSAAAARecord -eq '::') {
+                Write-Log -Message "DNS sinkhole detected: Address $Target resolved to an invalid address" -Component 'TestDNS' -Type 2
+                $result = $false
+                break
+            }
+        }
+    } else {
+        Write-Log -Message "No DNS record found for $Target" -Component 'TestDNS' -Type 3
+        $result = $false
     }
-    return $false
+    $DNSObject = [PSCustomObject]@{
+        CachedURL = $Target
+        Result    = $result
+    }
+    $Script:DNSCache.add($DNSObject) | Out-Null
+    return $result
 }
 function Test-TCPPort {
     param(
         [string]$Target,
         [int]$Port
     )
+    if ($Target -in $Script:DNSCache.CachedURL) {
+        $DNSCachedResult = $Script:DNSCache | Where-Object { $_.CachedURL -eq $Target } | Select-Object -Property result -First 1
+        if (-not($DNSCachedResult.result)) {
+            return $false
+        }
+    }
+    if ($Target -in $Script:TCPCache.CachedURL -and $Port -in ($Script:TCPCache.Port | Where-Object { $_.CachedURL -eq $Target })) {
+        $TCPCachedResult = $Script:TCPCache | Where-Object { $_.CachedURL -eq $Target } | Select-Object -Property result -First 1
+        if (-not($TCPCachedResult.result)) {
+            return $false
+        }
+    }
     $TCPClient = New-Object -TypeName System.Net.Sockets.TCPClient
     $RunningClient = $TCPClient.ConnectAsync($Target, $Port)
     Start-Sleep -Milliseconds 100
@@ -329,7 +379,7 @@ function Test-TCPPort {
         if ($RunningClient.Status -ne 'RanToCompletion') {
             Write-Log "TCP Port test failed with $($RunningClient.Status)" -Component 'TestTCPPort' -Type 2
             if ($RunningClient.Exception.InnerException) {
-                Write-Log "$($RunningClient.Exception.InnerException)" -Component 'TestTCPPort'
+                Write-Log "$($RunningClient.Exception.InnerException.Message)" -Component 'TestTCPPort'
             }
         } else {
             $success = $true
@@ -339,37 +389,53 @@ function Test-TCPPort {
     }
     $TCPClient.Close()
     $TCPClient.Dispose()
+    $TCPObject = [PSCustomObject]@{
+        CachedURL = $Target
+        Port      = $Port
+        Result    = $result
+    }
+    $Script:TCPCache.add($TCPObject) | Out-Null
     return $success
 }
 function Test-UDPPort {
+    <#
+    .SYNOPSIS
+    This function is effectively not working correctly, because an UDP connection is stateless and we can't expect an answer from MS-Services
+    The only service that will ever answer, because it has to, is a NTP server. There are other ways to test that though see Test-NTP
+    HUGE thanks to https://github.com/proxb/PowerShell_Scripts/blob/master/Test-Port.ps1 and
+    Jannik Reinhard for the idea to use NTP to test UDP https://github.com/JayRHa/Intune-Scripts/blob/main/Check-AutopilotPrerequisites/Check-AutopilotPrerequisites.ps1#L145
+    #>
     param(
         [string]$Target,
         [int]$Port
     )
-    #HUGE thanks to https://github.com/proxb/PowerShell_Scripts/blob/master/Test-Port.ps1
-    #Create object for connecting to port on computer 
+    $NTPData = New-Object byte[] 48
+    $NTPData[0] = 27
     $udpobject = New-Object Net.Sockets.Udpclient([System.Net.Sockets.AddressFamily]::InterNetwork) 
-    #Set a timeout on receiving message
-    #$udpobject.client.SendTimeout = 500 #minimum!
     $udpobject.Client.Blocking = $False
     $udpobject.AllowNatTraversal($true)
     $Error.Clear()
     $udpobject.Connect($Target, $Port) | Out-Null
-    if($udpobject.client.Connected){
-        $ByteObject = new-object system.text.asciiencoding
-        $ByteString = $ByteObject.GetBytes("MEMNR connection test")
+    if ($udpobject.client.Connected) {
         Write-Log -Message 'Sending UDP test message' -Component 'TestUDPPort'
-        [void]$udpobject.Send($ByteString, $ByteString.length)
-    }
-    else{
-        Write-Log -Message 'No UDP connection established' -Component 'TestUDPPort'
-        Write-Log -Message "$($Error[0].ErrorRecord)" -Component 'TestUDPPort' -Type 2
+        [void]$udpobject.Send($NTPData, $NTPData.Length)
+        $remoteendpoint = New-Object system.net.ipendpoint([system.net.ipaddress]::Any, 0)
+        Start-Sleep -Milliseconds 100 #We have to wait slightly to send the data back
+        $TestData = $udpobject.Receive([ref]$remoteendpoint)
+    } else {
+        Write-Log -Message 'No UDP "connection" established' -Component 'TestUDPPort'
+        Write-Log -Message "$($Error[0].Exception.InnerException.Message)" -Component 'TestUDPPort' -Type 2
         return $false
     }
-    $udpobject.client.Connected
-    $udpobject.client.SocketType
     $udpobject.Close()
     $udpobject.Dispose()
+    if ($TestData) {
+        $Seconds = [BitConverter]::ToUInt32( $TestData[43..40], 0 )
+        ( [datetime]'1/1/1900' ).AddSeconds( $Seconds ).ToLocalTime()
+    } else {
+        Write-Log -Message 'Did not receive a response' -Component 'TestUDPPort' -Type 2
+        return $false
+    }
     return $true
 }
 function Test-CRL {}
@@ -489,7 +555,13 @@ function Test-DeviceHealth {
     #ServiceIDs 186
 }
 function Test-DeliveryOptimization {
+    <#param(
+        $target,
+        $port
+    )
+    #>
     <#
+    https://remyhax.xyz/posts/do-harm/ - in depth article about how DO is communicating
     #("*.do.dsp.mp.microsoft.com", (443))
     "*.dl.delivery.mp.microsoft.com", 443
     #"*.emdl.ws.microsoft.com", 443
@@ -502,11 +574,74 @@ function Test-DeliveryOptimization {
     #ServiceIDs 172,164
     #Port 7680 is used to listen to other clients requests (on host)
     #Port 3544 UDP is needed for Download Mode 2 and 3 in _and_ outbound
+    $result = $true
     Write-Log 'Documentation will specify port 7680 TCP. This is used to listen to other clients requests (from the host)' -Component 'TestDO'
     $Listening = Get-NetTCPConnection -LocalPort 7680
-    if ($Listening) {
-        return $true
+    if (-not($Listening)) {
+        Write-Log 'TCP Port 7680 not being listed as listening checking service' -Component 'TestDO'
+        if (-not(Get-Service -Name DoSvc)) {
+            Write-Log 'DoSvc is not running! No delivery optimization possible' -Component 'TestDO' -Type 2
+            $result = 'Warning'
+        }
     }
+
+    $DeliveryOptimization = (172, 164) | ForEach-Object { Get-URLsFromID -ID $_ -FilterPort 7680, 3544 }
+    if (-not($DeliveryOptimization)) {
+        Write-Log -Message 'No matching ID found for service area: Delivery Optimization' -Component 'TestDO' -Type 3
+        return $false
+    }
+    foreach ($DOTarget in $Script:URLsToVerify) {
+        $DNS = Test-DNS -Target $DOTarget.url
+        if ($DNS) {
+            $TCP = Test-TCPPort -Target $DOTarget.url -Port $DOTarget.port
+            #Add more tests here if required!
+        } else {
+            $TCP = $false
+        }
+        if ($DNS -xor $TCP) {
+            $result = $false
+            #Write-Log -Message "The FQDN $($DOTarget.url) was not detected successfully" -Component 'TestDO' -Type 3
+        } else {
+            #Write-Log -Message "$($DOTarget.url)" -Component 'TestDO' -Type 4
+        }
+        $DOTarget | Add-Member -Name 'DNSResult' -MemberType NoteProperty -Value $DNS
+        $DOTarget | Add-Member -Name 'TCPResult' -MemberType NoteProperty -Value $TCP
+        #TODO: RESULTS APPEAR TO BE ADDED MULTIPLE TIMES - WHY!
+        $Script:FinalResultList.add($DOTarget) | Out-Null
+    }
+    return $result
+
+    #TODO: CHECK THIS!
+    #Last Check 24.06.24 - This should use a TCP connection, but if that's the case we'd need to find another client which we don't have.
+    <#
+        $DOMessage = ''
+    $DOMessage += '0E 53 77 61 72 6D 20 70 72 6F 74 6F 63 6F 6C 00'.replace(' ', '')
+    $DOMessage += '00 00 00 00 10 00 00 D9 A5 89 6D 90 26 67 C8 75'.replace(' ', '')
+    $DOMessage += 'BC 5D 7C FE 87 32 36 F3 9C E5 A0 1E 11 F2 7B FE'.replace(' ', '')
+    $DOMessage += '5F 18 FE B7 FE 23 F4 A0 5B EC F6 12 66 C0 41 BB'.replace(' ', '')
+    $DOMessage += '0B C4 BA CF 17 AB 61 00 00 00 00               '.replace(' ', '')
+    $DOMessage = [System.Convert]::FromHexString($DOMessage)
+    #[System.BitConverter]::ToString($message).Replace('-')
+    $udpobject = New-Object Net.Sockets.Udpclient([System.Net.Sockets.AddressFamily]::InterNetwork) 
+    $udpobject.Client.Blocking = $False
+    $udpobject.AllowNatTraversal($true)
+    $Error.Clear()
+    $udpobject.Connect($Target, $Port) | Out-Null
+    if ($udpobject.client.Connected) {
+        Write-Log -Message 'Sending UDP test message' -Component 'TestUDPPort'
+        [void]$udpobject.Send($DOMessage, $DOMessage.Length)
+        $remoteendpoint = New-Object system.net.ipendpoint([system.net.ipaddress]::Any, 0)
+        Start-Sleep -Milliseconds 100 #We have to wait slightly to send the data back
+        $TestData = $udpobject.Receive([ref]$remoteendpoint)
+    } else {
+        Write-Log -Message 'No UDP "connection" established' -Component 'TestUDPPort'
+        Write-Log -Message "$($Error[0].Exception.InnerException.Message)" -Component 'TestUDPPort' -Type 2
+        return $false
+    }
+    $TestData
+    $udpobject.Close()
+    $udpobject.Dispose()
+    #>
 }
 function Test-Intune {
     param(
@@ -607,7 +742,6 @@ function Test-WindowsUpdate {
     #>
     Test-DeliveryOptimization
 }
-
 function Test-NTP {
     #ServiceIDs 165
     #probably w32tm /stripchart /computer:time.windows.com /dataonly /samples:3
@@ -715,16 +849,18 @@ function Test-SSLInspection {
 
 #Start coding!
 Initialize-Script
-Test-UDPPort "noctua.local" -Port 55555
-Test-UDPPort "noctua.local" -Port 7680
-Test-UDPPort "time.windows.com" -Port 123
-Test-UDPPort "5-courier.push.apple.com" -Port 5223
-Test-UDPPort "asdiubfaoisdbfg.com" -Port 15415
+
+#Test-UDPPort "noctua.local" -Port 55555
+#Test-UDPPort "time.windows.com" -Port 123
+#Test-UDPPort "time.windows.com" -Port 123
+#Test-UDPPort "5-courier.push.apple.com" -Port 5223
+#Test-UDPPort "asdiubfaoisdbfg.com" -Port 15415
+
 if ($UseCustomCSV) {
-    #Import-NetworkRequirementCSV
+    Import-NetworkRequirementCSV
 }
 if ($UseMSJSON) {
-    #Get-M365Service -MEM
+    Get-M365Service -MEM
 }
 if ($AllTargetTest) {
     Set-Variable $Intune, $Autopilot, $WindowsActivation, $EntraID, $WindowsUpdate, $DeliveryOptimization, $NTP, $DNS, $DiagnosticsData, $NCSI, $WNS, $WindowsStore, $M365, $CRLs, $SelfDeploying, $Legacy -Value $true
@@ -732,6 +868,9 @@ if ($AllTargetTest) {
 if ($AllTests) {
     $TestMethods = 'AllTests'
 }
+Test-DeliveryOptimization
+
+$Script:FinalResultList | Out-GridView
 #Build-Factory $TestMethods #This should create the final URL list and prepare the selected tests
 
 <#if($UseMSJSON -and $UseCustomCSV){
