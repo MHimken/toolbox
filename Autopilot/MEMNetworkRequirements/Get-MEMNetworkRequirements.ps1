@@ -1,13 +1,12 @@
 <#
 .SYNOPSIS
 This is not finished!
-#TODO: Handle Wildcard URLs
 .DESCRIPTION
 .NOTES
-    Version: 0.4
+    Version: 0.5
     Versionname: 
     Intial creation date: 19.02.2024
-    Last change date: 26.06.2024
+    Last change date: 01.07.2024
     Latest changes: https://github.com/MHimken/WinRE-Customization/blob/main/changelog.md
 #>
 [CmdletBinding()]
@@ -15,6 +14,8 @@ param(
     [System.IO.DirectoryInfo]$WorkingDirectory = "C:\MEMNR\",
     [System.IO.DirectoryInfo]$LogDirectory = "C:\MEMNR\",
     [string]$CSVFile = "Get-MEMNetworkRequirements.csv",
+    [int]$MaxDelayInMS = 200,
+    [bool]$BurstMode = $false, #Divide the delay by 50 and try different speeds. Give warning when more than 10 URLs are tested
     [bool]$UseMSJSON = $true, # make this a switch when finished
     [bool]$UseCustomCSV = $true, # make this a switch when finished
     [bool]$AllowBestEffort = $true, # make this a switch when finished
@@ -33,6 +34,7 @@ param(
     [switch]$WindowsStore,
     [switch]$M365,
     [switch]$CRLs,
+    [bool]$CheckCertRevocation = $true, # make this a switch when finished
     [switch]$SelfDeploying,
     [switch]$Legacy,
     [switch]$NoLog,
@@ -156,7 +158,7 @@ function Get-URLsFromID {
             }
         }
     }
-    $DuplicateURLsToVerify | ForEach-Object{$Script:URLsToVerify.Remove($_)}
+    $DuplicateURLsToVerify | ForEach-Object { $Script:URLsToVerify.Remove($_) }
 
     #Cleanup of dupes
     return $true
@@ -255,44 +257,52 @@ function Get-M365Service {
 }
 
 # Usage: CheckSSL <fully-qualified-domain-name>
-function Confirm-SSL {
-    #[System.Uri] Maybe needed?
-    #Source: https://learn.microsoft.com/en-us/troubleshoot/azure/azure-monitor/log-analytics/ssl-connectivity-mma-windows-powershell
-    #Modified by Martin Himken for the purpose of this script
+function Test-SSL {
     param(
-        $FQDN, 
-        $Port)
+        $Target, 
+        $Port = 443
+    )
+    #try {
+    #
+    #} catch {
+    #Write-Warning "$($_.Exception.Message) / $FQDN"
+    #return $false
+    #}
+    $TCPSocket = New-Object Net.Sockets.TcpClient($Target, $Port)
+    #$TCPStream = 
+    $SSLStream = New-Object -TypeName Net.Security.SslStream($TCPSocket.GetStream(), $false)
+    # $SSLStream.AuthenticateAsClient($FQDN)  # If not valid, will display "remote certificate is invalid".
     try {
-        $TCPSocket = New-Object Net.Sockets.TcpClient($FQDN, $Port)
-    } catch {
-        Write-Warning "$($_.Exception.Message) / $FQDN"
-        return $false
+        $SSLStream.AuthenticateAsClient(
+            $Target, #targetHost
+            $null, #clientCertificates (Collection)
+            $true #checkCertificateRevocation
+        )
+    } catch [System.Security.Authentication.AuthenticationException] {
+        #ToDo: Check other OS languages! We might have to switch to working with something else here
+        switch -Wildcard ($Error[0].Exception.InnerException.Message) {
+            "Cannot determine the frame size or a corrupted frame was received."{$AuthException = "FramSizeOrCorrupted"}
+            "*TLS alert: 'HandshakeFailure'." { $AuthException = "HandshakeFailure" }
+            "*validation procedure: RemoteCertificateNameMismatch" { $AuthException = "RemoteCertificateNameMismatch" }
+            default { $AuthException = $Error[0].Exception.InnerException.Message.Split(':')[1].Trim() }
+        }
     }
-    $TCPStream = $TCPSocket.GetStream()
-    #""; "-- Target: $FQDN / " + $tcpSocket.Client.RemoteEndPoint.Address.IPAddressToString
-    $SSLStream = New-Object -TypeName Net.Security.SslStream($TCPStream, $false)
-    $SSLStream.AuthenticateAsClient($FQDN)  # If not valid, will display "remote certificate is invalid".
+    #$CRLInfo = New-Object -TypeName Security.Cryptography.X509Certificates
     $CertInfo = New-Object -TypeName Security.Cryptography.X509Certificates.X509Certificate2($SSLStream.RemoteCertificate)
-    
+    #$RevocationList = New-Object -TypeName Security.Cryptography.X509Certificates.
     #$SSLStream | Select-Object | Format-List -Property SslProtocol, CipherAlgorithm, HashAlgorithm, KeyExchangeAlgorithm, IsAuthenticated, IsEncrypted, IsSigned, CheckCertRevocationStatus
     #$CertInfo | Format-List -Property Subject, Issuer, FriendlyName, NotBefore, NotAfter, Thumbprint
     #$CertInfo.Extensions |  Where-Object -FilterScript { $_.Oid.FriendlyName -Like 'subject alt*' } | ForEach-Object -Process { $_.Oid.FriendlyName; $_.Format($true) }
     if (Test-Certificate -DNSName $FQDN -Cert $CertInfo) {
-        Write-Log "Certificate for $FQDN successfully verified"
+        #Write-Log "Certificate for $FQDN successfully verified"
     }
-    $tcpSocket.Close()
-    return $true 
-
-    <# from Connor aka dreary_ennui
-$url = "https://www.microsoft.com"
-$request = [System.Net.WebRequest]::Create($url)
-$request.GetResponse() | Out-Null
-$certDetails = $request.ServicePoint.Certificate
-
-if (($certDetails.issuer -notlike "*Microsoft*") -or ($null -eq $certDetails.issuer)) {
-    Write-Output "Probably SSL inspected"
-}
-}#>
+    #$tcpSocket.Close()
+    $Results = [PSCustomObject]@{
+        SSLProtocol   = $SSLStream.SslProtocol
+        Issuer        = $CertInfo.Issuer
+        AuthException = $AuthException
+    }
+    return $Results
 }
 function Test-HTTP {
     <#
@@ -357,23 +367,29 @@ function Test-DNS {
 function Test-TCPPort {
     param(
         [string]$Target,
-        [int]$Port
+        [int]$Port,
+        [int]$MaxWaitTime
     )
+    if (-not($MaxWaitTime)) {
+        $MaxWaitTime = 150
+    }
     if ($Target -in $Script:DNSCache.CachedURL) {
         $DNSCachedResult = $Script:DNSCache | Where-Object { $_.CachedURL -eq $Target } | Select-Object -Property result -First 1
         if (-not($DNSCachedResult.result)) {
             return $false
         }
     }
-    if ($Target -in $Script:TCPCache.CachedURL -and $Port -in ($Script:TCPCache.Port | Where-Object { $_.CachedURL -eq $Target })) {
-        $TCPCachedResult = $Script:TCPCache | Where-Object { $_.CachedURL -eq $Target } | Select-Object -Property result -First 1
-        if (-not($TCPCachedResult.result)) {
-            return $false
+    if (-not($BurstMode)) {
+        if ($Target -in $Script:TCPCache.CachedURL -and $Port -in ($Script:TCPCache.Port | Where-Object { $_.CachedURL -eq $Target })) {
+            $TCPCachedResult = $Script:TCPCache | Where-Object { $_.CachedURL -eq $Target } | Select-Object -Property result -First 1
+            if (-not($TCPCachedResult.result)) {
+                return $false
+            }
         }
     }
     $TCPClient = New-Object -TypeName System.Net.Sockets.TCPClient
     $RunningClient = $TCPClient.ConnectAsync($Target, $Port)
-    Start-Sleep -Milliseconds 100
+    Start-Sleep -Milliseconds $MaxWaitTime
     $success = $false 
     if ($RunningClient.IsCompleted) {
         if ($RunningClient.Status -ne 'RanToCompletion') {
@@ -389,12 +405,14 @@ function Test-TCPPort {
     }
     $TCPClient.Close()
     $TCPClient.Dispose()
-    $TCPObject = [PSCustomObject]@{
-        CachedURL = $Target
-        Port      = $Port
-        Result    = $result
+    if (-not($BurstMode)) {
+        $TCPObject = [PSCustomObject]@{
+            CachedURL = $Target
+            Port      = $Port
+            Result    = $result
+        }
+        $Script:TCPCache.add($TCPObject) | Out-Null
     }
-    $Script:TCPCache.add($TCPObject) | Out-Null
     return $success
 }
 function Test-UDPPort {
@@ -437,6 +455,18 @@ function Test-UDPPort {
         return $false
     }
     return $true
+}
+function Test-TCPBurstMode {
+    param(
+        $WorkObject
+    )
+    $MinimumWaitTime = 50
+    $AmountofTimes = [math]::floor([decimal]($MaxDelayInMS / $MinimumWaitTime))
+    for ($i = 1; $i -lt $AmountofTimes + 1; $i++) {
+        $MaxWaitTime = $($MinimumWaitTime * $i)
+        $TCPResult = Test-TCPPort -Target $WorkObject.url -Port $WorkObject.port -MaxWaitTime $MaxWaitTime
+        $WorkObject | Add-Member -MemberType NoteProperty -Name "TCP$MaxWaitTime" -Value $TCPResult
+    }
 }
 function Test-CRL {}
 function Test-RemoteHelp {
@@ -584,7 +614,6 @@ function Test-DeliveryOptimization {
             $result = 'Warning'
         }
     }
-
     $DeliveryOptimization = (172, 164) | ForEach-Object { Get-URLsFromID -ID $_ -FilterPort 7680, 3544 }
     if (-not($DeliveryOptimization)) {
         Write-Log -Message 'No matching ID found for service area: Delivery Optimization' -Component 'TestDO' -Type 3
@@ -592,21 +621,34 @@ function Test-DeliveryOptimization {
     }
     foreach ($DOTarget in $Script:URLsToVerify) {
         $DNS = Test-DNS -Target $DOTarget.url
+        $DOTarget | Add-Member -Name 'DNSResult' -MemberType NoteProperty -Value $DNS
         if ($DNS) {
-            $TCP = Test-TCPPort -Target $DOTarget.url -Port $DOTarget.port
-            #Add more tests here if required!
+            if ($BurstMode) {
+                Test-TCPBurstMode $DOTarget
+            } else {
+                $TCP = Test-TCPPort -Target $DOTarget.url -Port $DOTarget.port
+                if ($TCP) {
+                    $SSLTest = Test-SSL -Target $DOTarget.url -Port $DOTarget.port
+                    $DOTarget | Add-Member -Name 'SSLProtocol' -MemberType NoteProperty -Value $SSLTest.SSLProtocol
+                    $DOTarget | Add-Member -Name 'Issuer' -MemberType NoteProperty -Value $SSLTest.Issuer
+                    if ($SSLTest.AuthException) {
+                        $DOTarget | Add-Member -Name 'AuthException' -MemberType NoteProperty -Value $SSLTest.AuthException
+                    }
+                }
+                #Add more tests here if required! Most tests won't work with BURSTMODE ...??
+            }
         } else {
             $TCP = $false
         }
+        <#
         if ($DNS -xor $TCP) {
             $result = $false
             #Write-Log -Message "The FQDN $($DOTarget.url) was not detected successfully" -Component 'TestDO' -Type 3
         } else {
             #Write-Log -Message "$($DOTarget.url)" -Component 'TestDO' -Type 4
         }
-        $DOTarget | Add-Member -Name 'DNSResult' -MemberType NoteProperty -Value $DNS
-        $DOTarget | Add-Member -Name 'TCPResult' -MemberType NoteProperty -Value $TCP
-        #TODO: RESULTS APPEAR TO BE ADDED MULTIPLE TIMES - WHY!
+        #>
+        if (-not($BurstMode)) { $DOTarget | Add-Member -Name 'TCPResult' -MemberType NoteProperty -Value $TCP }
         $Script:FinalResultList.add($DOTarget) | Out-Null
     }
     return $result
@@ -869,7 +911,12 @@ if ($AllTests) {
     $TestMethods = 'AllTests'
 }
 Test-DeliveryOptimization
+#Test-SSL -Target untrusted-root.badssl.com -Port 443
 
+#ToDo: Out-Gridview
+# * 3 modes by default only show "true/false"
+# * second mode shows a little more detail like certificate information
+# * third mode shows all errors?
 $Script:FinalResultList | Out-GridView
 #Build-Factory $TestMethods #This should create the final URL list and prepare the selected tests
 
