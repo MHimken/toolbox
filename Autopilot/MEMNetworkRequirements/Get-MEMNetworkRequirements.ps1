@@ -3,10 +3,10 @@
 This is not finished!
 .DESCRIPTION
 .NOTES
-    Version: 0.5
+    Version: 0.6
     Versionname: 
     Intial creation date: 19.02.2024
-    Last change date: 01.07.2024
+    Last change date: 09.07.2024
     Latest changes: https://github.com/MHimken/WinRE-Customization/blob/main/changelog.md
 #>
 [CmdletBinding()]
@@ -89,14 +89,13 @@ function Write-Log {
         [Parameter(Mandatory = $false)]
         $Message,
         $Component,
-        # Type: 1 = Normal, 2 = Warning (yellow), 3 = Error (red), 4 = Explicit Success (not CM!)
-        [ValidateSet('1', '2', '3', '4')][int]$Type
+        # Type: 1 = Normal, 2 = Warning (yellow), 3 = Error (red)
+        [ValidateSet('1', '2', '3')][int]$Type
     )
     if (-not($NoLog)) {
         $Time = Get-Date -Format 'HH:mm:ss.ffffff'
         $Date = Get-Date -Format 'MM-dd-yyyy'
         if (-not($Component)) { $Component = 'Runner' }
-        if (-not($Type) -or $Type -eq 4) { $Type = 1 }
         if (-not($ToConsole)) {
             $LogMessage = "<![LOG[$Message" + "]LOG]!><time=`"$Time`" date=`"$Date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"`" file=`"`">"
             $LogMessage | Out-File -Append -Encoding UTF8 -FilePath $LogFile
@@ -105,7 +104,6 @@ function Write-Log {
                 1 { Write-Host "T:$Type C:$Component M:$Message" }
                 2 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Yellow -ForegroundColor Black }
                 3 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Red -ForegroundColor White }
-                4 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Green -ForegroundColor White ; $Type = 1; }
                 default { Write-Host "T:$Type C:$Component M:$Message" }
             }
         }
@@ -256,22 +254,13 @@ function Get-M365Service {
     }
 }
 
-# Usage: CheckSSL <fully-qualified-domain-name>
 function Test-SSL {
     param(
         $Target, 
         $Port = 443
     )
-    #try {
-    #
-    #} catch {
-    #Write-Warning "$($_.Exception.Message) / $FQDN"
-    #return $false
-    #}
     $TCPSocket = New-Object Net.Sockets.TcpClient($Target, $Port)
-    #$TCPStream = 
     $SSLStream = New-Object -TypeName Net.Security.SslStream($TCPSocket.GetStream(), $false)
-    # $SSLStream.AuthenticateAsClient($FQDN)  # If not valid, will display "remote certificate is invalid".
     try {
         $SSLStream.AuthenticateAsClient(
             $Target, #targetHost
@@ -279,28 +268,49 @@ function Test-SSL {
             $true #checkCertificateRevocation
         )
     } catch [System.Security.Authentication.AuthenticationException] {
-        #ToDo: Check other OS languages! We might have to switch to working with something else here
-        switch -Wildcard ($Error[0].Exception.InnerException.Message) {
-            "Cannot determine the frame size or a corrupted frame was received."{$AuthException = "FramSizeOrCorrupted"}
-            "*TLS alert: 'HandshakeFailure'." { $AuthException = "HandshakeFailure" }
-            "*validation procedure: RemoteCertificateNameMismatch" { $AuthException = "RemoteCertificateNameMismatch" }
-            default { $AuthException = $Error[0].Exception.InnerException.Message.Split(':')[1].Trim() }
+        #THIS ONLY WORKS IN PS7!!
+        if ($PSVersionTable.psversion.major -ge 7) {
+            switch -Wildcard ($Error[0].Exception.InnerException.Message) {
+                "Cannot determine the frame size or a corrupted frame was received." { $AuthException = "FrameSizeOrCorrupted" }
+                "*TLS alert: 'HandshakeFailure'." { $AuthException = "HandshakeFailure" }
+                "*validation procedure: RemoteCertificateNameMismatch" { $AuthException = "RemoteCertificateNameMismatch" }
+                default { $AuthException = $Error[0].Exception.InnerException.Message.Split(':')[1].Trim() }
+            } 
+        } else {
+            Write-Log -Message 'Cannot determine exact certificate failure, defaults to "failed"' -Component 'TestSSL' -Type 2
+            $AuthException = "Failed"
         }
+    } catch [System.Management.Automation.MethodInvocationException] {
+        #TODO - Add a handler for random crashes of the tcp.socket
+        Write-Log -Message 'The TCP socket closed unexpectedly. This could be random, repeat this test.' -Type 2 -Component 'TestSSL'
     }
-    #$CRLInfo = New-Object -TypeName Security.Cryptography.X509Certificates
+
     $CertInfo = New-Object -TypeName Security.Cryptography.X509Certificates.X509Certificate2($SSLStream.RemoteCertificate)
+    #$Test = New-Object -TypeName System.Net.Security.SslStreamCertificateContext.create($CertInfo)
+    if ($CertInfo.Thumbprint) {
+        Write-Log -Message 'Grabbing CRL and verify against known-good' -Component 'TestSSL'
+        #TODO: Check CRL against ID 124 and ID 84 from JSON
+        $CRLURI = ($CertInfo.Extensions |  Where-Object -FilterScript { $_.Oid.FriendlyName -Like 'CRL*' } | ForEach-Object -Process { $_.Oid.FriendlyName; $_.Format($true) }).split('(')[2].split(')')[0]
+        $CRLResult = Test-CRL $CRLURI
+    }
+    
     #$RevocationList = New-Object -TypeName Security.Cryptography.X509Certificates.
     #$SSLStream | Select-Object | Format-List -Property SslProtocol, CipherAlgorithm, HashAlgorithm, KeyExchangeAlgorithm, IsAuthenticated, IsEncrypted, IsSigned, CheckCertRevocationStatus
     #$CertInfo | Format-List -Property Subject, Issuer, FriendlyName, NotBefore, NotAfter, Thumbprint
     #$CertInfo.Extensions |  Where-Object -FilterScript { $_.Oid.FriendlyName -Like 'subject alt*' } | ForEach-Object -Process { $_.Oid.FriendlyName; $_.Format($true) }
+    #$CRL = ($CertInfo.Extensions |  Where-Object -FilterScript { $_.Oid.FriendlyName -Like 'crl*' } | ForEach-Object -Process { $_.Oid.FriendlyName; $_.Format($true) }).Split(
+    <#
     if (Test-Certificate -DNSName $FQDN -Cert $CertInfo) {
-        #Write-Log "Certificate for $FQDN successfully verified"
+        Write-Log "Certificate for $FQDN successfully verified"
     }
-    #$tcpSocket.Close()
+    #>
+
+    $tcpSocket.Close()
     $Results = [PSCustomObject]@{
-        SSLProtocol   = $SSLStream.SslProtocol
-        Issuer        = $CertInfo.Issuer
-        AuthException = $AuthException
+        SSLProtocol     = $SSLStream.SslProtocol
+        Issuer          = $CertInfo.Issuer
+        AuthException   = $AuthException
+        SSLInterception = $CRLResult
     }
     return $Results
 }
@@ -468,7 +478,26 @@ function Test-TCPBurstMode {
         $WorkObject | Add-Member -MemberType NoteProperty -Name "TCP$MaxWaitTime" -Value $TCPResult
     }
 }
-function Test-CRL {}
+function Test-CRL {
+    #Verify CRL against known good - this is an indicator for SSLInspection
+    param(
+        [string]$CRLURL
+    )
+    $CRLCheckresult = $true
+    $CRLURLsToCheck = [System.Collections.ArrayList]::new()
+    if ($Script:ManualURLs) {
+        $Script:ManualURLs | Where-Object { $_.id -in "125", "84" } | ForEach-Object { $CRLURLsToCheck.add($_) | Out-Null }
+    }
+    if ($Script:M365ServiceURLs) {
+        $Script:M365ServiceURLs | Where-Object { $_.id -in "125", "84" } | ForEach-Object { $CRLURLsToCheck.add($_) | Out-Null }
+    }
+    foreach ($URL in $CRLURLsToCheck.url) {
+        if ($CRLURL -like $("*" + $URL + "*")) {
+            $CRLCheckresult = $false
+        }
+    }
+    return $CRLCheckresult
+}
 function Test-RemoteHelp {
     <#
         #181
@@ -633,6 +662,9 @@ function Test-DeliveryOptimization {
                     $DOTarget | Add-Member -Name 'Issuer' -MemberType NoteProperty -Value $SSLTest.Issuer
                     if ($SSLTest.AuthException) {
                         $DOTarget | Add-Member -Name 'AuthException' -MemberType NoteProperty -Value $SSLTest.AuthException
+                    }
+                    if ($null -ne $SSLTest.SSLInterception){
+                        $DOTarget | Add-Member -Name 'SSLInterception' -MemberType NoteProperty -Value $SSLTest.SSLInterception
                     }
                 }
                 #Add more tests here if required! Most tests won't work with BURSTMODE ...??
@@ -912,7 +944,8 @@ if ($AllTests) {
 }
 Test-DeliveryOptimization
 #Test-SSL -Target untrusted-root.badssl.com -Port 443
-
+#Test-SSL -Target revoked.badssl.com -Port 443
+#Test-SSL -Target manima.de -Port 443
 #ToDo: Out-Gridview
 # * 3 modes by default only show "true/false"
 # * second mode shows a little more detail like certificate information
