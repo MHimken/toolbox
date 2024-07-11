@@ -3,10 +3,10 @@
 This is not finished!
 .DESCRIPTION
 .NOTES
-    Version: 0.6
+    Version: 0.7
     Versionname: 
     Intial creation date: 19.02.2024
-    Last change date: 09.07.2024
+    Last change date: 11.07.2024
     Latest changes: https://github.com/MHimken/WinRE-Customization/blob/main/changelog.md
 #>
 [CmdletBinding()]
@@ -14,7 +14,7 @@ param(
     [System.IO.DirectoryInfo]$WorkingDirectory = "C:\MEMNR\",
     [System.IO.DirectoryInfo]$LogDirectory = "C:\MEMNR\",
     [string]$CSVFile = "Get-MEMNetworkRequirements.csv",
-    [int]$MaxDelayInMS = 200,
+    [int]$MaxDelayInMS = 300,
     [bool]$BurstMode = $false, #Divide the delay by 50 and try different speeds. Give warning when more than 10 URLs are tested
     [bool]$UseMSJSON = $true, # make this a switch when finished
     [bool]$UseCustomCSV = $true, # make this a switch when finished
@@ -256,14 +256,14 @@ function Get-M365Service {
 
 function Test-SSL {
     param(
-        $Target, 
-        $Port = 443
+        $SSLTarget, 
+        $SSLPort = 443
     )
-    $TCPSocket = New-Object Net.Sockets.TcpClient($Target, $Port)
+    $TCPSocket = New-Object Net.Sockets.TcpClient($SSLTarget, $SSLPort)
     $SSLStream = New-Object -TypeName Net.Security.SslStream($TCPSocket.GetStream(), $false)
     try {
         $SSLStream.AuthenticateAsClient(
-            $Target, #targetHost
+            $SSLTarget, #targetHost
             $null, #clientCertificates (Collection)
             $true #checkCertificateRevocation
         )
@@ -289,7 +289,6 @@ function Test-SSL {
     #$Test = New-Object -TypeName System.Net.Security.SslStreamCertificateContext.create($CertInfo)
     if ($CertInfo.Thumbprint) {
         Write-Log -Message 'Grabbing CRL and verify against known-good' -Component 'TestSSL'
-        #TODO: Check CRL against ID 124 and ID 84 from JSON
         $CRLURI = ($CertInfo.Extensions |  Where-Object -FilterScript { $_.Oid.FriendlyName -Like 'CRL*' } | ForEach-Object -Process { $_.Oid.FriendlyName; $_.Format($true) }).split('(')[2].split(')')[0]
         $CRLResult = Test-CRL $CRLURI
     }
@@ -305,7 +304,8 @@ function Test-SSL {
     }
     #>
 
-    $tcpSocket.Close()
+    $TCPSocket.Close()
+    $TCPSocket.Dispose()
     $Results = [PSCustomObject]@{
         SSLProtocol     = $SSLStream.SslProtocol
         Issuer          = $CertInfo.Issuer
@@ -314,26 +314,12 @@ function Test-SSL {
     }
     return $Results
 }
-function Test-HTTP {
-    <#
-    Extended = also verify different HTTP-Versions
-    #>
+function Test-HTTPs {
     param(
-        [System.Uri]$URL,
-        [int]$Port,
-        [switch]$extended
+        [System.Uri]$URL
     )
-    if (Test-DNS $URL) {
-        $HTTPResult = Test-NetConnection -ComputerName $URL -CommonTCPPort HTTP -InformationLevel Quiet
-        $HTTPSResult = Test-NetConnection -ComputerName $URL -Port 443 -InformationLevel Quiet
-        #Wird so nicht funktionieren - 
-        $HTTPiwr = Invoke-WebRequest -Uri 'https://'+$URL -SslProtocol Tls12 -ConnectionTimeoutSeconds 5 -Method Get 
-        if ($HTTPResult -and $HTTPSResult) {
-            return $true
-        } else {
-            return $false
-        }
-    }
+    $HTTPiwr = Invoke-WebRequest -Uri $('https://' + $URL) -ConnectionTimeoutSeconds $(($MaxDelayInMS / 100)) -Method Get -SkipHttpErrorCheck
+    return $HTTPiwr.StatusCode
 }
 function Test-DNS {
     #Verify answer isn't 0.0.0.0 or 127.0.0.1 or ::
@@ -657,13 +643,14 @@ function Test-DeliveryOptimization {
             } else {
                 $TCP = Test-TCPPort -Target $DOTarget.url -Port $DOTarget.port
                 if ($TCP) {
-                    $SSLTest = Test-SSL -Target $DOTarget.url -Port $DOTarget.port
+                    if (-not($BurstMode)) { $DOTarget | Add-Member -Name 'TCPResult' -MemberType NoteProperty -Value $TCP }
+                    $SSLTest = Test-SSL -SSLTarget $DOTarget.url -SSLPort $DOTarget.port
                     $DOTarget | Add-Member -Name 'SSLProtocol' -MemberType NoteProperty -Value $SSLTest.SSLProtocol
                     $DOTarget | Add-Member -Name 'Issuer' -MemberType NoteProperty -Value $SSLTest.Issuer
                     if ($SSLTest.AuthException) {
                         $DOTarget | Add-Member -Name 'AuthException' -MemberType NoteProperty -Value $SSLTest.AuthException
                     }
-                    if ($null -ne $SSLTest.SSLInterception){
+                    if ($null -ne $SSLTest.SSLInterception) {
                         $DOTarget | Add-Member -Name 'SSLInterception' -MemberType NoteProperty -Value $SSLTest.SSLInterception
                     }
                 }
@@ -680,7 +667,6 @@ function Test-DeliveryOptimization {
             #Write-Log -Message "$($DOTarget.url)" -Component 'TestDO' -Type 4
         }
         #>
-        if (-not($BurstMode)) { $DOTarget | Add-Member -Name 'TCPResult' -MemberType NoteProperty -Value $TCP }
         $Script:FinalResultList.add($DOTarget) | Out-Null
     }
     return $result
@@ -823,6 +809,7 @@ function Test-NTP {
     #"time.windows.com", "123" #NTP and SNTP both use this
     Write-Log 'Microsofts JSON claims more URLs for Port 123, where in reality its only time.windows.com' -Component 'TestNTP' -Type 2
     $CurrentTimeServer = w32tm /query /source
+    #ToDo: Maybe also check the ACTUAL timeserver?
     $TimeTest = w32tm /stripchart /computer:time.windows.com /dataonly /samples:3
     if ($TimeTest -like "*80072AF9*" -or $TimeTest[3 - ($TimeTest.count)] -like "*800705B4*") {
         return $false
@@ -942,7 +929,10 @@ if ($AllTargetTest) {
 if ($AllTests) {
     $TestMethods = 'AllTests'
 }
-Test-DeliveryOptimization
+#Test-DeliveryOptimization
+Test-HTTPs "httpstat.us/204"
+Test-HTTPs "httpstat.us/503"
+Test-HTTPs "httpstat.us/200"
 #Test-SSL -Target untrusted-root.badssl.com -Port 443
 #Test-SSL -Target revoked.badssl.com -Port 443
 #Test-SSL -Target manima.de -Port 443
