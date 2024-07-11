@@ -318,8 +318,16 @@ function Test-HTTPs {
     param(
         [System.Uri]$URL
     )
-    $HTTPiwr = Invoke-WebRequest -Uri $('https://' + $URL) -ConnectionTimeoutSeconds $(($MaxDelayInMS / 100)) -Method Get -SkipHttpErrorCheck
-    return $HTTPiwr.StatusCode
+    try {
+        $HTTPiwr = Invoke-WebRequest -Uri $('https://' + $URL) -ConnectionTimeoutSeconds $(($MaxDelayInMS / 100)) -Method Get -SkipHttpErrorCheck
+        return $HTTPiwr.StatusCode
+    } catch {
+        $Statuscode = $error[0].Exception.Response.StatusCode.value__
+        if ($Statuscode) {
+            return $Statuscode
+        }
+        return $false
+    }
 }
 function Test-DNS {
     #Verify answer isn't 0.0.0.0 or 127.0.0.1 or ::
@@ -653,11 +661,13 @@ function Test-DeliveryOptimization {
                     if ($null -ne $SSLTest.SSLInterception) {
                         $DOTarget | Add-Member -Name 'SSLInterception' -MemberType NoteProperty -Value $SSLTest.SSLInterception
                     }
+                    if($DOTarget.Issuer){
+                        $HTTPStatuscode = Test-HTTPs $DOTarget.url
+                        $DOTarget | Add-Member -Name 'HTTPStatusCode' -MemberType NoteProperty -Value $HTTPStatuscode
+                    }
                 }
                 #Add more tests here if required! Most tests won't work with BURSTMODE ...??
             }
-        } else {
-            $TCP = $false
         }
         <#
         if ($DNS -xor $TCP) {
@@ -929,10 +939,8 @@ if ($AllTargetTest) {
 if ($AllTests) {
     $TestMethods = 'AllTests'
 }
-#Test-DeliveryOptimization
-Test-HTTPs "httpstat.us/204"
-Test-HTTPs "httpstat.us/503"
-Test-HTTPs "httpstat.us/200"
+Test-DeliveryOptimization
+
 #Test-SSL -Target untrusted-root.badssl.com -Port 443
 #Test-SSL -Target revoked.badssl.com -Port 443
 #Test-SSL -Target manima.de -Port 443
