@@ -2,11 +2,12 @@
 .SYNOPSIS
 This is not finished!
 .DESCRIPTION
+Shoutouts: badssl.com and httpstat.us are amazing! WinAdmins Community - especially Chris.
 .NOTES
-    Version: 0.7
+    Version: 0.9
     Versionname: 
     Intial creation date: 19.02.2024
-    Last change date: 11.07.2024
+    Last change date: 13.07.2024
     Latest changes: https://github.com/MHimken/WinRE-Customization/blob/main/changelog.md
 #>
 [CmdletBinding()]
@@ -14,7 +15,7 @@ param(
     [System.IO.DirectoryInfo]$WorkingDirectory = "C:\MEMNR\",
     [System.IO.DirectoryInfo]$LogDirectory = "C:\MEMNR\",
     [string]$CSVFile = "Get-MEMNetworkRequirements.csv",
-    [int]$MaxDelayInMS = 300,
+    [int]$MaxDelayInMS = 300, #300 is recommended due to some Microsoft services being heavy load (like MS Update)
     [bool]$BurstMode = $false, #Divide the delay by 50 and try different speeds. Give warning when more than 10 URLs are tested
     [bool]$UseMSJSON = $true, # make this a switch when finished
     [bool]$UseCustomCSV = $true, # make this a switch when finished
@@ -49,6 +50,7 @@ $Script:TCPCache = [System.Collections.ArrayList]::new()
 $Script:WildCardURLs = [System.Collections.ArrayList]::new()
 $Script:URLsToVerify = [System.Collections.ArrayList]::new()
 $Script:FinalResultList = [System.Collections.ArrayList]::new()
+$Script:CRLURLsToCheck = [System.Collections.ArrayList]::new()
 function Get-ScriptPath {
     if ($PSScriptRoot) { 
         # Console or VS Code debug/run button/F5 temp console
@@ -131,34 +133,37 @@ function Import-NetworkRequirementCSV {
 }
 function Get-URLsFromID {
     param(  
-        [int]$ID,
+        [int[]]$IDs,
         [int[]]$FilterPort
     )
-    if ($Script:ManualURLs) {
-        $Script:ManualURLs | Where-Object { $_.id -eq $ID -and $_.port -notin $FilterPort } | ForEach-Object { $Script:URLsToVerify.Add($_) | Out-Null }
+    if ($Script:URLsToVerify) {
+        $script:URLsToVerify = [System.Collections.ArrayList]::new()
     }
-    if ($Script:M365ServiceURLs) {
-        $Script:M365ServiceURLs | Where-Object { $_.id -eq $ID -and $_.port -notin $FilterPort } | ForEach-Object { $Script:URLsToVerify.Add($_) | Out-Null }
-    }
-    if (-not($Script:URLsToVerify)) {
-        return $false
-    }
-    $DuplicateURLsToVerify = [System.Collections.ArrayList]::new()
-    foreach ($IDsFound in $Script:URLsToVerify) {
-        $RemoveMe = $Script:URLsToVerify | Where-Object { $_.id -eq $IDsFound.id -and $_.url -eq $IDsFound.url -and $_.port -eq $IDsFound.port -and $_.protocol -eq $IDsFound.protocol }
-        if ($RemoveMe.count -gt 1) {
-            $counter = 0
-            foreach ($RemoveObject in $RemoveMe) {
-                if ($counter -gt 0) {
-                    $DuplicateURLsToVerify.add($RemoveObject) | Out-Null
+    foreach ($ID in $IDs) {
+        if ($Script:ManualURLs) {
+            $Script:ManualURLs | Where-Object { $_.id -eq $ID -and $_.port -notin $FilterPort } | ForEach-Object { $Script:URLsToVerify.Add($_) | Out-Null }
+        }
+        if ($Script:M365ServiceURLs) {
+            $Script:M365ServiceURLs | Where-Object { $_.id -eq $ID -and $_.port -notin $FilterPort } | ForEach-Object { $Script:URLsToVerify.Add($_) | Out-Null }
+        }
+        if (-not($Script:URLsToVerify)) {
+            return $false
+        }
+        $DuplicateURLsToVerify = [System.Collections.ArrayList]::new()
+        foreach ($IDsFound in $Script:URLsToVerify) {
+            $RemoveMe = $Script:URLsToVerify | Where-Object { $_.id -eq $IDsFound.id -and $_.url -eq $IDsFound.url -and $_.port -eq $IDsFound.port -and $_.protocol -eq $IDsFound.protocol }
+            if ($RemoveMe.count -gt 1) {
+                $counter = 0
+                foreach ($RemoveObject in $RemoveMe) {
+                    if ($counter -gt 0) {
+                        $DuplicateURLsToVerify.add($RemoveObject) | Out-Null
+                    }
+                    $counter++
                 }
-                $counter++
             }
         }
+        $DuplicateURLsToVerify | ForEach-Object { $Script:URLsToVerify.Remove($_) }    
     }
-    $DuplicateURLsToVerify | ForEach-Object { $Script:URLsToVerify.Remove($_) }
-
-    #Cleanup of dupes
     return $true
 }
 function Build-Factory {
@@ -205,7 +210,6 @@ function Find-WildcardURL {
         $Script:M365ServiceURLs.Add($URLObject) | Out-Null
     }
 }
-
 function Get-M365Service {
     param(
         [switch]$M365,
@@ -253,7 +257,27 @@ function Get-M365Service {
         Find-WildcardURL
     }
 }
-
+function Test-SSLInspectionByKnownCRLs {
+    #Verify CRL against known good - this is an indicator for SSLInspection
+    param(
+        [string]$CRLURL
+    )
+    $SSLInspectionLikely = $true
+    if (-not($Script:CRLURLsToCheck)) {
+        if ($Script:ManualURLs) {
+            $Script:ManualURLs | Where-Object { $_.id -in "125", "84" } | ForEach-Object { $Script:CRLURLsToCheck.add($_) | Out-Null }
+        }
+        if ($Script:M365ServiceURLs) {
+            $Script:M365ServiceURLs | Where-Object { $_.id -in "125", "84" } | ForEach-Object { $Script:CRLURLsToCheck.add($_) | Out-Null }
+        }
+    }
+    foreach ($URL in $Script:CRLURLsToCheck.url) {
+        if ($CRLURL -like $("*" + $URL + "*")) {
+            $SSLInspectionLikely = $false
+        }
+    }
+    return $SSLInspectionLikely
+}
 function Test-SSL {
     param(
         $SSLTarget, 
@@ -284,44 +308,57 @@ function Test-SSL {
         #TODO - Add a handler for random crashes of the tcp.socket
         Write-Log -Message 'The TCP socket closed unexpectedly. This could be random, repeat this test.' -Type 2 -Component 'TestSSL'
     }
-
-    $CertInfo = New-Object -TypeName Security.Cryptography.X509Certificates.X509Certificate2($SSLStream.RemoteCertificate)
-    #$Test = New-Object -TypeName System.Net.Security.SslStreamCertificateContext.create($CertInfo)
-    if ($CertInfo.Thumbprint) {
-        Write-Log -Message 'Grabbing CRL and verify against known-good' -Component 'TestSSL'
-        $CRLURI = ($CertInfo.Extensions |  Where-Object -FilterScript { $_.Oid.FriendlyName -Like 'CRL*' } | ForEach-Object -Process { $_.Oid.FriendlyName; $_.Format($true) }).split('(')[2].split(')')[0]
-        $CRLResult = Test-CRL $CRLURI
+    if ($SSLStream.IsAuthenticated) {
+        $SSLTest = $true
+        $CertInfo = New-Object -TypeName Security.Cryptography.X509Certificates.X509Certificate2($SSLStream.RemoteCertificate)
+        #$Test = New-Object -TypeName System.Net.Security.SslStreamCertificateContext.create($CertInfo)
+        if ($CertInfo.Thumbprint) {
+            Write-Log -Message "Grabbing CRL for $SSLTarget and verify against known-good" -Component 'TestSSL'
+            $CRLURIarray = $CertInfo.Extensions |  Where-Object -FilterScript { $_.Oid.FriendlyName -Like 'CRL*' } | ForEach-Object -Process { $_.Oid.FriendlyName; $_.Format($true) }
+            if ($CRLURIarray[1].split('[').count -eq 2) {
+                #$CRLURI = $CRLURIarray.split('(')[2].split(')')[0]
+                $CRLURI = $CRLURIarray[1].Split('http://')[1].split('/')[0]
+                $SSLInspectionResult = Test-SSLInspectionByKnownCRLs -CRLURL $CRLURI
+            } elseif ($CRLURIarray[1].split('[').count -gt 2) {
+                $SSLInspectionResult = $CRLURIarray[1].split('=').split('[').trim() | Where-Object { $_.startswith("http://") } | ForEach-Object { Test-SSLInspectionByKnownCRLs -CRLURL $_.Split('http://')[1].split('/')[0] } | Where-Object { $_ -contains $true }
+                if (-not($SSLInspectionResult)) { $SSLInspectionResult = $false }
+            }
+        }
     }
-    
-    #$RevocationList = New-Object -TypeName Security.Cryptography.X509Certificates.
-    #$SSLStream | Select-Object | Format-List -Property SslProtocol, CipherAlgorithm, HashAlgorithm, KeyExchangeAlgorithm, IsAuthenticated, IsEncrypted, IsSigned, CheckCertRevocationStatus
-    #$CertInfo | Format-List -Property Subject, Issuer, FriendlyName, NotBefore, NotAfter, Thumbprint
-    #$CertInfo.Extensions |  Where-Object -FilterScript { $_.Oid.FriendlyName -Like 'subject alt*' } | ForEach-Object -Process { $_.Oid.FriendlyName; $_.Format($true) }
-    #$CRL = ($CertInfo.Extensions |  Where-Object -FilterScript { $_.Oid.FriendlyName -Like 'crl*' } | ForEach-Object -Process { $_.Oid.FriendlyName; $_.Format($true) }).Split(
-    <#
-    if (Test-Certificate -DNSName $FQDN -Cert $CertInfo) {
-        Write-Log "Certificate for $FQDN successfully verified"
-    }
-    #>
-
     $TCPSocket.Close()
     $TCPSocket.Dispose()
-    $Results = [PSCustomObject]@{
+    if ($null -eq $SSLTest) {
+        $SSLTest = $false
+    }
+    $Result = [PSCustomObject]@{
+        SSLTest         = $SSLTest
         SSLProtocol     = $SSLStream.SslProtocol
         Issuer          = $CertInfo.Issuer
         AuthException   = $AuthException
-        SSLInterception = $CRLResult
+        SSLInterception = $SSLInspectionResult
     }
-    return $Results
+    return $Result
 }
-function Test-HTTPs {
+function Test-HTTP {
     param(
-        [System.Uri]$URL
+        [string]$HTTPURL,
+        [int]$HTTPPort
     )
+    switch ($HTTPPort) {
+        "80" { $URIStart = "http://" }
+        "443" { $URIStart = "https://" }
+        default { $URIStart = "https://" }
+    }
     try {
-        $HTTPiwr = Invoke-WebRequest -Uri $('https://' + $URL) -ConnectionTimeoutSeconds $(($MaxDelayInMS / 100)) -Method Get -SkipHttpErrorCheck
+        #We could use -SkipHttpErrorCheck in PS7...
+        if ($PSVersionTable.psversion.major -ge 7) {
+            $HTTPiwr = Invoke-WebRequest -Uri $($URIStart + $HTTPURL) -ConnectionTimeoutSeconds $(($MaxDelayInMS / 100)) -Method Get -SkipHttpErrorCheck
+        } else {
+            $HTTPiwr = Invoke-WebRequest -Uri $($URIStart + $HTTPURL) -ConnectionTimeoutSeconds $(($MaxDelayInMS / 100)) -Method Get 
+        }
         return $HTTPiwr.StatusCode
     } catch {
+        #This is only reached if PS5 is used
         $Statuscode = $error[0].Exception.Response.StatusCode.value__
         if ($Statuscode) {
             return $Statuscode
@@ -332,67 +369,67 @@ function Test-HTTPs {
 function Test-DNS {
     #Verify answer isn't 0.0.0.0 or 127.0.0.1 or ::
     param(
-        [string]$Target
+        [string]$DNSTarget
     )
-    $result = $true
-    if ($Target -in $Script:DNSCache.CachedURL) {
-        $CachedResult = $Script:DNSCache | Where-Object { $_.CachedURL -eq $Target } | Select-Object -Property result
+    $DNSresult = $true
+    if ($DNSTarget -in $Script:DNSCache.CachedURL) {
+        $CachedResult = $Script:DNSCache | Where-Object { $_.CachedURL -eq $DNSTarget } | Select-Object -Property result
         return $CachedResult.result
     }
-    $ResolvedDNSRecords = Resolve-DnsName -Name $Target -ErrorAction SilentlyContinue
+    $ResolvedDNSRecords = Resolve-DnsName -Name $DNSTarget -ErrorAction SilentlyContinue
     if ($ResolvedDNSRecords.count) {
         foreach ($DNSARecord in $ResolvedDNSRecords.IP4Address) {
             if ($DNSARecord.IP4Address) {
                 if ($DNSARecord -eq '0.0.0.0' -or $DNSARecord -eq '127.0.0.1') {
-                    Write-Log -Message "DNS sinkhole detected: Address $Target resolved to an invalid address" -Component 'TestDNS' -Type 2
-                    $result = $false
+                    Write-Log -Message "DNS sinkhole detected: Address $DNSTarget resolved to an invalid address" -Component 'TestDNS' -Type 2
+                    $DNSresult = $false
                     break
                 }
             }
         }
         foreach ($DNSAAAARecord in $ResolvedDNSRecords.IP6Address) {
             if ($DNSAAAARecord -eq '::') {
-                Write-Log -Message "DNS sinkhole detected: Address $Target resolved to an invalid address" -Component 'TestDNS' -Type 2
-                $result = $false
+                Write-Log -Message "DNS sinkhole detected: Address $DNSTarget resolved to an invalid address" -Component 'TestDNS' -Type 2
+                $DNSresult = $false
                 break
             }
         }
     } else {
-        Write-Log -Message "No DNS record found for $Target" -Component 'TestDNS' -Type 3
-        $result = $false
+        Write-Log -Message "No DNS record found for $DNSTarget" -Component 'TestDNS' -Type 3
+        $DNSresult = $false
     }
     $DNSObject = [PSCustomObject]@{
-        CachedURL = $Target
-        Result    = $result
+        CachedURL = $DNSTarget
+        Result    = $DNSresult
     }
     $Script:DNSCache.add($DNSObject) | Out-Null
-    return $result
+    return $DNSresult
 }
 function Test-TCPPort {
     param(
-        [string]$Target,
-        [int]$Port,
+        [string]$TCPTarget,
+        [int]$TCPPort,
         [int]$MaxWaitTime
     )
     if (-not($MaxWaitTime)) {
         $MaxWaitTime = 150
     }
-    if ($Target -in $Script:DNSCache.CachedURL) {
-        $DNSCachedResult = $Script:DNSCache | Where-Object { $_.CachedURL -eq $Target } | Select-Object -Property result -First 1
+    if ($TCPTarget -in $Script:DNSCache.CachedURL) {
+        $DNSCachedResult = $Script:DNSCache | Where-Object { $_.CachedURL -eq $TCPTarget } | Select-Object -Property result -First 1
         if (-not($DNSCachedResult.result)) {
             return $false
         }
     }
     if (-not($BurstMode)) {
-        if ($Target -in $Script:TCPCache.CachedURL -and $Port -in ($Script:TCPCache.Port | Where-Object { $_.CachedURL -eq $Target })) {
-            $TCPCachedResult = $Script:TCPCache | Where-Object { $_.CachedURL -eq $Target } | Select-Object -Property result -First 1
+        if ($TCPTarget -in $Script:TCPCache.CachedURL -and $TCPPort -in ($Script:TCPCache.Port | Where-Object { $_.CachedURL -eq $TCPTarget })) {
+            $TCPCachedResult = $Script:TCPCache | Where-Object { $_.CachedURL -eq $TCPTarget } | Select-Object -Property result -First 1
             if (-not($TCPCachedResult.result)) {
                 return $false
             }
         }
     }
     $TCPClient = New-Object -TypeName System.Net.Sockets.TCPClient
-    $RunningClient = $TCPClient.ConnectAsync($Target, $Port)
+    $RunningClient = $TCPClient.ConnectAsync($TCPTarget, $TCPPort)
     Start-Sleep -Milliseconds $MaxWaitTime
     $success = $false 
     if ($RunningClient.IsCompleted) {
@@ -411,8 +448,8 @@ function Test-TCPPort {
     $TCPClient.Dispose()
     if (-not($BurstMode)) {
         $TCPObject = [PSCustomObject]@{
-            CachedURL = $Target
-            Port      = $Port
+            CachedURL = $TCPTarget
+            Port      = $TCPPort
             Result    = $result
         }
         $Script:TCPCache.add($TCPObject) | Out-Null
@@ -472,246 +509,127 @@ function Test-TCPBurstMode {
         $WorkObject | Add-Member -MemberType NoteProperty -Name "TCP$MaxWaitTime" -Value $TCPResult
     }
 }
-function Test-CRL {
-    #Verify CRL against known good - this is an indicator for SSLInspection
+function Test-Network {
+    #ToDo: Make each check based upon a switch that is default = on
     param(
-        [string]$CRLURL
+        [PSCustomObject]$TestObject
     )
-    $CRLCheckresult = $true
-    $CRLURLsToCheck = [System.Collections.ArrayList]::new()
-    if ($Script:ManualURLs) {
-        $Script:ManualURLs | Where-Object { $_.id -in "125", "84" } | ForEach-Object { $CRLURLsToCheck.add($_) | Out-Null }
-    }
-    if ($Script:M365ServiceURLs) {
-        $Script:M365ServiceURLs | Where-Object { $_.id -in "125", "84" } | ForEach-Object { $CRLURLsToCheck.add($_) | Out-Null }
-    }
-    foreach ($URL in $CRLURLsToCheck.url) {
-        if ($CRLURL -like $("*" + $URL + "*")) {
-            $CRLCheckresult = $false
+    $TestObject | Add-Member -Name 'DNSResult' -MemberType NoteProperty -Value ""
+    $TestObject | Add-Member -Name 'TCPResult' -MemberType NoteProperty -Value ""
+    $TestObject | Add-Member -Name 'HTTPStatusCode' -MemberType NoteProperty -Value ""
+    $TestObject | Add-Member -Name 'SSLTest' -MemberType NoteProperty -Value ""
+    $TestObject | Add-Member -Name 'SSLProtocol' -MemberType NoteProperty -Value ""
+    $TestObject | Add-Member -Name 'Issuer' -MemberType NoteProperty -Value ""
+    $TestObject | Add-Member -Name 'AuthException' -MemberType NoteProperty -Value ""
+    $TestObject | Add-Member -Name 'SSLInterception' -MemberType NoteProperty -Value ""
+    $DNS = Test-DNS -DNSTarget $TestObject.url
+    $TestObject.DNSResult = $DNS
+    if ($DNS) {
+        if ($BurstMode) {
+            Test-TCPBurstMode -TCPTarget $TestObject.url
+        } else {
+            $TCP = Test-TCPPort -TCPTarget $TestObject.url -TCPPort $TestObject.port
+            $TestObject.TCPResult = $TCP
+            if ($TCP) {
+                #Test HTTP(s) Connections
+                $HTTPStatuscode = Test-HTTP -HTTPURL $TestObject.url -HTTPPort $TestObject.port
+                if ($null -ne $HTTPStatuscode) {
+                    $TestObject.HTTPStatusCode = $HTTPStatuscode
+                } else { 
+                    $TestObject.HTTPStatusCode = $false 
+                }
+                #Test TLS and verify everything around the cert including traffic interception
+                $SSLTest = Test-SSL -SSLTarget $TestObject.url -SSLPort $TestObject.port
+                $TestObject.SSlTest = $SSLTest.SSLTest
+
+                if ($SSLTest.SSLTest) {
+                    $TestObject.SSLProtocol = $SSLTest.SSLProtocol
+                    $TestObject.Issuer = $SSLTest.Issuer
+                    if ($SSLTest.AuthException) {
+                        $TestObject.AuthException = $SSLTest.AuthException
+                    }
+                    if ($null -ne $SSLTest.SSLInterception) {
+                        $TestObject.SSLInterception = $SSLTest.SSLInterception
+                    }                   
+                }
+            }
         }
     }
-    return $CRLCheckresult
+    $Script:FinalResultList.add($TestObject) | Out-Null
 }
 function Test-RemoteHelp {
     <#
         #181
     #Remote Help - Default + Required https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#remote-help
-    #"*.support.services.microsoft.com", 443 #example see next line
-    "remoteassistance.support.services.microsoft.com", 443
-    "rdprelayv3eastusprod-0.support.services.microsoft.com", 443
-    #"*.trouter.skype.com", 443 #See below
-    "remoteassistanceprodacs.communication.azure.com", 443
-    "edge.skype.com", 443
-    "aadcdn.msftauth.net", 443
-    "aadcdn.msauth.net", 443
-    "alcdn.msauth.net", 443
-    "wcpstatic.microsoft.com", 443
-    #"*.aria.microsoft.com", 443 #example see next line
-    "browser.pipe.aria.microsoft.com", 443
-    #"*.events.data.microsoft.com", 443 #example see next line
-    "v10.events.data.microsoft.com", 443
-    #"*.monitor.azure.com", 443 #example see next line
-    "js.monitor.azure.com", 443
-    "edge.microsoft.com", 443
-    #"*.trouter.communication.microsoft.com", 443 #example see next line
-    "go.trouter.communication.microsoft.com", 443
-    #"*.trouter.teams.microsoft.com", 443 #example see next line
-    "trouter2-usce-1-a.trouter.teams.microsoft.com", 443
-    "api.flightproxy.skype.com", 443
-    "ecs.communication.microsoft.com", 443
-    "remotehelp.microsoft.com", 443
-    "trouter-azsc-usea-0-a.trouter.skype.com", 443
-    
-    #187
-    #"*.webpubsub.azure.com", 443 #example see next line
-    "AMSUA0101-RemoteAssistService-pubsub.webpubsub.azure.com", 443
-    
-    #GCC
-    #188
-    "remoteassistanceweb-gcc.usgov.communication.azure.us", 443
-    "gcc.remotehelp.microsoft.com", 443,
-    "gcc.relay.remotehelp.microsoft.com", 443
-    #"*.gov.teams.microsoft.us", 443 #example see next line
-    "gov.teams.microsoft.us", 443
-    #>
-    #ServiceIDs 181,187
+    #ServiceIDs 181,187,189
     #ServiceIDs GCC 188
-}
-function Test-Autopilot {
-    <#
-    Sources:
-    https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#windows-autopilot-deployment-service
-    #Autopilot dependencies according to https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#autopilot-dependencies
-    #"www.msftncsi.com" #Only Windows <10? https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/internet-explorer-edge-open-connect-corporate-public-network#ncsi-active-probes-and-the-network-status-alert
-    #>
-    #ServiceIDs 164,165,169,173,182,9999
-    #9999 = Autopilot
-    #Import
-    $Autopilot = (182, 9999) | ForEach-Object { Get-URLsFromID $_ }
-    foreach ($Object in $Autopilot) {
-        Test-DNS $Object.url
-    }
-    <#
-    Test-NTP #165
-    Test-WNS #169
-    Test-TPMAttestation #173
-    Test-DeliveryOptimization #164
-    Test-WNS #169
     #>
 
 }
+
 function Test-TPMAttestation {
-    <#
+    #ServiceIDs 173,9998
     #https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#autopilot-self-deploying-mode-and-autopilot-pre-provisioning
-    "ekop.intel.com", 443
-    "ekcert.spserv.microsoft.com", 443
-    "ftpm.amd.com", 443
-    "TPMTESTURL.microsoftaik.azure.net", 443 #this will always resolve to at least SOME URL
-    #>
-    #ServiceIDs 164,9998
-    #9998 = TPM Attestation
+    $ServiceIDs = 173, 9998
+    $ServiceArea = "TPM"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $TPM = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($TPM)) {
+        Write-Log -Message 'No matching ID found for service area: Windows (Push) Notification Services' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($TPMTarget in $Script:URLsToVerify) {
+        Test-Network $TPMTarget
+    }
+    return $true
 }
 function Test-WNS {
-    <#
-    #WNS Default+Required https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#windows-push-notification-serviceswns-dependencies
-    #"*.notify.windows.com", 443 #example see next line
-    "sin.notify.windows.com", 443
-    #"*.wns.windows.com", 443 #example see next line
-    "sinwns1011421.wns.windows.com", 443
-    #According to AP https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#autopilot-dependencies
-    "clientconfig.passport.net", 443
-    "windowsphone.com", 443
-    "c.s-microsoft.com", 443
-    #>
     #ServiceIDs 169,171
+    #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#windows-push-notification-serviceswns-dependencies
+    $ServiceIDs = 169, 171
+    $ServiceArea = "WNS"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $WNS = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($WNS)) {
+        Write-Log -Message 'No matching ID found for service area: Windows (Push) Notification Services' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($WNSTarget in $Script:URLsToVerify) {
+        Test-Network $WNSTarget
+    }
+    return $true
 }
 function Test-DeviceHealth {
     <#
-    #Microsoft Azure Attestation (formerly Device Health)
-    "intunemaape1.eus.attest.azure.net", 443
-    "intunemaape2.eus2.attest.azure.net", 443
-    "intunemaape3.cus.attest.azure.net", 443
-    "intunemaape4.wus.attest.azure.net", 443
-    "intunemaape5.scus.attest.azure.net", 443
-    "intunemaape6.ncus.attest.azure.net", 443
-    "intunemaape7.neu.attest.azure.net", 443
-    "intunemaape8.neu.attest.azure.net", 443
-    "intunemaape9.neu.attest.azure.net", 443
-    "intunemaape10.weu.attest.azure.net", 443
-    "intunemaape11.weu.attest.azure.net", 443
-    "intunemaape12.weu.attest.azure.net", 443
-    "intunemaape13.jpe.attest.azure.net", 443
-    "intunemaape17.jpe.attest.azure.net", 443
-    "intunemaape18.jpe.attest.azure.net", 443
-    "intunemaape19.jpe.attest.azure.net", 443
+    Microsoft Azure Attestation (formerly Device Health)
+    ServiceIDs 186
     #>
-    #ServiceIDs 186
 }
+
 function Test-DeliveryOptimization {
-    <#param(
-        $target,
-        $port
-    )
-    #>
-    <#
-    https://remyhax.xyz/posts/do-harm/ - in depth article about how DO is communicating
-    #("*.do.dsp.mp.microsoft.com", (443))
-    "*.dl.delivery.mp.microsoft.com", 443
-    #"*.emdl.ws.microsoft.com", 443
-    "kv801.prod.do.dsp.mp.microsoft.com", 443
-    "geo.prod.do.dsp.mp.microsoft.com", 443
-    "emdl.ws.microsoft.com", 443
-    "2.dl.delivery.mp.microsoft.com", 443
-    "bg.v4.emdl.ws.microsoft.com", 443
-    #>
-    #ServiceIDs 172,164
-    #Port 7680 is used to listen to other clients requests (on host)
-    #Port 3544 UDP is needed for Download Mode 2 and 3 in _and_ outbound
-    $result = $true
-    Write-Log 'Documentation will specify port 7680 TCP. This is used to listen to other clients requests (from the host)' -Component 'TestDO'
-    $Listening = Get-NetTCPConnection -LocalPort 7680
+    $ServiceIDs = 164
+    $ServiceArea = "DO"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    Write-Log 'Filtered Port TCP 7680: Documentation will specify port 7680 TCP. This is used to listen to other clients requests (from the host)' -Component 'TestDO'
+    Write-Log 'Filtered Port UDP 3544: Documentation will specify port 3544 UDP in/outbound as required - this is required for P2P connections' -Component 'TestDO'
+    Write-Log 'Verify TCP Port 7680 is being listened on' -Component 'TestDO'
+    $Listening = Get-NetTCPConnection -LocalPort 7680 -ErrorAction SilentlyContinue
     if (-not($Listening)) {
         Write-Log 'TCP Port 7680 not being listed as listening checking service' -Component 'TestDO'
         if (-not(Get-Service -Name DoSvc)) {
-            Write-Log 'DoSvc is not running! No delivery optimization possible' -Component 'TestDO' -Type 2
-            $result = 'Warning'
+            Write-Log 'DoSvc is not running! Delivery optimization not possible' -Component 'TestDO' -Type 3
+            return $false
         }
     }
-    $DeliveryOptimization = (172, 164) | ForEach-Object { Get-URLsFromID -ID $_ -FilterPort 7680, 3544 }
+    $DeliveryOptimization = Get-URLsFromID -IDs $ServiceIDs -FilterPort 7680, 3544
     if (-not($DeliveryOptimization)) {
         Write-Log -Message 'No matching ID found for service area: Delivery Optimization' -Component 'TestDO' -Type 3
         return $false
     }
     foreach ($DOTarget in $Script:URLsToVerify) {
-        $DNS = Test-DNS -Target $DOTarget.url
-        $DOTarget | Add-Member -Name 'DNSResult' -MemberType NoteProperty -Value $DNS
-        if ($DNS) {
-            if ($BurstMode) {
-                Test-TCPBurstMode $DOTarget
-            } else {
-                $TCP = Test-TCPPort -Target $DOTarget.url -Port $DOTarget.port
-                if ($TCP) {
-                    if (-not($BurstMode)) { $DOTarget | Add-Member -Name 'TCPResult' -MemberType NoteProperty -Value $TCP }
-                    $SSLTest = Test-SSL -SSLTarget $DOTarget.url -SSLPort $DOTarget.port
-                    $DOTarget | Add-Member -Name 'SSLProtocol' -MemberType NoteProperty -Value $SSLTest.SSLProtocol
-                    $DOTarget | Add-Member -Name 'Issuer' -MemberType NoteProperty -Value $SSLTest.Issuer
-                    if ($SSLTest.AuthException) {
-                        $DOTarget | Add-Member -Name 'AuthException' -MemberType NoteProperty -Value $SSLTest.AuthException
-                    }
-                    if ($null -ne $SSLTest.SSLInterception) {
-                        $DOTarget | Add-Member -Name 'SSLInterception' -MemberType NoteProperty -Value $SSLTest.SSLInterception
-                    }
-                    if($DOTarget.Issuer){
-                        $HTTPStatuscode = Test-HTTPs $DOTarget.url
-                        $DOTarget | Add-Member -Name 'HTTPStatusCode' -MemberType NoteProperty -Value $HTTPStatuscode
-                    }
-                }
-                #Add more tests here if required! Most tests won't work with BURSTMODE ...??
-            }
-        }
-        <#
-        if ($DNS -xor $TCP) {
-            $result = $false
-            #Write-Log -Message "The FQDN $($DOTarget.url) was not detected successfully" -Component 'TestDO' -Type 3
-        } else {
-            #Write-Log -Message "$($DOTarget.url)" -Component 'TestDO' -Type 4
-        }
-        #>
-        $Script:FinalResultList.add($DOTarget) | Out-Null
+        Test-Network $DOTarget
     }
-    return $result
-
-    #TODO: CHECK THIS!
-    #Last Check 24.06.24 - This should use a TCP connection, but if that's the case we'd need to find another client which we don't have.
-    <#
-        $DOMessage = ''
-    $DOMessage += '0E 53 77 61 72 6D 20 70 72 6F 74 6F 63 6F 6C 00'.replace(' ', '')
-    $DOMessage += '00 00 00 00 10 00 00 D9 A5 89 6D 90 26 67 C8 75'.replace(' ', '')
-    $DOMessage += 'BC 5D 7C FE 87 32 36 F3 9C E5 A0 1E 11 F2 7B FE'.replace(' ', '')
-    $DOMessage += '5F 18 FE B7 FE 23 F4 A0 5B EC F6 12 66 C0 41 BB'.replace(' ', '')
-    $DOMessage += '0B C4 BA CF 17 AB 61 00 00 00 00               '.replace(' ', '')
-    $DOMessage = [System.Convert]::FromHexString($DOMessage)
-    #[System.BitConverter]::ToString($message).Replace('-')
-    $udpobject = New-Object Net.Sockets.Udpclient([System.Net.Sockets.AddressFamily]::InterNetwork) 
-    $udpobject.Client.Blocking = $False
-    $udpobject.AllowNatTraversal($true)
-    $Error.Clear()
-    $udpobject.Connect($Target, $Port) | Out-Null
-    if ($udpobject.client.Connected) {
-        Write-Log -Message 'Sending UDP test message' -Component 'TestUDPPort'
-        [void]$udpobject.Send($DOMessage, $DOMessage.Length)
-        $remoteendpoint = New-Object system.net.ipendpoint([system.net.ipaddress]::Any, 0)
-        Start-Sleep -Milliseconds 100 #We have to wait slightly to send the data back
-        $TestData = $udpobject.Receive([ref]$remoteendpoint)
-    } else {
-        Write-Log -Message 'No UDP "connection" established' -Component 'TestUDPPort'
-        Write-Log -Message "$($Error[0].Exception.InnerException.Message)" -Component 'TestUDPPort' -Type 2
-        return $false
-    }
-    $TestData
-    $udpobject.Close()
-    $udpobject.Dispose()
-    #>
+    return $true
 }
 function Test-Intune {
     param(
@@ -770,6 +688,32 @@ function Test-Intune {
     #>
     }
 }
+function Test-Autopilot {
+    <#
+    Sources:
+    https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#windows-autopilot-deployment-service
+    #Autopilot dependencies according to https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#autopilot-dependencies
+    #"www.msftncsi.com" #Only Windows <10? https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/internet-explorer-edge-open-connect-corporate-public-network#ncsi-active-probes-and-the-network-status-alert
+    #>
+    #ServiceIDs 164,165,169,173,182,9999
+    #9999 = Autopilot
+    #Import
+    $Autopilot = Get-URLsFromID -IDs $ServiceIDs
+    foreach ($Object in $Autopilot) {
+        Test-DNS $Object.url
+    }
+    <#
+    Test-NTP #165
+    Test-WNS #169
+    Test-TPMAttestation #173
+    Test-DeliveryOptimization #164
+    Test-WNS #169
+    #>
+    $WNSTest = Test-WNS
+    $DOTest = Test-DeliveryOptimization
+    $NTPTest = Test-NTP
+    $TPMAttTest = Test-TPMAttestation
+}
 function Test-Apple {
     #ServiceIDs 178
     #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#apple-dependencies
@@ -804,13 +748,18 @@ function Test-EntraID {}
 function Test-WindowsUpdate {
     #ServiceIDs 164
     #https://learn.microsoft.com/en-us/troubleshoot/windows-client/installing-updates-features-roles/windows-update-issues-troubleshooting#device-cant-access-update-files
-    <#
-    "download.windowsupdate.com", 80
-    "download.windowsupdate.com", 443
-    "update.microsoft.com", 443
-    "update.microsoft.com", 80
-    #>
-    Test-DeliveryOptimization
+    $ServiceIDs = 164
+    $ServiceArea = "WU"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $WindowsUpdate = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($WindowsUpdate)) {
+        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($WUTarget in $Script:URLsToVerify) {
+        Test-Network $WUTarget
+    }
+    return $true
 }
 function Test-NTP {
     #ServiceIDs 165
@@ -850,35 +799,29 @@ function Test-MicrosoftStore {
     #ServiceIDs 9996
     #https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints 
     #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#microsoft-store
-    <#
-    #From https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints 
-    "img-prod-cms-rt-microsoft-com.akamaized.net", 443 #Downloads images
-    "img-s-msn-com.akamaized.net", 80 #No explanation
-    "livetileedge.dsx.mp.microsoft.com", 443 #Content
-    "storeedgefd.dsx.mp.microsoft.com", 80 #No explanation
-    #"*.wns.windows.com", 443 #Very important for other stuff! Windows Push Notifcation Service!
-    "storecatalogrevocation.storequality.microsoft.com", (443, 80) #[...]used to revoke licenses for malicious apps in the Microsoft Store
-    "manage.devcenter.microsoft.com", 443 #Analytics
-    "displaycatalog.mp.microsoft.com", (443, 80) #[...]used to communicate with Microsoft Store
-    "share.microsoft.com", 80 #No explanation
-    "manage.devcenter.microsoft.com",443,80
-        #From the same source, but not listed under Store
-    #"*.dl.delivery.mp.microsoft.com", (443, 80) # Content
-    #"*.delivery.mp.microsoft.com", (443, 80) # Content
-
-    #From https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#microsoft-store
-    #Dupes filtered
-    ("purchase.md.mp.microsoft.com", (443, 80))
-    ("licensing.mp.microsoft.com", (443, 80))
-#>
-    Get-URLsFromID 9996
-    Test-WNS
-    Test-DeliveryOptimization
+    $ServiceIDs = 9996
+    $ServiceArea = "MS"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $MicrosoftStore = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($MicrosoftStore)) {
+        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($MSTarget in $Script:URLsToVerify) {
+        Test-Network $MSTarget
+    }
+    $WNSTest = Test-WNS
+    $DOTest = Test-DeliveryOptimization
+    if (-not($WNSTest -and $DOTest)) {
+        return $false
+    }
+    return $true
+    
 }
 function Test-M365 {
 
 }
-function Test-CRLs {
+function Test-CRL {
     #I have no idea why these are more than just URLs
     #Source: https://support.microsoft.com/en-us/topic/windows-activation-or-validation-fails-with-error-code-0x8004fe33-a9afe65e-230b-c1ed-3414-39acd7fddf52
     "https://go.microsoft.com/"
@@ -939,16 +882,17 @@ if ($AllTargetTest) {
 if ($AllTests) {
     $TestMethods = 'AllTests'
 }
-Test-DeliveryOptimization
+#Test-WNS
+#Test-MicrosoftStore
+#Test-DeliveryOptimization
+#Test-WindowsUpdate 
+#Test-TPMAttestation
 
-#Test-SSL -Target untrusted-root.badssl.com -Port 443
-#Test-SSL -Target revoked.badssl.com -Port 443
-#Test-SSL -Target manima.de -Port 443
 #ToDo: Out-Gridview
 # * 3 modes by default only show "true/false"
 # * second mode shows a little more detail like certificate information
 # * third mode shows all errors?
-$Script:FinalResultList | Out-GridView
+$Script:FinalResultList | Out-GridView -Title 'Intune Network test results' -Wait   
 #Build-Factory $TestMethods #This should create the final URL list and prepare the selected tests
 
 <#if($UseMSJSON -and $UseCustomCSV){
