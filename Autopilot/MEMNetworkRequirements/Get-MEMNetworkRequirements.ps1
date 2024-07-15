@@ -1,8 +1,67 @@
 <#
 .SYNOPSIS
-This is not finished!
+This is not finished! This script is used to perform network requirements testing for various services.
 .DESCRIPTION
 Shoutouts: badssl.com and httpstat.us are amazing! WinAdmins Community - especially Chris.
+The script allows you to test network connectivity and performance for different services by specifying the URLs, ports, and protocols to test. It supports testing for services like Intune, Autopilot, Windows Activation, EntraID, Windows Update, Delivery Optimization, NTP, DNS, Diagnostics Data, NCSI, WNS, Windows Store, M365, and CRLs.
+.PARAMETER WorkingDirectory
+Specifies the working directory where the script will be executed. The default value is "C:\MEMNR\".
+.PARAMETER LogDirectory
+Specifies the directory where log files will be stored. The default value is "C:\MEMNR\".
+.PARAMETER CSVFile
+Specifies the path to the CSV file containing the URLs, ports, and protocols to test. The default value is "Get-MEMNetworkRequirements.csv".
+.PARAMETER MaxDelayInMS
+Specifies the maximum delay in milliseconds for each network request. The default value is 300.
+.PARAMETER BurstMode
+Specifies whether to enable burst mode, which divides the delay by 50 and tries different speeds. Give a warning when more than 10 URLs are tested. The default value is $false.
+.PARAMETER UseMSJSON
+Specifies whether to use MSJSON for network requests. The default value is $true.
+.PARAMETER UseCustomCSV
+Specifies whether to use a custom CSV file for network requirements. The default value is $true.
+.PARAMETER AllowBestEffort
+Specifies whether to allow best effort testing for URLs that don't have an exact match. The default value is $true.
+.PARAMETER AllTargetTest
+Specifies whether to test all target services. This is a switch parameter.
+.PARAMETER Intune
+Specifies whether to test Intune service. This is a switch parameter.
+.PARAMETER Autopilot
+Specifies whether to test Autopilot service. This is a switch parameter.
+.PARAMETER WindowsActivation
+Specifies whether to test Windows Activation service. This is a switch parameter.
+.PARAMETER EntraID
+Specifies whether to test EntraID service. This is a switch parameter.
+.PARAMETER WindowsUpdate
+Specifies whether to test Windows Update service. This is a switch parameter.
+.PARAMETER DeliveryOptimization
+Specifies whether to test Delivery Optimization service. This is a switch parameter.
+.PARAMETER NTP
+Specifies whether to test NTP service. This is a switch parameter.
+.PARAMETER DNS
+Specifies whether to test DNS service. This is a switch parameter.
+.PARAMETER DiagnosticsData
+Specifies whether to test Diagnostics Data service. This is a switch parameter.
+.PARAMETER NCSI
+Specifies whether to test NCSI service. This is a switch parameter.
+.PARAMETER WNS
+Specifies whether to test WNS service. This is a switch parameter.
+.PARAMETER WindowsStore
+Specifies whether to test Windows Store service. This is a switch parameter.
+.PARAMETER M365
+Specifies whether to test M365 service. This is a switch parameter.
+.PARAMETER CRLs
+Specifies whether to test CRLs service. This is a switch parameter.
+.PARAMETER CheckCertRevocation
+Specifies whether to check certificate revocation for network requests. The default value is $true.
+.PARAMETER SelfDeploying
+Specifies whether to test self-deploying service. This is a switch parameter.
+.PARAMETER Legacy
+Specifies whether to test legacy service. This is a switch parameter.
+.PARAMETER NoLog
+Specifies whether to disable logging. This is a switch parameter.
+.PARAMETER TestMethods
+Specifies the test methods to use. The default value is an empty array.
+.PARAMETER ToConsole
+Specifies whether to output log messages to the console. The default value is $true.
 .NOTES
     Version: 0.9
     Versionname: 
@@ -709,6 +768,7 @@ function Test-Autopilot {
     Test-DeliveryOptimization #164
     Test-WNS #169
     #>
+    #TODO: Build logic for these tests :)
     $WNSTest = Test-WNS
     $DOTest = Test-DeliveryOptimization
     $NTPTest = Test-NTP
@@ -883,9 +943,9 @@ if ($AllTests) {
     $TestMethods = 'AllTests'
 }
 #Test-WNS
-#Test-MicrosoftStore
+Test-MicrosoftStore
 #Test-DeliveryOptimization
-#Test-WindowsUpdate 
+#Test-WindowsUpdate
 #Test-TPMAttestation
 
 #ToDo: Out-Gridview
