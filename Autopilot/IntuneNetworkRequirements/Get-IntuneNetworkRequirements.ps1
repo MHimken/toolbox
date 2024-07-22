@@ -8,7 +8,7 @@ The script allows you to test network connectivity and performance for different
 Specifies the working directory where the script will be executed. The default value is "C:\MEMNR\".
 .PARAMETER LogDirectory
 Specifies the directory where log files will be stored. The default value is "C:\MEMNR\".
-.PARAMETER CSVFile
+.PARAMETER CustomURLFile
 Specifies the path to the CSV file containing the URLs, ports, and protocols to test. The default value is "Get-MEMNetworkRequirements.csv".
 .PARAMETER MaxDelayInMS
 Specifies the maximum delay in milliseconds for each network request. The default value is 300.
@@ -66,50 +66,108 @@ Specifies whether to output log messages to the console. The default value is $t
     Version: 0.9
     Versionname: 
     Intial creation date: 19.02.2024
-    Last change date: 13.07.2024
-    Latest changes: https://github.com/MHimken/WinRE-Customization/blob/main/changelog.md
+    Last change date: 22.07.2024
+    Latest changes: https://github.com/MHimken/toolbox/tree/main/Autopilot/MEMNetworkRequirements/changelog.md
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Default')]
 param(
-    [System.IO.DirectoryInfo]$WorkingDirectory = "C:\MEMNR\",
-    [System.IO.DirectoryInfo]$LogDirectory = "C:\MEMNR\",
-    [string]$CSVFile = "Get-MEMNetworkRequirements.csv",
-    [int]$MaxDelayInMS = 300, #300 is recommended due to some Microsoft services being heavy load (like MS Update)
-    [bool]$BurstMode = $false, #Divide the delay by 50 and try different speeds. Give warning when more than 10 URLs are tested
-    [bool]$UseMSJSON = $true, # make this a switch when finished
-    [bool]$UseCustomCSV = $true, # make this a switch when finished
-    [bool]$AllowBestEffort = $true, # make this a switch when finished
-    [switch]$AllTargetTest,
+    [Parameter(ParameterSetName = 'Default', Position = 0)]
+    [bool]$TestAllServiceAreas = $true,
+    [Parameter(ParameterSetName = 'Default')]
+    [Parameter(ParameterSetName = 'TestM365JSON', Position = 0)]
+    [bool]$UseMSJSON = $true,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom', Position = 0)]
+    [string]$CustomURLFile,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$AllowBestEffort,
+    [Parameter(ParameterSetName = 'Default')]
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [bool]$CheckCertRevocation = $true,
+
+    #Service Areas
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$Intune,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$Autopilot,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$WindowsActivation,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$EntraID,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$WindowsUpdate,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$DeliveryOptimization,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$NTP,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$DNS,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$DiagnosticsData,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$NCSI,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$WNS,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$WindowsStore,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$M365,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$CRLs,
-    [bool]$CheckCertRevocation = $true, # make this a switch when finished
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$SelfDeploying,
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$Legacy,
-    [switch]$NoLog,
+    
+    #Special Methods
     [string[]]$TestMethods,
-    [bool]$ToConsole = $true
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [int]$MaxDelayInMS = 300, #300 is recommended due to some Microsoft services being heavy load (like MS Update)
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$BurstMode, #Divide the delay by 50 and try different speeds. Give warning when more than 10 URLs are tested
+    
+    #Output options
+    [Parameter(ParameterSetName = 'Default')]
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [bool]$OutputCSV = $true,
+    [Parameter(ParameterSetName = 'Default')]
+    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [bool]$ShowResults = $true,
+
+    [Parameter(ParameterSetName = 'Merge', Position = 0)]
+    [switch]$MergeResults,
+    [Parameter(ParameterSetName = 'Merge')]
+    [switch]$MergeShowAllResults,
+
+    #Common parameters
+    [switch]$NoLog,
+    [switch]$ToConsole,
+    [System.IO.DirectoryInfo]$WorkingDirectory = "C:\INR\",
+    [System.IO.DirectoryInfo]$LogDirectory = "C:\INR\"
 )
-$Script:DateTime = Get-Date -Format ddMMyyyy_hhmmss
-$Script:GUID = (New-Guid).Guid
-$Script:M365ServiceURLs = [System.Collections.ArrayList]::new()
-$Script:DNSCache = [System.Collections.ArrayList]::new()
-$Script:TCPCache = [System.Collections.ArrayList]::new()
-$Script:WildCardURLs = [System.Collections.ArrayList]::new()
-$Script:URLsToVerify = [System.Collections.ArrayList]::new()
-$Script:FinalResultList = [System.Collections.ArrayList]::new()
-$Script:CRLURLsToCheck = [System.Collections.ArrayList]::new()
+
 function Get-ScriptPath {
     if ($PSScriptRoot) { 
         # Console or VS Code debug/run button/F5 temp console
@@ -131,13 +189,29 @@ function Get-ScriptPath {
 }
 function Initialize-Script {
     $Script:DateTime = Get-Date -Format ddMMyyyy_hhmmss
+    $Script:GUID = (New-Guid).Guid
+    $Script:M365ServiceURLs = [System.Collections.ArrayList]::new()
+    $Script:DNSCache = [System.Collections.ArrayList]::new()
+    $Script:TCPCache = [System.Collections.ArrayList]::new()
+    $Script:WildCardURLs = [System.Collections.ArrayList]::new()
+    $Script:URLsToVerify = [System.Collections.ArrayList]::new()
+    $Script:FinalResultList = [System.Collections.ArrayList]::new()
+    $Script:CRLURLsToCheck = [System.Collections.ArrayList]::new()
+    $Script:DateTime = Get-Date -Format ddMMyyyy_hhmmss
     if (-not(Test-Path $LogDirectory)) { New-Item $LogDirectory -ItemType Directory -Force | Out-Null }
     $LogPrefix = 'MEMNR'
     $Script:LogFile = Join-Path -Path $LogDirectory -ChildPath ('{0}_{1}.log' -f $LogPrefix, $Script:DateTime)
     if (-not(Test-Path $WorkingDirectory )) { New-Item $WorkingDirectory -ItemType Directory -Force | Out-Null }
+    $Script:ExternalIP = (ConvertFrom-Json (Invoke-WebRequest "https://geo-prod.do.dsp.mp.microsoft.com/geo")).ExternalIpAddress
+    Write-Log -Message "External IP: $($Script:ExternalIP)" -Component 'Initialze'
     $Script:CurrentLocation = Get-Location
     Set-Location $WorkingDirectory
     Get-ScriptPath
+    Import-CustomURLFile
+    if ($UseMSJSON) {
+        #ToDo: Make the M365 switch available as public switch
+        Get-M365Service -MEM
+    }
 }
 function Write-Log {
     <#
@@ -170,10 +244,21 @@ function Write-Log {
         }
     }
 }
-function Import-NetworkRequirementCSV {
+function Import-CustomURLFile {
+    if (-not($CustomURLFile)) {
+        Write-Log 'No CSV provided - trying autodetect for filename ' -Component 'ImportCustomURLFile'
+        $DefaultCSVName = "INRCustomList.csv"
+        $JoinedDefaultCSVPath = Join-Path $Script:PathToScript -ChildPath $DefaultCSVName
+        if (Test-Path $JoinedDefaultCSVPath) {
+            $CustomURLFile = $DefaultCSVName
+        } else {
+            Write-Log 'Autodetection did not find a custom CSV file' -Component 'ImportCustomURLFile'
+        }
+    }    
+    Write-Log 'Adding custom URLs to the pool' -Component 'ImportCustomURLFile'
     $Header = 'URL', 'Port', 'Protocol', 'ID'
     $Script:ManualURLs = [System.Collections.ArrayList]::new()
-    $TempObjects = Import-Csv -Path (Join-Path -Path $Script:PathToScript -ChildPath $CSVFile) -Delimiter ',' -Header $Header
+    $TempObjects = Import-Csv -Path (Join-Path -Path $Script:PathToScript -ChildPath $CustomURLFile) -Delimiter ',' -Header $Header
     foreach ($Object in $TempObjects) {
         $URLObject = [PSCustomObject]@{
             id       = $Object.ID
@@ -225,23 +310,8 @@ function Get-URLsFromID {
     }
     return $true
 }
-function Build-Factory {
-    param(
-        [string[]]$TestMethods
-    )
-    if ($TestMethods -eq 'AllTests') {
-        $TestMethods = 'DNS', 'Port', 'SSLInspection', 'HTTP'
-    }
-    foreach ($Input in $Inputs) {
-        $Script:URLsToVerify.add([PSCustomObject]@{
-                URI      = [string]$Input[0]
-                Ports    = [int[]]$Input[1]
-                Protocol = [string]$Input[2]
-                GCC      = [bool]$Input[3]
-            })
-    }
-}
 
+#Import M365 Service-URLs
 function Find-WildcardURL {
     #ID 8888 = Best effort URLs
     Write-Log -Message 'Now searching for nearest match for Wildcards' -Component 'FindWildcardURL'
@@ -277,9 +347,11 @@ function Get-M365Service {
     $EndpointURL = "https://endpoints.office.com"
     #if (Test-HTTP -URL $EndpointURL) {
     if ($M365) {
+        Write-Log 'Adding Microsoft URLs to the pool from service area M365' -Component 'GetM365URLs'
         $URLs = Invoke-RestMethod -Uri ("$EndpointURL/endpoints/WorldWide?clientrequestid=$Script:GUID")
     }
     if ($MEM) {
+        Write-Log 'Adding Microsoft URLs to the pool from service area MEM' -Component 'GetM365URLs'
         $URLs = Invoke-RestMethod -Uri ("$EndpointURL/endpoints/WorldWide?ServiceAreas=MEM`&`clientrequestid=$Script:GUID")
     }
     foreach ($Object in $URLs) {
@@ -312,10 +384,12 @@ function Get-M365Service {
         }
     }
     if ($AllowBestEffort) {
-        Write-Log -Message 'Best effort URLs are enabled - this will turn wildcards into regular URLs using a best effort method' -Component 'MEMNRMain'
+        Write-Log -Message 'Best effort URLs are enabled - this will turn wildcards into regular URLs using a best effort method' -Component 'IntuneNetworkCheckMain'
         Find-WildcardURL
     }
 }
+
+#Test Functions
 function Test-SSLInspectionByKnownCRLs {
     #Verify CRL against known good - this is an indicator for SSLInspection
     param(
@@ -371,11 +445,10 @@ function Test-SSL {
         $SSLTest = $true
         $CertInfo = New-Object -TypeName Security.Cryptography.X509Certificates.X509Certificate2($SSLStream.RemoteCertificate)
         #$Test = New-Object -TypeName System.Net.Security.SslStreamCertificateContext.create($CertInfo)
-        if ($CertInfo.Thumbprint) {
+        if ($CertInfo.Thumbprint -and $CheckCertRevocation) {
             Write-Log -Message "Grabbing CRL for $SSLTarget and verify against known-good" -Component 'TestSSL'
-            $CRLURIarray = $CertInfo.Extensions |  Where-Object -FilterScript { $_.Oid.FriendlyName -Like 'CRL*' } | ForEach-Object -Process { $_.Oid.FriendlyName; $_.Format($true) }
+            $CRLURIarray = $CertInfo.Extensions |  Where-Object -FilterScript { $_.Oid.Value -eq '2.5.29.31' } | ForEach-Object -Process { $_.Oid.FriendlyName; $_.Format($true) }
             if ($CRLURIarray[1].split('[').count -eq 2) {
-                #$CRLURI = $CRLURIarray.split('(')[2].split(')')[0]
                 $CRLURI = $CRLURIarray[1].Split('http://')[1].split('/')[0]
                 $SSLInspectionResult = Test-SSLInspectionByKnownCRLs -CRLURL $CRLURI
             } elseif ($CRLURIarray[1].split('[').count -gt 2) {
@@ -625,7 +698,10 @@ function Test-RemoteHelp {
     #>
 
 }
-
+#Service Areas
+function Test-DNSServers {
+    #ToDo
+}
 function Test-TPMAttestation {
     #ServiceIDs 173,9998
     #https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#autopilot-self-deploying-mode-and-autopilot-pre-provisioning
@@ -757,6 +833,7 @@ function Test-Autopilot {
     #ServiceIDs 164,165,169,173,182,9999
     #9999 = Autopilot
     #Import
+    $ServiceIDs = '' #TODO FAILME!!
     $Autopilot = Get-URLsFromID -IDs $ServiceIDs
     foreach ($Object in $Autopilot) {
         Test-DNS $Object.url
@@ -859,6 +936,8 @@ function Test-MicrosoftStore {
     #ServiceIDs 9996
     #https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints 
     #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#microsoft-store
+    
+    #TODO: Add errorhandling for when the custom service ID isn'T found, but there are more tests to perform!!
     $ServiceIDs = 9996
     $ServiceArea = "MS"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
@@ -876,7 +955,6 @@ function Test-MicrosoftStore {
         return $false
     }
     return $true
-    
 }
 function Test-M365 {
 
@@ -920,44 +998,126 @@ function Test-SSLInspection {
     "dm.microsoft.com", @(443, 80)
     "manage.microsoft.com", @(443, 80)
 }
+function Build-OutputCSV {
+    $OutpathFilePath = $(Join-Path $WorkingDirectory -ChildPath "ResultList$("_"+$Script:DateTime + "_"+ $Env:COMPUTERNAME).csv")
+    $Script:FinalResultList | Export-Csv -Path $OutpathFilePath -Encoding utf8
+}
+function Merge-ResultFiles {
+    param(
+        [PSCustomObject[]]$CSVInput
+    )
+    if ($CSVInput) {
+        if ($CSVInput.count -ne 2) {
+            Write-Log 'Currently, this script can only handle two file comparisons. Please provide only 2 CSVs' -Component 'MergeResultFiles' -Type 3
+            return $false
+        }
+    } else {
+        Write-Log 'No input CSV given - triggering auto detection' -Component 'MergeResultFiles'
+        $TempCSVInput = Get-ChildItem -Filter "*.csv" | Where-Object { $_.Name -ne $CustomURLFile -and $_.Name -ne 'INRCustomList.csv' }
+        if (-not($TempCSVInput)) {
+            $TempCSVInput = Get-ChildItem -Path $WorkingDirectory -Filter "*.csv" | Where-Object { $_.Name -ne $CustomURLFile -and $_.Name -ne 'INRCustomList.csv' }
+        }
+        if ($TempCSVInput.count -ne 2) {
+            Write-Log "Auto detection found more or less than 2 CSV files in $WorkingDirectory" -Component 'MergeResultFiles' -Type 3
+            return $false
+        }         
+        $CSVInput = $TempCSVInput.FullName
+    }
+    $Script:ComparedResults = [System.Collections.ArrayList]::new()
+    for ($i = 0; $i -lt $CSVInput.Count; $i++) {
+        if (-not(Test-Path $CSVInput[$i])) {
+            Write-Log "File $($CSVInput[$i]) not found" -Component 'MergeResultFiles' -Type 3
+            return $false
+        }
+        New-Variable "ImportedCSV$($i+1)" -Value	$(Import-Csv -Path $CSVInput[$i])
+    }
+    Write-Log 'CSV imported - checking and merging' -Component 'MergeResultFiles'
+    if ($ImportedCSV1.count -ne $ImportedCSV2.count) {
+        Write-Log 'These CSV files have different lenghts - please valide that you used the same tests' -Component 'MergeResultFiles' -Type 3
+        Write-Log 'This happens especially when the M365 JSON or a new version of my URL list was selected as that might change at any time' -Component 'MergeResultFiles'
+        return $false
+    }
+
+    $counter = 0
+    if ($MergeShowAllResults) { Write-Log 'MergeShowAllResults is selected. All results will be merge into one result output instead of showing only differences' -Component 'MergeResultFiles' }
+    foreach ($CSVLeftObject in $ImportedCSV1) {
+        $Result = Compare-Object -ReferenceObject $CSVLeftObject -DifferenceObject $ImportedCSV2[$counter] -Property ID, URL, Port, DNSResult, TCPResult, HTTPStatusCode, SSLTest, SSLProtocol, Issuer, AuthException, SSLInterception
+        if ($Result) {
+            Write-Log "Difference found at $($CSVLeftObject.url)" -Component 'MergeResultFiles'
+            $Script:ComparedResults.add($CSVLeftObject) | Out-Null
+            $Script:ComparedResults.add($ImportedCSV2[$counter]) | Out-Null
+        } elseif ($MergeShowAllResults) {
+            $Script:ComparedResults.add($CSVLeftObject) | Out-Null
+        }
+        $counter++
+    }
+}
+function Start-Tests {
+    if ($Intune -or $TestAllServiceAreas) {
+        Test-Intune
+    }
+    if ($Autopilot -or $TestAllServiceAreas) {
+        Test-Autopilot
+    }
+    if ($WindowsActivation -or $TestAllServiceAreas) {
+        Test-WindowsActivation
+    }
+    if ($EntraID -or $TestAllServiceAreas) {
+        Test-EntraID
+    }
+    if ($WindowsUpdate -or $TestAllServiceAreas) {
+        Test-WindowsUpdate
+    }
+    if ($DeliveryOptimization -or $TestAllServiceAreas) {
+        Test-DeliveryOptimization
+    }
+    if ($NTP -or $TestAllServiceAreas) {
+        Test-NTP
+    }
+    if ($DNS -or $TestAllServiceAreas) {
+        Test-DNSServers
+    }
+    if ($DiagnosticsData -or $TestAllServiceAreas) {
+        Test-DiagnosticsData
+    }
+    if ($NCSI -or $TestAllServiceAreas) {
+        Test-NCSI
+    }
+    if ($WNS -or $TestAllServiceAreas) {
+        Test-WNS
+    }
+    if ($WindowsStore -or $TestAllServiceAreas) {
+        Test-MicrosoftStore
+    }
+    if ($M365 -or $TestAllServiceAreas) {
+        Test-M365
+    }
+    if ($CRLs -or $TestAllServiceAreas) {
+        Test-CRL
+    }
+    if ($SelfDeploying -or $TestAllServiceAreas) {
+        Test-SelfDeploying
+    }
+    if ($Legacy -or $TestAllServiceAreas) {
+        Test-Legacy
+    }
+}
 
 #Start coding!
 Initialize-Script
 
-#Test-UDPPort "noctua.local" -Port 55555
-#Test-UDPPort "time.windows.com" -Port 123
-#Test-UDPPort "time.windows.com" -Port 123
-#Test-UDPPort "5-courier.push.apple.com" -Port 5223
-#Test-UDPPort "asdiubfaoisdbfg.com" -Port 15415
+Start-Tests
 
-if ($UseCustomCSV) {
-    Import-NetworkRequirementCSV
+if ($OutputCSV) {
+    Build-OutputCSV
 }
-if ($UseMSJSON) {
-    Get-M365Service -MEM
+if ($MergeResults) {
+    Merge-ResultFiles
+    $Script:ComparedResults | Sort-Object -Property url | Out-GridView -Title 'Intune Network test results' -Wait
 }
-if ($AllTargetTest) {
-    Set-Variable $Intune, $Autopilot, $WindowsActivation, $EntraID, $WindowsUpdate, $DeliveryOptimization, $NTP, $DNS, $DiagnosticsData, $NCSI, $WNS, $WindowsStore, $M365, $CRLs, $SelfDeploying, $Legacy -Value $true
-}
-if ($AllTests) {
-    $TestMethods = 'AllTests'
-}
-#Test-WNS
-Test-MicrosoftStore
-#Test-DeliveryOptimization
-#Test-WindowsUpdate
-#Test-TPMAttestation
 
-#ToDo: Out-Gridview
-# * 3 modes by default only show "true/false"
-# * second mode shows a little more detail like certificate information
-# * third mode shows all errors?
-$Script:FinalResultList | Out-GridView -Title 'Intune Network test results' -Wait   
-#Build-Factory $TestMethods #This should create the final URL list and prepare the selected tests
-
-<#if($UseMSJSON -and $UseCustomCSV){
-    Write-Log -Message 'Both Microsoft JSON and custom CSV specified - creating merged ressults. If a URL exists multiple times the CSV wins' -Component 'MEMNRMain'
+if ($ShowResults) {
+    $Script:FinalResultList | Out-GridView -Title 'Intune Network test results' -Wait
 }
-#>
-#Test-Autopilot
+
 Set-Location $CurrentLocation
