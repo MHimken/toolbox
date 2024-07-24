@@ -497,13 +497,14 @@ function Test-SSL {
             $KnownCRL = $false
             if (-not($CRLURIarray)) {
                 Write-Log "No CRL detected - SSL inspection is likely. Testing if tested URL $SSLTarget is a known address CRL itself" -Component 'TestSSL' -Type 2
-                $SSLInspectionResult = Test-SSLInspectionByKnownCRLs -VerifyAgainstKnownGood $SSLTarget
-                if($SSLInspectionResult){
+                $VerifyAgainstKnownGoodResult = Test-SSLInspectionByKnownCRLs -VerifyAgainstKnownGood $SSLTarget
+                if($VerifyAgainstKnownGoodResult){
                     Write-Log "$SSLTarget is a known good CRL address" -Component 'TestSSL' -Type 2
                     $KnownCRL = $true
                 }
-                if (-not($SSLInspectionResult)) {
+                if (-not($VerifyAgainstKnownGoodResult)) {
                     Write-Log "SSL Inspection very likely. $SSLTarget is not a known CRL address" -Component 'TestSSL' -Type 2
+                    $SSLInspectionResult = $true
                 }
             } elseif ($CRLURIarray[1].split('[').count -eq 2) {
                 $CRLURI = $CRLURIarray[1].Split('http://')[1].split('/')[0]
