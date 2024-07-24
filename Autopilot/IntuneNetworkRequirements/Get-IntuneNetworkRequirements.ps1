@@ -62,97 +62,130 @@ Specifies whether to disable logging. This is a switch parameter.
 Specifies the test methods to use. The default value is an empty array.
 .PARAMETER ToConsole
 Specifies whether to output log messages to the console. The default value is $true.
+.EXAMPLE
+.\Get-IntuneNetworkRequirements.ps1 -UseMSJSON $true -CustomURLFile '.\INRCustomList.csv' -AllowBestEffort -CheckCertRevocation $true -WindowsStore -ShowResults $true
+.EXAMPLE
+.\Get-IntuneNetworkRequirements.ps1 -UseMS365JSON $true -M365 -AllowBestEffort -CheckCertRevocation $true -ShowResults $true -TenantName svaninja
 .NOTES
     Version: 0.9
     Versionname: 
     Intial creation date: 19.02.2024
-    Last change date: 22.07.2024
+    Last change date: 23.07.2024
     Latest changes: https://github.com/MHimken/toolbox/tree/main/Autopilot/MEMNetworkRequirements/changelog.md
 #>
 [CmdletBinding(DefaultParameterSetName = 'Default')]
 param(
     [Parameter(ParameterSetName = 'Default', Position = 0)]
-    [bool]$TestAllServiceAreas = $true,
+    [bool]$TestAllServiceAreas,
     [Parameter(ParameterSetName = 'Default')]
-    [Parameter(ParameterSetName = 'TestM365JSON', Position = 0)]
+    [Parameter(ParameterSetName = 'TestMSJSON', Position = 0)]
     [bool]$UseMSJSON = $true,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMS365JSON', Position = 0)]
+    [bool]$UseMS365JSON = $true,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom', Position = 0)]
     [string]$CustomURLFile,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$AllowBestEffort,
     [Parameter(ParameterSetName = 'Default')]
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [bool]$CheckCertRevocation = $true,
-
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$GCC,
     #Service Areas
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$Intune,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$Autopilot,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$WindowsActivation,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$EntraID,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$WindowsUpdate,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$DeliveryOptimization,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$NTP,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$DNS,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$DiagnosticsData,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$NCSI,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
-    [switch]$WNS,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [switch]$WindowsNotificationService,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$WindowsStore,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$M365,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$CRLs,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$SelfDeploying,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$RemoteHelp,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$TPMAttestation,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$DeviceHealth,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$Apple,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$Android,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$Legacy,
     
     #Special Methods
-    [string[]]$TestMethods,
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    #[string[]]$TestMethods, # ToDo
+    [Parameter(ParameterSetName = 'TestMS365JSON', Mandatory)]
+    [string]$TenantName,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [int]$MaxDelayInMS = 300, #300 is recommended due to some Microsoft services being heavy load (like MS Update)
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$BurstMode, #Divide the delay by 50 and try different speeds. Give warning when more than 10 URLs are tested
     
     #Output options
     [Parameter(ParameterSetName = 'Default')]
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [bool]$OutputCSV = $true,
     [Parameter(ParameterSetName = 'Default')]
-    [Parameter(ParameterSetName = 'TestM365JSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [bool]$ShowResults = $true,
 
@@ -168,6 +201,7 @@ param(
     [System.IO.DirectoryInfo]$LogDirectory = "C:\INR\"
 )
 
+#Preparation
 function Get-ScriptPath {
     if ($PSScriptRoot) { 
         # Console or VS Code debug/run button/F5 temp console
@@ -211,6 +245,10 @@ function Initialize-Script {
     if ($UseMSJSON) {
         #ToDo: Make the M365 switch available as public switch
         Get-M365Service -MEM
+    }
+    if ($UseMS365JSON) {
+        #ToDo: Make the M365 switch available as public switch
+        Get-M365Service -M365
     }
 }
 function Write-Log {
@@ -313,21 +351,26 @@ function Get-URLsFromID {
 
 #Import M365 Service-URLs
 function Find-WildcardURL {
-    #ID 8888 = Best effort URLs
     Write-Log -Message 'Now searching for nearest match for Wildcards' -Component 'FindWildcardURL'
     foreach ($Object in $Script:WildCardURLs) {
-        #Write-Log -Message "Searching for $($Object.url)" -Component 'FindWildcardURL' 
+        Write-Log -Message "Searching for $($Object.url)" -Component 'FindWildcardURL'
         if ($($Script:M365ServiceURLs | Where-Object { $_.url -like "*$($Object.url.replace('*.',''))*" })) {
-            #if ($Object.url -in $Script:M365ServiceURLs.url) {
-            #Write-Log -Message 'Found match in M365 service list - looking up next URL' -Component 'FindWildcardURL'
             continue
         }
-        #Write-Log -Message 'We did not find a matching URL using best effort (no wildcard)' -Component 'FindWildcardURL'
+        $ReplaceElement = $Object.url.split('.')[0] 
+        if ($ReplaceElement -ne '*') {
+            $WildcardReplacement = $ReplaceElement.replace('*', 'INR')
+            $NewURL = $Object.url.replace($ReplaceElement, $WildcardReplacement)
+        } else {
+            $NewURL = $Object.url.replace('*.', '')
+        }
+
+        Write-Log -Message 'We did not find a matching URL using best effort (no wildcard)' -Component 'FindWildcardURL'
         $URLObject = [PSCustomObject]@{
             id       = $Object.ID
             #serviceArea            = $Object.serviceArea
             #serviceAreaDisplayName = $Object.serviceAreaDisplayName
-            url      = $Object.url.replace('*.', '')
+            url      = $NewURL
             Port     = $Object.port
             Protocol = $Object.protocol
             #expressRoute           = $Object.expressRoute
@@ -348,7 +391,8 @@ function Get-M365Service {
     #if (Test-HTTP -URL $EndpointURL) {
     if ($M365) {
         Write-Log 'Adding Microsoft URLs to the pool from service area M365' -Component 'GetM365URLs'
-        $URLs = Invoke-RestMethod -Uri ("$EndpointURL/endpoints/WorldWide?clientrequestid=$Script:GUID")
+        if ($Tenantname) { $URLs = Invoke-RestMethod -Uri ("$EndpointURL/endpoints/WorldWide?clientrequestid=$Script:GUID&TenantName=$Tenantname") }
+        else { $URLs = Invoke-RestMethod -Uri ("$EndpointURL/endpoints/WorldWide?clientrequestid=$Script:GUID") }
     }
     if ($MEM) {
         Write-Log 'Adding Microsoft URLs to the pool from service area MEM' -Component 'GetM365URLs'
@@ -372,7 +416,7 @@ function Get-M365Service {
                     #notes                  = $Object.notes
                 }
                 if ($URL -match '\*') {
-                    #Write-Log -Message "The URI $URL contains a wildcard - trying to find nearest match later" -Component 'GetM365Service'
+                    Write-Log -Message "The URI $URL contains a wildcard - trying to find nearest match later" -Component 'GetM365Service'
                     if ($URL -in $Script:WildCardURLs.url) {
                         continue
                     }
@@ -393,23 +437,24 @@ function Get-M365Service {
 function Test-SSLInspectionByKnownCRLs {
     #Verify CRL against known good - this is an indicator for SSLInspection
     param(
-        [string]$CRLURL
+        [string]$CRLURL,
+        [string]$VerifyAgainstKnownGood
     )
-    $SSLInspectionLikely = $true
+    $KnownCRL = $false
     if (-not($Script:CRLURLsToCheck)) {
         if ($Script:ManualURLs) {
-            $Script:ManualURLs | Where-Object { $_.id -in "125", "84" } | ForEach-Object { $Script:CRLURLsToCheck.add($_) | Out-Null }
+            $Script:ManualURLs | Where-Object { $_.id -in "125", "84", "9993" } | ForEach-Object { $Script:CRLURLsToCheck.add($_) | Out-Null }
         }
         if ($Script:M365ServiceURLs) {
-            $Script:M365ServiceURLs | Where-Object { $_.id -in "125", "84" } | ForEach-Object { $Script:CRLURLsToCheck.add($_) | Out-Null }
+            $Script:M365ServiceURLs | Where-Object { $_.id -in "125", "84", "9993" } | ForEach-Object { $Script:CRLURLsToCheck.add($_) | Out-Null }
         }
     }
     foreach ($URL in $Script:CRLURLsToCheck.url) {
-        if ($CRLURL -like $("*" + $URL + "*")) {
-            $SSLInspectionLikely = $false
+        if ($CRLURL -like $("*" + $URL + "*") -or $VerifyAgainstKnownGood -eq $URL) {
+            $KnownCRL = $true
         }
     }
-    return $SSLInspectionLikely
+    return $KnownCRL
 }
 function Test-SSL {
     param(
@@ -448,12 +493,30 @@ function Test-SSL {
         if ($CertInfo.Thumbprint -and $CheckCertRevocation) {
             Write-Log -Message "Grabbing CRL for $SSLTarget and verify against known-good" -Component 'TestSSL'
             $CRLURIarray = $CertInfo.Extensions |  Where-Object -FilterScript { $_.Oid.Value -eq '2.5.29.31' } | ForEach-Object -Process { $_.Oid.FriendlyName; $_.Format($true) }
-            if ($CRLURIarray[1].split('[').count -eq 2) {
+            $SSLInspectionResult = $false
+            $KnownCRL = $false
+            if (-not($CRLURIarray)) {
+                Write-Log "No CRL detected - SSL inspection is likely. Testing if tested URL $SSLTarget is a known address CRL itself" -Component 'TestSSL' -Type 2
+                $SSLInspectionResult = Test-SSLInspectionByKnownCRLs -VerifyAgainstKnownGood $SSLTarget
+                if($SSLInspectionResult){
+                    Write-Log "$SSLTarget is a known good CRL address" -Component 'TestSSL' -Type 2
+                    $KnownCRL = $true
+                }
+                if (-not($SSLInspectionResult)) {
+                    Write-Log "SSL Inspection very likely. $SSLTarget is not a known CRL address" -Component 'TestSSL' -Type 2
+                }
+            } elseif ($CRLURIarray[1].split('[').count -eq 2) {
                 $CRLURI = $CRLURIarray[1].Split('http://')[1].split('/')[0]
-                $SSLInspectionResult = Test-SSLInspectionByKnownCRLs -CRLURL $CRLURI
+                $KnownCRL = Test-SSLInspectionByKnownCRLs -CRLURL $CRLURI
+                if (-not($KnownCRL)) {
+                    Write-Log "Unknown CRL. $SSLTarget's certificate didn't provide any known CRL address" -Component 'TestSSL' -Type 2
+                }
             } elseif ($CRLURIarray[1].split('[').count -gt 2) {
-                $SSLInspectionResult = $CRLURIarray[1].split('=').split('[').trim() | Where-Object { $_.startswith("http://") } | ForEach-Object { Test-SSLInspectionByKnownCRLs -CRLURL $_.Split('http://')[1].split('/')[0] } | Where-Object { $_ -contains $true }
-                if (-not($SSLInspectionResult)) { $SSLInspectionResult = $false }
+                $TestMultipleCRLs = $CRLURIarray[1].split('=').split('[').trim() | Where-Object { $_.startswith("http://") } | ForEach-Object { Test-SSLInspectionByKnownCRLs -CRLURL $_.Split('http://')[1].split('/')[0] } | Where-Object { $_ -contains $true }
+                if ($TestMultipleCRLs) { $KnownCRL = $true }
+                if (-not($KnownCRL)) {
+                    Write-Log "Unknown CRLs. $SSLTarget's certificate didn't provide any known CRL addresses" -Component 'TestSSL' -Type 2
+                }
             }
         }
     }
@@ -467,6 +530,7 @@ function Test-SSL {
         SSLProtocol     = $SSLStream.SslProtocol
         Issuer          = $CertInfo.Issuer
         AuthException   = $AuthException
+        KnownCRL        = $KnownCRL
         SSLInterception = $SSLInspectionResult
     }
     return $Result
@@ -653,6 +717,7 @@ function Test-Network {
     $TestObject | Add-Member -Name 'SSLProtocol' -MemberType NoteProperty -Value ""
     $TestObject | Add-Member -Name 'Issuer' -MemberType NoteProperty -Value ""
     $TestObject | Add-Member -Name 'AuthException' -MemberType NoteProperty -Value ""
+    $TestObject | Add-Member -Name 'KnownCRL' -MemberType NoteProperty -Value ""
     $TestObject | Add-Member -Name 'SSLInterception' -MemberType NoteProperty -Value ""
     $DNS = Test-DNS -DNSTarget $TestObject.url
     $TestObject.DNSResult = $DNS
@@ -680,14 +745,22 @@ function Test-Network {
                     if ($SSLTest.AuthException) {
                         $TestObject.AuthException = $SSLTest.AuthException
                     }
+                    if ($null -ne $SSLTest.KnownCRL) {
+                        $TestObject.KnownCRL = $SSLTest.KnownCRL
+                    }      
                     if ($null -ne $SSLTest.SSLInterception) {
                         $TestObject.SSLInterception = $SSLTest.SSLInterception
-                    }                   
+                    }
                 }
             }
         }
     }
     $Script:FinalResultList.add($TestObject) | Out-Null
+}
+
+#Service Areas
+function Test-DNSServers {
+    #ToDo
 }
 function Test-RemoteHelp {
     <#
@@ -696,20 +769,30 @@ function Test-RemoteHelp {
     #ServiceIDs 181,187,189
     #ServiceIDs GCC 188
     #>
-
-}
-#Service Areas
-function Test-DNSServers {
-    #ToDo
+    $ServiceIDs = 181, 187, 189
+    if ($GCC) {
+        $ServiceIDs = 181, 187, 188, 189
+    }
+    $ServiceArea = "RemoteHelp"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $RH = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($RH)) {
+        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($RHTarget in $Script:URLsToVerify) {
+        Test-Network $RHTarget
+    }
+    return $true
 }
 function Test-TPMAttestation {
     #ServiceIDs 173,9998
     #https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#autopilot-self-deploying-mode-and-autopilot-pre-provisioning
     $ServiceIDs = 173, 9998
-    $ServiceArea = "TPM"
+    $ServiceArea = "TPMAtt"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
-    $TPM = Get-URLsFromID -IDs $ServiceIDs
-    if (-not($TPM)) {
+    $TPMAtt = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($TPMAtt)) {
         Write-Log -Message 'No matching ID found for service area: Windows (Push) Notification Services' -Component "Test$ServiceArea" -Type 3
         return $false
     }
@@ -737,12 +820,35 @@ function Test-WNS {
 function Test-DeviceHealth {
     <#
     Microsoft Azure Attestation (formerly Device Health)
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#migrating-device-health-attestation-compliance-policies-to-microsoft-azure-attestation
+    https://learn.microsoft.com/en-us/windows/client-management/mdm/healthattestation-csp
     ServiceIDs 186
+    GCC 9995
     #>
+    $ServiceIDs = 186
+    if ($GCC) {
+        $ServiceIDs = 186, 9995
+    }
+    $ServiceArea = "DeviceHealth"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $DH = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($DH)) {
+        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($DHTarget in $Script:URLsToVerify) {
+        Test-Network $DHTarget
+    }
+    return $true
 }
 
 function Test-DeliveryOptimization {
-    $ServiceIDs = 164
+    <#
+    ServiceIDs 172,164,9994
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#delivery-optimization-dependencies
+    https://learn.microsoft.com/en-us/windows/deployment/do/waas-delivery-optimization-faq#what-hostnames-should-i-allow-through-my-firewall-to-support-delivery-optimization
+    #>
+    $ServiceIDs = 172, 164, 9994
     $ServiceArea = "DO"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     Write-Log 'Filtered Port TCP 7680: Documentation will specify port 7680 TCP. This is used to listen to other clients requests (from the host)' -Component 'TestDO'
@@ -852,35 +958,74 @@ function Test-Autopilot {
     $TPMAttTest = Test-TPMAttestation
 }
 function Test-Apple {
-    #ServiceIDs 178
-    #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#apple-dependencies
     <#
-    "itunes.apple.com", 443
-    #"*.itunes.apple.com", 443
-    #"*.mzstatic.com", 443
-    #"*.phobos.apple.com", 443
-    "phobos.itunes-apple.com.akadns.net", 443
-    "5-courier.push.apple.com", 443
-    "phobos.apple.com", 443
-    "ocsp.apple.com", 443
-    "ax.itunes.apple.com", 443
-    "ax.itunes.apple.com.edgesuite.net", 443
-    "s.mzstatic.com", 443
-    "a1165.phobos.apple.com", 443
+    ServiceIDs 178
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#apple-dependencies
     #>
     Write-Log -Message 'Port 5223 is only used as a fallback for push notifications and only valid for push.apple.com addresses' -Component 'TestApple'
     Write-Log -Message 'Warning: Other URLs might be required, please also consult https://support.apple.com/de-de/101555' -Component 'TestApple' -Type 2
+    $ServiceIDs = 178
+    $ServiceArea = "Apple"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $AAPL = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($AAPL)) {
+        Write-Log -Message 'No matching ID found for service area: Windows (Push) Notification Services' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($AAPLTarget in $Script:URLsToVerify) {
+        Test-Network $AAPLTarget
+    }
+    return $true
 }
 function Test-Android {
-    #ServiceIDs 179
-    #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#android-aosp-dependencies
-    #
     <#
-    "intunecdnpeasd.azureedge.net", 443
+    ServiceIDs 179,9992
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#android-aosp-dependencies
     #>
     Write-Log -Message 'Warning: Other URLs might be required, please also consult https://static.googleusercontent.com/media/www.android.com/en//static/2016/pdfs/enterprise/Android-Enterprise-Migration-Bluebook_2019.pdf' -Component 'TestAndroid' -Type 2
+    $ServiceIDs = 179, 9992
+    $ServiceArea = "Android"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+
+    Write-Log 'Testing Android connectivity check' -Component "Test$ServiceArea"
+    $AndroidConnectivity = Invoke-WebRequest -Uri https://www.google.com/generate_204
+    if ($AndroidConnectivity.StatusCode -ne 204) {
+        Write-Log 'Android connectivity check failed - not testing any other addresses' -Component "Test$ServiceArea"
+        return $false
+    }
+    $Googl = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($Googl)) {
+        Write-Log -Message 'No matching ID found for service area: Windows (Push) Notification Services' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($GoogleTarget in $Script:URLsToVerify) {
+        Test-Network $GoogleTarget
+    }
+    return $true
 }
-function Test-WindowsActivation {}
+function Test-CRL {
+    <#
+    ServiceIDs 84,125,9993
+    Source: Martin Himken - this isn't well documented. From the MSJSON we can assume these are correct
+    #>
+    $ServiceIDs = 84,125,9993
+    $ServiceArea = "CRL"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    Write-Log "CRLs should only ever be available through Port 80, however the MS-JSOn specifies 443 as well. Expect errors going forward" -Component "Test$ServiceArea"
+    $CertRevocation = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($CertRevocation)) {
+        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($CRLTarget in $Script:URLsToVerify) {
+        Test-Network $CRLTarget
+    }
+    return $true
+
+}
+function Test-WindowsActivation {
+    #https://support.microsoft.com/en-us/topic/windows-activation-or-validation-fails-with-error-code-0x8004fe33-a9afe65e-230b-c1ed-3414-39acd7fddf52
+}
 function Test-EntraID {}
 function Test-WindowsUpdate {
     #ServiceIDs 164
@@ -935,7 +1080,7 @@ function Test-AppInstaller {
 function Test-MicrosoftStore {
     #ServiceIDs 9996
     #https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints 
-    #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#microsoft-store
+    #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#microsoft-store
     
     #TODO: Add errorhandling for when the custom service ID isn'T found, but there are more tests to perform!!
     $ServiceIDs = 9996
@@ -957,26 +1102,24 @@ function Test-MicrosoftStore {
     return $true
 }
 function Test-M365 {
+    $ServiceIDs = 41,43,44,45,46,47,49,50,51,53,56,59,64,66,67,68,69,70,71,73,75,78,79,83,84,86,89,91,92,93,95,96,97,105,114,116,117,118,121,122,124,125,126,147,152,153,156,158,159,160,184
+    $ServiceArea = "MS365"
+    if(-not($UseMS365JSON)){
+        Write-Log 'UseMS365JSON was not specified. This test can not be performed, because most IDs are not available' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $M365FullTest = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($M365FullTest)) {
+        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($M365Target in $Script:URLsToVerify) {
+        Test-Network $M365Target
+    }
+    return $true
+}
 
-}
-function Test-CRL {
-    #I have no idea why these are more than just URLs
-    #Source: https://support.microsoft.com/en-us/topic/windows-activation-or-validation-fails-with-error-code-0x8004fe33-a9afe65e-230b-c1ed-3414-39acd7fddf52
-    "https://go.microsoft.com/"
-    "http://go.microsoft.com/"
-    "https://login.live.com"
-    "https://activation.sls.microsoft.com/"
-    "http://crl.microsoft.com/pki/crl/products/MicProSecSerCA_2007-12-04.crl"
-    "https://validation.sls.microsoft.com/"
-    "https://activation-v2.sls.microsoft.com/"
-    "https://validation-v2.sls.microsoft.com/"
-    "https://displaycatalog.mp.microsoft.com/"
-    "https://licensing.mp.microsoft.com/"
-    "https://purchase.mp.microsoft.com/"
-    "https://displaycatalog.md.mp.microsoft.com/"
-    "https://licensing.md.mp.microsoft.com/"
-    "https://purchase.md.mp.microsoft.com/"
-}
 function Test-SelfDeploying {
 
 }
@@ -1083,7 +1226,7 @@ function Start-Tests {
     if ($NCSI -or $TestAllServiceAreas) {
         Test-NCSI
     }
-    if ($WNS -or $TestAllServiceAreas) {
+    if ($WindowsNotificationService -or $TestAllServiceAreas) {
         Test-WNS
     }
     if ($WindowsStore -or $TestAllServiceAreas) {
@@ -1097,6 +1240,21 @@ function Start-Tests {
     }
     if ($SelfDeploying -or $TestAllServiceAreas) {
         Test-SelfDeploying
+    }
+    if ($RemoteHelp -or $TestAllServiceAreas) {
+        Test-RemoteHelp
+    }
+    if ($TPMAttestation -or $TestAllServiceAreas) {
+        Test-TPMAttestation
+    }
+    if ($DeviceHealth -or $TestAllServiceAreas) {
+        Test-DeviceHealth
+    }
+    if ($Apple -or $TestAllServiceAreas) {
+        Test-Apple
+    }
+    if ($Android -or $TestAllServiceAreas) {
+        Test-Android
     }
     if ($Legacy -or $TestAllServiceAreas) {
         Test-Legacy
