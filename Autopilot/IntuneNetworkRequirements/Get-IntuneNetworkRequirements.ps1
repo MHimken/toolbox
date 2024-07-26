@@ -162,6 +162,9 @@ param(
     [switch]$Android,
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$EndpointAnalytics,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$Legacy,
     
     #Special Methods
@@ -498,7 +501,7 @@ function Test-SSL {
             if (-not($CRLURIarray)) {
                 Write-Log "No CRL detected - SSL inspection is likely. Testing if tested URL $SSLTarget is a known address CRL itself" -Component 'TestSSL' -Type 2
                 $VerifyAgainstKnownGoodResult = Test-SSLInspectionByKnownCRLs -VerifyAgainstKnownGood $SSLTarget
-                if($VerifyAgainstKnownGoodResult){
+                if ($VerifyAgainstKnownGoodResult) {
                     Write-Log "$SSLTarget is a known good CRL address" -Component 'TestSSL' -Type 2
                     $KnownCRL = $true
                 }
@@ -609,7 +612,7 @@ function Test-TCPPort {
         [int]$MaxWaitTime
     )
     if (-not($MaxWaitTime)) {
-        $MaxWaitTime = 150
+        $MaxWaitTime = $MaxDelayInMS
     }
     if ($TCPTarget -in $Script:DNSCache.CachedURL) {
         $DNSCachedResult = $Script:DNSCache | Where-Object { $_.CachedURL -eq $TCPTarget } | Select-Object -Property result -First 1
@@ -653,11 +656,10 @@ function Test-TCPPort {
     }
     return $success
 }
-function Test-UDPPort {
+function Test-NTPviaUDP {
     <#
     .SYNOPSIS
-    This function is effectively not working correctly, because an UDP connection is stateless and we can't expect an answer from MS-Services
-    The only service that will ever answer, because it has to, is a NTP server. There are other ways to test that though see Test-NTP
+    The only service that will ever answer to a UDP request, because it has to, is a NTP server. There are other ways to test that though see the Test-NTP function
     HUGE thanks to https://github.com/proxb/PowerShell_Scripts/blob/master/Test-Port.ps1 and
     Jannik Reinhard for the idea to use NTP to test UDP https://github.com/JayRHa/Intune-Scripts/blob/main/Check-AutopilotPrerequisites/Check-AutopilotPrerequisites.ps1#L145
     #>
@@ -726,8 +728,12 @@ function Test-Network {
         if ($BurstMode) {
             Test-TCPBurstMode -TCPTarget $TestObject.url
         } else {
-            $TCP = Test-TCPPort -TCPTarget $TestObject.url -TCPPort $TestObject.port
-            $TestObject.TCPResult = $TCP
+            if ($TestObject.protocol -ne 'TCP') {
+                Write-Log 'This script can not test UDP ports - only NTP (see log for those results)' -Component 'TestNetwork' -Type 2
+            } else {
+                $TCP = Test-TCPPort -TCPTarget $TestObject.url -TCPPort $TestObject.port
+                $TestObject.TCPResult = $TCP
+            }
             if ($TCP) {
                 #Test HTTP(s) Connections
                 $HTTPStatuscode = Test-HTTP -HTTPURL $TestObject.url -HTTPPort $TestObject.port
@@ -873,6 +879,339 @@ function Test-DeliveryOptimization {
     }
     return $true
 }
+
+
+function Test-Apple {
+    <#
+    ServiceIDs 178
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#apple-dependencies
+    #>
+    Write-Log -Message 'Port 5223 is only used as a fallback for push notifications and only valid for push.apple.com addresses' -Component 'TestApple'
+    Write-Log -Message 'Warning: Other URLs might be required, please also consult https://support.apple.com/de-de/101555' -Component 'TestApple' -Type 2
+    $ServiceIDs = 178
+    $ServiceArea = "Apple"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $AAPL = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($AAPL)) {
+        Write-Log -Message 'No matching ID found for service area: Windows (Push) Notification Services' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($AAPLTarget in $Script:URLsToVerify) {
+        Test-Network $AAPLTarget
+    }
+    return $true
+}
+function Test-Android {
+    <#
+    ServiceIDs 179,9992
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#android-aosp-dependencies
+    #>
+    Write-Log -Message 'Warning: Other URLs might be required, please also consult https://static.googleusercontent.com/media/www.android.com/en//static/2016/pdfs/enterprise/Android-Enterprise-Migration-Bluebook_2019.pdf' -Component 'TestAndroid' -Type 2
+    $ServiceIDs = 179, 9992
+    $ServiceArea = "Android"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+
+    Write-Log 'Testing Android connectivity check' -Component "Test$ServiceArea"
+    $AndroidConnectivity = Invoke-WebRequest -Uri https://www.google.com/generate_204
+    if ($AndroidConnectivity.StatusCode -ne 204) {
+        Write-Log 'Android connectivity check failed - not testing any other addresses' -Component "Test$ServiceArea"
+        return $false
+    }
+    $Googl = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($Googl)) {
+        Write-Log -Message 'No matching ID found for service area: Windows (Push) Notification Services' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($GoogleTarget in $Script:URLsToVerify) {
+        Test-Network $GoogleTarget
+    }
+    return $true
+}
+function Test-CRL {
+    <#
+    ServiceIDs 84,125,9993
+    Source: Martin Himken - this isn't well documented. From the MSJSON we can assume these are correct
+    #>
+    $ServiceIDs = 84, 125, 9993
+    $ServiceArea = "CRL"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    Write-Log "CRLs should only ever be available through Port 80, however the MS-JSOn specifies 443 as well. Expect errors going forward" -Component "Test$ServiceArea"
+    $CertRevocation = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($CertRevocation)) {
+        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($CRLTarget in $Script:URLsToVerify) {
+        Test-Network $CRLTarget
+    }
+    return $true
+}
+function Test-WindowsActivation {
+    <#
+    ServiceIDs 9991
+    https://support.microsoft.com/en-us/topic/windows-activation-or-validation-fails-with-error-code-0x8004fe33-a9afe65e-230b-c1ed-3414-39acd7fddf52
+    #>
+    $ServiceIDs = 9991
+    $ServiceArea = "WinAct"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    Write-Log 'These following URLs are best effort - there is very little documentation about this' -Component "Test$ServiceArea"
+    $WinAct = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($WinAct)) {
+        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($WinActTarget in $Script:URLsToVerify) {
+        Test-Network $WinActTarget
+    }
+    return $true
+}
+function Test-EntraID {
+    <#
+    ServiceIDs 9990,125,84,9993
+    https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/tshoot-connect-connectivity#connectivity-issues-in-the-installation-wizard
+    "Of these URLs, the URLs listed in the following table are the absolute bare minimum to be able to connect to Microsoft Entra ID at all"
+    As this list contains a lot of CRLs IDs 125,84 and 9993 (Test-CRL) also apply here - this is more than the bare minimum but CRLs should always be reachable.
+    #>
+    $ServiceIDs = 9990
+    $ServiceArea = "EID"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    Write-Log 'The following URLs are the bare minimum for EntraID to work - depending on the situation there might be more' -Component "Test$ServiceArea"
+    $EID = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($EID)) {
+        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($EIDTarget in $Script:URLsToVerify) {
+        Test-Network $EIDTarget
+    }
+    $TestCRLs = Test-CRL
+    if (-not($TestCRLs)) {
+        Write-Log "Testing CRLs for $ServiceArea failed" -Component "Test$ServiceArea" -Type 2
+    }
+    return $true
+}
+function Test-WindowsUpdate {
+    <#
+    ServiceIDs 164
+    https://learn.microsoft.com/en-us/troubleshoot/windows-client/installing-updates-features-roles/windows-update-issues-troubleshooting#device-cant-access-update-files
+    #>
+    $ServiceIDs = 164
+    $ServiceArea = "WU"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $WindowsUpdate = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($WindowsUpdate)) {
+        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($WUTarget in $Script:URLsToVerify) {
+        Test-Network $WUTarget
+    }
+    return $true
+}
+function Test-NTP {
+    <#
+    ServiceIDs 165
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#autopilot-dependencies
+    Would throw 0x800705B4 if the URL exists but isn't an NTP or 0x80072AF9 for not resolved
+    #>
+
+    $ServiceIDs = 165
+    $ServiceArea = "NTPServers"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    Write-Log 'Microsofts JSON claims more URLs for Port 123, where in reality its only time.windows.com' -Component "Test$ServiceArea"
+    Write-Log 'There are more URLs related to NCSI in the Service ID 165, which will also be tested.' -Component "Test$ServiceArea" 
+    $CurrentTimeServer = w32tm /query /source
+    if ($CurrentTimeServer -like "*80070005*") {
+        Write-Log 'You need to run this script as admin to view the currently configured NTP server' -Component "Test$ServiceArea" -Type 2
+    } elseif ($CurrentTimeServer -ne 'time.windows.com') {
+        if ($Autopilot) {
+            Write-Log 'time.windows.com is currently not the timeserver - this is a requirement for Autopilot' -Component "Test$ServiceArea" -Type 2
+        }
+        $CustomTimeServerTestResult = Test-NTPviaUDP $CurrentTimeServer -Port 123
+    }
+    Write-Log 'Testing default NTP server' -Component "Test$ServiceArea" 
+    $DefaultTimeServerTestResult = w32tm /stripchart /computer:time.windows.com /dataonly /samples:3
+    if ($DefaultTimeServerTestResult -like "*80072AF9*" -or $DefaultTimeServerTestResult[3 - ($DefaultTimeServerTestResult.count)] -like "*800705B4*") {
+        Write-Log 'Testing with w32tm failed - switching to UDP test for NTP' -Component "Test$ServiceArea" -Type 2
+        $DefaultTimeServerTestResult = Test-NTPviaUDP 'time.windows.com' -Port 123
+    }
+    if ($CustomTimeServerTestResult -or $DefaultTimeServerTestResult) {
+        Write-Log "Custom NTP Server Test: $CustomTimeServerTestResult" -Component "Test$ServiceArea"
+        Write-Log "Default NTP Server Test: $($null -ne $DefaultTimeServerTestResult)" -Component "Test$ServiceArea"
+        $NTPServers = Get-URLsFromID -IDs $ServiceIDs -FilterPort 80,443
+        if (-not($NTPServers)) {
+            Write-Log 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+            return $false
+        }
+        foreach ($NTPServersTarget in $Script:URLsToVerify) {
+            Test-Network $NTPServersTarget
+        }
+        return $true
+    }
+    Write-Log 'Both, custom and default, NTP servers tested did not answer as expected' -Component "Test$ServiceArea" -Type 3
+    return $false
+}
+function Test-DiagnosticsDataUpload {
+    <#
+    ServiceIDs 182,9989
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#autopilot-dependencies
+    https://learn.microsoft.com/en-us/mem/intune/remote-actions/collect-diagnostics#requirements-for-windows-devices
+    #>
+    $ServiceIDs = 182, 9989
+    $ServiceArea = "Diagnostics"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $Diagnostics = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($Diagnostics)) {
+        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($DiagnosticsTarget in $Script:URLsToVerify) {
+        Test-Network $DiagnosticsTarget
+    }
+    return $true
+}
+function Test-EndpointAnalytics {
+    <#
+    ServiceIDs 69,163,9988
+    https://learn.microsoft.com/en-us/mem/analytics/troubleshoot#bkmk_endpoints
+    #>
+    $ServiceIDs = 69,163,9988
+    $ServiceArea = "EndpAnalytics"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $EndpAnalytics = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($EndpAnalytics)) {
+        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($EndpAnalyticsTarget in $Script:URLsToVerify) {
+        Test-Network $EndpAnalyticsTarget
+    }
+    return $true
+}
+function Test-NCSI {
+    <#
+    ServiceIDs 165,9987
+    https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints
+    https://learn.microsoft.com/en-us/windows/privacy/manage-windows-21h2-endpoints
+    #>
+    $ServiceIDs = 165,9987
+    $ServiceArea = "NetworkIndicator"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    Write-Log "Service ID 165 is mixed up with NTP, hence Service ID 9987 is required to only test the correct URLs and ports" -Component "Test$ServiceArea" -Type 2
+    $NCSIActive = (Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Policies\Microsoft\Windows\NetworkConnectivityStatusIndicator -Name NoActiveProbe) -eq 0
+    if(-not($NCSIActive)){
+        Write-Log 'The NCSI has been detected as disabled - continuing with network tests regardless' -Component "Test$ServiceArea" -Type 2
+    }
+    $NetworkIndicator = Get-URLsFromID -IDs $ServiceIDs -FilterPort 123
+    if (-not($NetworkIndicator)) {
+        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($NetworkIndicatorTarget in $Script:URLsToVerify) {
+        Test-Network $NetworkIndicatorTarget
+    }
+    return $true
+}
+
+function Test-AppInstaller {
+    "displaycatalog.md.mp.microsoft.com"
+    "purchase.md.mp.microsoft.com"
+    "licensing.mp.microsoft.com"
+    "storeedgefd.dsx.mp.microsoft.com"
+}
+function Test-MicrosoftStore {
+    #ServiceIDs 9996
+    #https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints 
+    #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#microsoft-store
+    
+    #TODO: Add errorhandling for when the custom service ID isn'T found, but there are more tests to perform!!
+    $ServiceIDs = 9996
+    $ServiceArea = "MS"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $MicrosoftStore = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($MicrosoftStore)) {
+        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($MSTarget in $Script:URLsToVerify) {
+        Test-Network $MSTarget
+    }
+    $WNSTest = Test-WNS
+    $DOTest = Test-DeliveryOptimization
+    if (-not($WNSTest -and $DOTest)) {
+        return $false
+    }
+    return $true
+}
+
+function Test-SelfDeploying {
+
+}
+function Test-Legacy {
+    <#
+    .NOTES
+    Test-Hybrid Join?
+    #>
+}
+function Test-AuthenticatedProxy {
+    #These URLs don't allow authenticated proxies according to https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#access-for-managed-devices 
+    #("*.azureedge.net", @(443, 80))
+    ("graph.microsoft.com", @(443))
+    ("manage.microsoft.com", @(443, 80))
+    Test-DeviceHealth
+}
+function Test-SSLInspection {
+    #These URLs don't allow SSL inspection
+    "dm.microsoft.com", @(443, 80)
+    "manage.microsoft.com", @(443, 80)
+}
+function Test-M365 {
+    $ServiceIDs = 41, 43, 44, 45, 46, 47, 49, 50, 51, 53, 56, 59, 64, 66, 67, 68, 69, 70, 71, 73, 75, 78, 79, 83, 84, 86, 89, 91, 92, 93, 95, 96, 97, 105, 114, 116, 117, 118, 121, 122, 124, 125, 126, 147, 152, 153, 156, 158, 159, 160, 184
+    $ServiceArea = "MS365"
+    if (-not($UseMS365JSON)) {
+        Write-Log 'UseMS365JSON was not specified. This test can not be performed, because most IDs are not available' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $M365FullTest = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($M365FullTest)) {
+        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($M365Target in $Script:URLsToVerify) {
+        Test-Network $M365Target
+    }
+    return $true
+}
+function Test-Autopilot {
+    <#
+    Sources:
+    https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#windows-autopilot-deployment-service
+    #Autopilot dependencies according to https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#autopilot-dependencies
+    #"www.msftncsi.com" #Only Windows <10? https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/internet-explorer-edge-open-connect-corporate-public-network#ncsi-active-probes-and-the-network-status-alert
+    #>
+    #ServiceIDs 164,165,169,173,182,9999
+    #9999 = Autopilot
+    #Import
+    $ServiceIDs = '' #TODO FAILME!!
+    $Autopilot = Get-URLsFromID -IDs $ServiceIDs
+    foreach ($Object in $Autopilot) {
+        Test-DNS $Object.url
+    }
+    <#
+    Test-NTP #165
+    Test-WNS #169
+    Test-TPMAttestation #173
+    Test-DeliveryOptimization #164
+    Test-WNS #169
+    #>
+    #TODO: Build logic for these tests :)
+    $WNSTest = Test-WNS
+    $DOTest = Test-DeliveryOptimization
+    $NTPTest = Test-NTP
+    $TPMAttTest = Test-TPMAttestation
+}
+
 function Test-Intune {
     param(
         [switch]$Enhanced
@@ -930,218 +1269,7 @@ function Test-Intune {
     #>
     }
 }
-function Test-Autopilot {
-    <#
-    Sources:
-    https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#windows-autopilot-deployment-service
-    #Autopilot dependencies according to https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#autopilot-dependencies
-    #"www.msftncsi.com" #Only Windows <10? https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/internet-explorer-edge-open-connect-corporate-public-network#ncsi-active-probes-and-the-network-status-alert
-    #>
-    #ServiceIDs 164,165,169,173,182,9999
-    #9999 = Autopilot
-    #Import
-    $ServiceIDs = '' #TODO FAILME!!
-    $Autopilot = Get-URLsFromID -IDs $ServiceIDs
-    foreach ($Object in $Autopilot) {
-        Test-DNS $Object.url
-    }
-    <#
-    Test-NTP #165
-    Test-WNS #169
-    Test-TPMAttestation #173
-    Test-DeliveryOptimization #164
-    Test-WNS #169
-    #>
-    #TODO: Build logic for these tests :)
-    $WNSTest = Test-WNS
-    $DOTest = Test-DeliveryOptimization
-    $NTPTest = Test-NTP
-    $TPMAttTest = Test-TPMAttestation
-}
-function Test-Apple {
-    <#
-    ServiceIDs 178
-    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#apple-dependencies
-    #>
-    Write-Log -Message 'Port 5223 is only used as a fallback for push notifications and only valid for push.apple.com addresses' -Component 'TestApple'
-    Write-Log -Message 'Warning: Other URLs might be required, please also consult https://support.apple.com/de-de/101555' -Component 'TestApple' -Type 2
-    $ServiceIDs = 178
-    $ServiceArea = "Apple"
-    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
-    $AAPL = Get-URLsFromID -IDs $ServiceIDs
-    if (-not($AAPL)) {
-        Write-Log -Message 'No matching ID found for service area: Windows (Push) Notification Services' -Component "Test$ServiceArea" -Type 3
-        return $false
-    }
-    foreach ($AAPLTarget in $Script:URLsToVerify) {
-        Test-Network $AAPLTarget
-    }
-    return $true
-}
-function Test-Android {
-    <#
-    ServiceIDs 179,9992
-    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#android-aosp-dependencies
-    #>
-    Write-Log -Message 'Warning: Other URLs might be required, please also consult https://static.googleusercontent.com/media/www.android.com/en//static/2016/pdfs/enterprise/Android-Enterprise-Migration-Bluebook_2019.pdf' -Component 'TestAndroid' -Type 2
-    $ServiceIDs = 179, 9992
-    $ServiceArea = "Android"
-    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
-
-    Write-Log 'Testing Android connectivity check' -Component "Test$ServiceArea"
-    $AndroidConnectivity = Invoke-WebRequest -Uri https://www.google.com/generate_204
-    if ($AndroidConnectivity.StatusCode -ne 204) {
-        Write-Log 'Android connectivity check failed - not testing any other addresses' -Component "Test$ServiceArea"
-        return $false
-    }
-    $Googl = Get-URLsFromID -IDs $ServiceIDs
-    if (-not($Googl)) {
-        Write-Log -Message 'No matching ID found for service area: Windows (Push) Notification Services' -Component "Test$ServiceArea" -Type 3
-        return $false
-    }
-    foreach ($GoogleTarget in $Script:URLsToVerify) {
-        Test-Network $GoogleTarget
-    }
-    return $true
-}
-function Test-CRL {
-    <#
-    ServiceIDs 84,125,9993
-    Source: Martin Himken - this isn't well documented. From the MSJSON we can assume these are correct
-    #>
-    $ServiceIDs = 84,125,9993
-    $ServiceArea = "CRL"
-    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
-    Write-Log "CRLs should only ever be available through Port 80, however the MS-JSOn specifies 443 as well. Expect errors going forward" -Component "Test$ServiceArea"
-    $CertRevocation = Get-URLsFromID -IDs $ServiceIDs
-    if (-not($CertRevocation)) {
-        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
-        return $false
-    }
-    foreach ($CRLTarget in $Script:URLsToVerify) {
-        Test-Network $CRLTarget
-    }
-    return $true
-
-}
-function Test-WindowsActivation {
-    #https://support.microsoft.com/en-us/topic/windows-activation-or-validation-fails-with-error-code-0x8004fe33-a9afe65e-230b-c1ed-3414-39acd7fddf52
-}
-function Test-EntraID {}
-function Test-WindowsUpdate {
-    #ServiceIDs 164
-    #https://learn.microsoft.com/en-us/troubleshoot/windows-client/installing-updates-features-roles/windows-update-issues-troubleshooting#device-cant-access-update-files
-    $ServiceIDs = 164
-    $ServiceArea = "WU"
-    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
-    $WindowsUpdate = Get-URLsFromID -IDs $ServiceIDs
-    if (-not($WindowsUpdate)) {
-        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
-        return $false
-    }
-    foreach ($WUTarget in $Script:URLsToVerify) {
-        Test-Network $WUTarget
-    }
-    return $true
-}
-function Test-NTP {
-    #ServiceIDs 165
-    #probably w32tm /stripchart /computer:time.windows.com /dataonly /samples:3
-    #would throw 0x800705B4 if the URL exists but isn't an NTP or 0x80072AF9 for not resolved
-    #"time.windows.com", "123" #NTP and SNTP both use this
-    Write-Log 'Microsofts JSON claims more URLs for Port 123, where in reality its only time.windows.com' -Component 'TestNTP' -Type 2
-    $CurrentTimeServer = w32tm /query /source
-    #ToDo: Maybe also check the ACTUAL timeserver?
-    $TimeTest = w32tm /stripchart /computer:time.windows.com /dataonly /samples:3
-    if ($TimeTest -like "*80072AF9*" -or $TimeTest[3 - ($TimeTest.count)] -like "*800705B4*") {
-        return $false
-    }
-    if ($CurrentTimeServer -ne "time.windows.com") { 
-        if ($Autopilot) {
-            Write-Log 'time.windows.com is currently not the timeserver - this is a requirement for Autopilot' -Component 'TestNTP' -Type 3
-        }
-        return $false 
-    }
-    return $true
-}
-function Test-DiagnosticsData {}
-function Test-NCSI {
-    #ServiceIDs 165
-    Write-Log 'MSFTConnectTest.com is listed under ID 165, which uses the wrong port' -Component 'TestNCSI'
-    "www.msftconnecttest.com", 443
-    "www.msftconnecttest.com", 80
-}
-
-function Test-AppInstaller {
-    "displaycatalog.md.mp.microsoft.com"
-    "purchase.md.mp.microsoft.com"
-    "licensing.mp.microsoft.com"
-    "storeedgefd.dsx.mp.microsoft.com"
-}
-function Test-MicrosoftStore {
-    #ServiceIDs 9996
-    #https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints 
-    #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#microsoft-store
-    
-    #TODO: Add errorhandling for when the custom service ID isn'T found, but there are more tests to perform!!
-    $ServiceIDs = 9996
-    $ServiceArea = "MS"
-    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
-    $MicrosoftStore = Get-URLsFromID -IDs $ServiceIDs
-    if (-not($MicrosoftStore)) {
-        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
-        return $false
-    }
-    foreach ($MSTarget in $Script:URLsToVerify) {
-        Test-Network $MSTarget
-    }
-    $WNSTest = Test-WNS
-    $DOTest = Test-DeliveryOptimization
-    if (-not($WNSTest -and $DOTest)) {
-        return $false
-    }
-    return $true
-}
-function Test-M365 {
-    $ServiceIDs = 41,43,44,45,46,47,49,50,51,53,56,59,64,66,67,68,69,70,71,73,75,78,79,83,84,86,89,91,92,93,95,96,97,105,114,116,117,118,121,122,124,125,126,147,152,153,156,158,159,160,184
-    $ServiceArea = "MS365"
-    if(-not($UseMS365JSON)){
-        Write-Log 'UseMS365JSON was not specified. This test can not be performed, because most IDs are not available' -Component "Test$ServiceArea" -Type 3
-        return $false
-    }
-    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
-    $M365FullTest = Get-URLsFromID -IDs $ServiceIDs
-    if (-not($M365FullTest)) {
-        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
-        return $false
-    }
-    foreach ($M365Target in $Script:URLsToVerify) {
-        Test-Network $M365Target
-    }
-    return $true
-}
-
-function Test-SelfDeploying {
-
-}
-function Test-Legacy {
-    <#
-    .NOTES
-    Test-Hybrid Join?
-    #>
-}
-function Test-AuthenticatedProxy {
-    #These URLs don't allow authenticated proxies according to https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#access-for-managed-devices 
-    #("*.azureedge.net", @(443, 80))
-    ("graph.microsoft.com", @(443))
-    ("manage.microsoft.com", @(443, 80))
-    Test-DeviceHealth
-}
-function Test-SSLInspection {
-    #These URLs don't allow SSL inspection
-    "dm.microsoft.com", @(443, 80)
-    "manage.microsoft.com", @(443, 80)
-}
+#Data Functions
 function Build-OutputCSV {
     $OutpathFilePath = $(Join-Path $WorkingDirectory -ChildPath "ResultList$("_"+$Script:DateTime + "_"+ $Env:COMPUTERNAME).csv")
     $Script:FinalResultList | Export-Csv -Path $OutpathFilePath -Encoding utf8
@@ -1222,7 +1350,7 @@ function Start-Tests {
         Test-DNSServers
     }
     if ($DiagnosticsData -or $TestAllServiceAreas) {
-        Test-DiagnosticsData
+        Test-DiagnosticsDataUpload
     }
     if ($NCSI -or $TestAllServiceAreas) {
         Test-NCSI
@@ -1256,6 +1384,9 @@ function Start-Tests {
     }
     if ($Android -or $TestAllServiceAreas) {
         Test-Android
+    }
+    if($EndpointAnalytics -or $TestAllServiceAreas){
+        Test-EndpointAnalytics
     }
     if ($Legacy -or $TestAllServiceAreas) {
         Test-Legacy
