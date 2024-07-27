@@ -165,6 +165,17 @@ param(
     [switch]$EndpointAnalytics,
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$AppInstaller,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    
+    #Not Service area specific
+    [switch]$AuthenticatedProxyOnly,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$TestSSLInspectionOnly,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$Legacy,
     
     #Special Methods
@@ -767,7 +778,7 @@ function Test-Network {
 
 #Service Areas
 function Test-DNSServers {
-    #ToDo
+    #ToDo, maybe do an actual DNS request to a public DNS or multiple?
 }
 function Test-RemoteHelp {
     <#
@@ -784,7 +795,7 @@ function Test-RemoteHelp {
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     $RH = Get-URLsFromID -IDs $ServiceIDs
     if (-not($RH)) {
-        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     foreach ($RHTarget in $Script:URLsToVerify) {
@@ -800,7 +811,7 @@ function Test-TPMAttestation {
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     $TPMAtt = Get-URLsFromID -IDs $ServiceIDs
     if (-not($TPMAtt)) {
-        Write-Log -Message 'No matching ID found for service area: Windows (Push) Notification Services' -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     foreach ($TPMTarget in $Script:URLsToVerify) {
@@ -816,7 +827,7 @@ function Test-WNS {
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     $WNS = Get-URLsFromID -IDs $ServiceIDs
     if (-not($WNS)) {
-        Write-Log -Message 'No matching ID found for service area: Windows (Push) Notification Services' -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     foreach ($WNSTarget in $Script:URLsToVerify) {
@@ -840,7 +851,7 @@ function Test-DeviceHealth {
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     $DH = Get-URLsFromID -IDs $ServiceIDs
     if (-not($DH)) {
-        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     foreach ($DHTarget in $Script:URLsToVerify) {
@@ -848,7 +859,6 @@ function Test-DeviceHealth {
     }
     return $true
 }
-
 function Test-DeliveryOptimization {
     <#
     ServiceIDs 172,164,9994
@@ -871,7 +881,7 @@ function Test-DeliveryOptimization {
     }
     $DeliveryOptimization = Get-URLsFromID -IDs $ServiceIDs -FilterPort 7680, 3544
     if (-not($DeliveryOptimization)) {
-        Write-Log -Message 'No matching ID found for service area: Delivery Optimization' -Component 'TestDO' -Type 3
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     foreach ($DOTarget in $Script:URLsToVerify) {
@@ -879,8 +889,6 @@ function Test-DeliveryOptimization {
     }
     return $true
 }
-
-
 function Test-Apple {
     <#
     ServiceIDs 178
@@ -893,7 +901,7 @@ function Test-Apple {
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     $AAPL = Get-URLsFromID -IDs $ServiceIDs
     if (-not($AAPL)) {
-        Write-Log -Message 'No matching ID found for service area: Windows (Push) Notification Services' -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     foreach ($AAPLTarget in $Script:URLsToVerify) {
@@ -919,7 +927,7 @@ function Test-Android {
     }
     $Googl = Get-URLsFromID -IDs $ServiceIDs
     if (-not($Googl)) {
-        Write-Log -Message 'No matching ID found for service area: Windows (Push) Notification Services' -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     foreach ($GoogleTarget in $Script:URLsToVerify) {
@@ -938,7 +946,7 @@ function Test-CRL {
     Write-Log "CRLs should only ever be available through Port 80, however the MS-JSOn specifies 443 as well. Expect errors going forward" -Component "Test$ServiceArea"
     $CertRevocation = Get-URLsFromID -IDs $ServiceIDs
     if (-not($CertRevocation)) {
-        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     foreach ($CRLTarget in $Script:URLsToVerify) {
@@ -957,7 +965,7 @@ function Test-WindowsActivation {
     Write-Log 'These following URLs are best effort - there is very little documentation about this' -Component "Test$ServiceArea"
     $WinAct = Get-URLsFromID -IDs $ServiceIDs
     if (-not($WinAct)) {
-        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     foreach ($WinActTarget in $Script:URLsToVerify) {
@@ -978,15 +986,19 @@ function Test-EntraID {
     Write-Log 'The following URLs are the bare minimum for EntraID to work - depending on the situation there might be more' -Component "Test$ServiceArea"
     $EID = Get-URLsFromID -IDs $ServiceIDs
     if (-not($EID)) {
-        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     foreach ($EIDTarget in $Script:URLsToVerify) {
         Test-Network $EIDTarget
     }
-    $TestCRLs = Test-CRL
-    if (-not($TestCRLs)) {
-        Write-Log "Testing CRLs for $ServiceArea failed" -Component "Test$ServiceArea" -Type 2
+    if (-not($TestAllServiceAreas)) {
+        $TestCRLs = Test-CRL
+        if (-not($TestCRLs)) {
+            Write-Log "Testing CRLs for $ServiceArea failed" -Component "Test$ServiceArea" -Type 2
+        }
+    } else {
+        Write-Log 'TestAllServiceAreas detected - not re-running sub-tests for this service area' -Component "Test$ServiceArea"
     }
     return $true
 }
@@ -1000,7 +1012,7 @@ function Test-WindowsUpdate {
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     $WindowsUpdate = Get-URLsFromID -IDs $ServiceIDs
     if (-not($WindowsUpdate)) {
-        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     foreach ($WUTarget in $Script:URLsToVerify) {
@@ -1038,9 +1050,9 @@ function Test-NTP {
     if ($CustomTimeServerTestResult -or $DefaultTimeServerTestResult) {
         Write-Log "Custom NTP Server Test: $CustomTimeServerTestResult" -Component "Test$ServiceArea"
         Write-Log "Default NTP Server Test: $($null -ne $DefaultTimeServerTestResult)" -Component "Test$ServiceArea"
-        $NTPServers = Get-URLsFromID -IDs $ServiceIDs -FilterPort 80,443
+        $NTPServers = Get-URLsFromID -IDs $ServiceIDs -FilterPort 80, 443
         if (-not($NTPServers)) {
-            Write-Log 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+            Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
             return $false
         }
         foreach ($NTPServersTarget in $Script:URLsToVerify) {
@@ -1062,7 +1074,7 @@ function Test-DiagnosticsDataUpload {
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     $Diagnostics = Get-URLsFromID -IDs $ServiceIDs
     if (-not($Diagnostics)) {
-        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     foreach ($DiagnosticsTarget in $Script:URLsToVerify) {
@@ -1075,12 +1087,12 @@ function Test-EndpointAnalytics {
     ServiceIDs 69,163,9988
     https://learn.microsoft.com/en-us/mem/analytics/troubleshoot#bkmk_endpoints
     #>
-    $ServiceIDs = 69,163,9988
+    $ServiceIDs = 69, 163, 9988
     $ServiceArea = "EndpAnalytics"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     $EndpAnalytics = Get-URLsFromID -IDs $ServiceIDs
     if (-not($EndpAnalytics)) {
-        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     foreach ($EndpAnalyticsTarget in $Script:URLsToVerify) {
@@ -1094,17 +1106,17 @@ function Test-NCSI {
     https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints
     https://learn.microsoft.com/en-us/windows/privacy/manage-windows-21h2-endpoints
     #>
-    $ServiceIDs = 165,9987
+    $ServiceIDs = 165, 9987
     $ServiceArea = "NetworkIndicator"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     Write-Log "Service ID 165 is mixed up with NTP, hence Service ID 9987 is required to only test the correct URLs and ports" -Component "Test$ServiceArea" -Type 2
     $NCSIActive = (Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Policies\Microsoft\Windows\NetworkConnectivityStatusIndicator -Name NoActiveProbe) -eq 0
-    if(-not($NCSIActive)){
+    if (-not($NCSIActive)) {
         Write-Log 'The NCSI has been detected as disabled - continuing with network tests regardless' -Component "Test$ServiceArea" -Type 2
     }
     $NetworkIndicator = Get-URLsFromID -IDs $ServiceIDs -FilterPort 123
     if (-not($NetworkIndicator)) {
-        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     foreach ($NetworkIndicatorTarget in $Script:URLsToVerify) {
@@ -1112,40 +1124,70 @@ function Test-NCSI {
     }
     return $true
 }
-
-function Test-AppInstaller {
-    "displaycatalog.md.mp.microsoft.com"
-    "purchase.md.mp.microsoft.com"
-    "licensing.mp.microsoft.com"
-    "storeedgefd.dsx.mp.microsoft.com"
-}
 function Test-MicrosoftStore {
-    #ServiceIDs 9996
-    #https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints 
-    #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#microsoft-store
-    
-    #TODO: Add errorhandling for when the custom service ID isn'T found, but there are more tests to perform!!
+    <#
+    ServiceIDs 9996
+    https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints 
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#microsoft-store
+    #>
     $ServiceIDs = 9996
     $ServiceArea = "MS"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     $MicrosoftStore = Get-URLsFromID -IDs $ServiceIDs
     if (-not($MicrosoftStore)) {
-        Write-Log -Message 'No matching ID found for service area: Windows Update' -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     foreach ($MSTarget in $Script:URLsToVerify) {
         Test-Network $MSTarget
     }
-    $WNSTest = Test-WNS
-    $DOTest = Test-DeliveryOptimization
-    if (-not($WNSTest -and $DOTest)) {
-        return $false
+    if (-not($TestAllServiceAreas)) {
+        $WNSTest = Test-WNS
+        $DOTest = Test-DeliveryOptimization
+        if (-not($WNSTest -and $DOTest)) {
+            return $false
+        }
+    } else {
+        Write-Log 'TestAllServiceAreas detected - not re-running sub-tests for this service area' -Component "Test$ServiceArea"
     }
     return $true
 }
-
+function Test-AppInstaller {
+    <#
+    ServiceIDs 9996
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#microsoft-store
+    #>
+    $ServiceArea = "AppInstall"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    Write-Log "Testing $ServiceArea is the same requirement as for the Microsoft store, this doesn't include downloads from vendor setup files (which depend on each package)" -Component "Test$ServiceArea" -Type 2
+    if ($TestAllServiceAreas) {
+        Write-Log 'TestAllServiceAreas detected - not re-running sub-tests for this service area' -Component "Test$ServiceArea"
+        return $true
+    }
+    $TestMSStore = Test-MicrosoftStore
+    if (-not($TestMSStore)) {
+        Write-Log 'Testing the Microsoft store failed' -Component "Test$ServiceArea"
+    }
+    return $true
+}
 function Test-SelfDeploying {
-
+    <#
+    ServiceID 173, 9998
+    https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#autopilot-self-deploying-mode-and-autopilot-pre-provisioning
+    ToDo
+    #>
+    $ServiceIDs = 173,9998
+    $ServiceArea = "SelfDepl"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $SelfDepl = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($SelfDepl)) {
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($SelfDeplTarget in $Script:URLsToVerify) {
+        Test-Network $SelfDeplTarget
+    }
+    return $true
 }
 function Test-Legacy {
     <#
@@ -1154,16 +1196,58 @@ function Test-Legacy {
     #>
 }
 function Test-AuthenticatedProxy {
-    #These URLs don't allow authenticated proxies according to https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#access-for-managed-devices 
-    #("*.azureedge.net", @(443, 80))
-    ("graph.microsoft.com", @(443))
-    ("manage.microsoft.com", @(443, 80))
-    Test-DeviceHealth
+    <#
+    ServiceIDs 9986
+    These URLs don't allow authenticated proxies according to https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#access-for-managed-devices 
+    This will use something.azureedge.com as an example for *.azureedge.com - yes, that is not a documented address.
+    #>
+    $ServiceIDs = 9986
+    $ServiceArea = "AuthenProxy"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $AuthenProxy = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($AuthenProxy)) {
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($AuthenProxyTarget in $Script:URLsToVerify) {
+        Test-Network $AuthenProxyTarget
+        if ($($Script:FinalResultList | Where-Object { $_.url -eq $AuthenProxyTarget.url -and $_.port -eq $AuthenProxyTarget.port -and $_.HTTPStatusCode -eq 401 })) {
+            Write-Log -Message "The URL $($AuthenProxyTarget.url) requested authentication - this is not supported!" -Component "Test$ServiceArea" -Type 3
+        }
+    }
+    return $true
 }
 function Test-SSLInspection {
-    #These URLs don't allow SSL inspection
-    "dm.microsoft.com", @(443, 80)
-    "manage.microsoft.com", @(443, 80)
+    <#
+    ServiceIDs 9985
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#access-for-managed-devices
+    This uses checkin.dm.microsoft.com as a standin for *.dm.microsoft.com - could use discovery.dm.microsoft.com as fallback
+    #>
+    $ServiceIDs = 9985
+    $ServiceArea = "TLSInspec"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $TLSInspec = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($TLSInspec)) {
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($TLSInspecTarget in $Script:URLsToVerify) {
+        Test-Network $TLSInspecTarget
+    }
+    if (-not($TestAllServiceAreas)) {
+        $DeviceHealthTest = Test-DeviceHealth
+        if (-not($DeviceHealthTest)) {
+            return $false
+        }
+    } else {
+        Write-Log 'TestAllServiceAreas detected - not re-running sub-tests for this service area' -Component "Test$ServiceArea"
+    }
+    foreach ($TLSInspectObject in $Script:FinalResultList) {
+        if ($($Script:FinalResultList | Where-Object { $_.url -eq $TLSInspectObject.url -and $_.port -eq $TLSInspectObject.port -and $_.SSLInspection -eq 'True' })) {
+            Write-Log -Message "The traffic to $($TLSInspectObject.url) is probably inspected - this is not supported!" -Component "Test$ServiceArea" -Type 3
+        }
+    }
+    return $true
 }
 function Test-M365 {
     $ServiceIDs = 41, 43, 44, 45, 46, 47, 49, 50, 51, 53, 56, 59, 64, 66, 67, 68, 69, 70, 71, 73, 75, 78, 79, 83, 84, 86, 89, 91, 92, 93, 95, 96, 97, 105, 114, 116, 117, 118, 121, 122, 124, 125, 126, 147, 152, 153, 156, 158, 159, 160, 184
@@ -1182,6 +1266,14 @@ function Test-M365 {
         Test-Network $M365Target
     }
     return $true
+}
+function Test-MDE {
+    <#
+    ServiceIDs
+    https://download.microsoft.com/download/6/b/f/6bfff670-47c3-4e45-b01b-64a2610eaefa/mde-urls-commercial.xlsx
+    ToDo
+    #>
+    
 }
 function Test-Autopilot {
     <#
@@ -1211,14 +1303,13 @@ function Test-Autopilot {
     $NTPTest = Test-NTP
     $TPMAttTest = Test-TPMAttestation
 }
-
 function Test-Intune {
     param(
         [switch]$Enhanced
     )
     #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints#access-for-managed-devices
     #Last Checked 11.06.24
-    #ServiceIDs 97,172,163,164,9997
+    #ServiceIDs 97,170,172,163,164,9997
     #9997 = Defender
     <#
     #The inspection of SSL traffic is not supported on 'manage.microsoft.com', or 'dm.microsoft.com' endpoints.
@@ -1385,8 +1476,17 @@ function Start-Tests {
     if ($Android -or $TestAllServiceAreas) {
         Test-Android
     }
-    if($EndpointAnalytics -or $TestAllServiceAreas){
+    if ($EndpointAnalytics -or $TestAllServiceAreas) {
         Test-EndpointAnalytics
+    }
+    if ($AppInstaller -or $TestAllServiceAreas) {
+        Test-AppInstaller
+    }
+    if ($AuthenticatedProxyOnly -or $TestAllServiceAreas) {
+        Test-AuthenticatedProxy
+    }
+    if ($TestSSLInspectionOnly -or $TestAllServiceAreas) {
+        Test-SSLInspection 
     }
     if ($Legacy -or $TestAllServiceAreas) {
         Test-Legacy
