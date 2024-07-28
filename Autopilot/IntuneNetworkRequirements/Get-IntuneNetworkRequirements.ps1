@@ -778,14 +778,40 @@ function Test-Network {
 
 #Service Areas
 function Test-DNSServers {
-    #ToDo, maybe do an actual DNS request to a public DNS or multiple?
+    <#
+    .NOTES
+    ServiceIDs 999
+    ToDo, maybe do an actual DNS request to a public DNS or multiple?
+    #>
+    $ServiceIDs = 999
+    $ServiceArea = "DNSServer"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    Write-Log 'Testing DNSservers will ignore the local "HOSTS" file.' -Component "Test$ServiceArea"
+    $DNSServer = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($DNSServer)) {
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($DNSTarget in $Script:URLsToVerify) {
+        $UDPDNSTest = Resolve-DnsName "microsoft.com" -DnsOnly -Type A -Server $DNSTarget.url -NoHostsFile -QuickTimeout -ErrorAction SilentlyContinue
+        if(-not($UDPDNSTest)){
+            Write-Log "UDP DNS test failed for DNS server $($DNSTarget.url) - trying TCP fallback" -Component $ServiceArea -Type 2
+            $TCPDNSTest = Resolve-DnsName "microsoft.com" -DnsOnly -Type A -Server $DNSTarget.url -NoHostsFile -TcpOnly -QuickTimeout -ErrorAction SilentlyContinue
+            if(-not($TCPDNSTest)){
+                Write-Log "TCP DNS test failed for DNS server $($DNSTarget.url) - trying TCP fallback" -Component $ServiceArea -Type 2
+            }
+            Write-Log "TCP DNS test successful for DNS server $($DNSTarget.url)" -Component $ServiceArea
+        }
+        Write-Log "UDP DNS test successful for DNS server $($DNSTarget.url)" -Component $ServiceArea
+    }
+    return $true
 }
 function Test-RemoteHelp {
     <#
-        #181
-    #Remote Help - Default + Required https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#remote-help
-    #ServiceIDs 181,187,189
-    #ServiceIDs GCC 188
+    .NOTES
+    ServiceIDs 181,187,189
+    ServiceIDs GCC 188
+    Remote Help - Default + Required https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#remote-help
     #>
     $ServiceIDs = 181, 187, 189
     if ($GCC) {
@@ -804,8 +830,12 @@ function Test-RemoteHelp {
     return $true
 }
 function Test-TPMAttestation {
-    #ServiceIDs 173,9998
-    #https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#autopilot-self-deploying-mode-and-autopilot-pre-provisioning
+    <#
+    .NOTES
+    ServiceIDs 173,9998
+    https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#autopilot-self-deploying-mode-and-autopilot-pre-provisioning
+    #>
+
     $ServiceIDs = 173, 9998
     $ServiceArea = "TPMAtt"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
@@ -820,8 +850,11 @@ function Test-TPMAttestation {
     return $true
 }
 function Test-WNS {
-    #ServiceIDs 169,171
-    #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#windows-push-notification-serviceswns-dependencies
+    <#
+    .NOTES
+    ServiceIDs 169,171
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#windows-push-notification-serviceswns-dependencies
+    #>
     $ServiceIDs = 169, 171
     $ServiceArea = "WNS"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
@@ -1004,10 +1037,10 @@ function Test-EntraID {
 }
 function Test-WindowsUpdate {
     <#
-    ServiceIDs 164
+    ServiceIDs 164,9984
     https://learn.microsoft.com/en-us/troubleshoot/windows-client/installing-updates-features-roles/windows-update-issues-troubleshooting#device-cant-access-update-files
     #>
-    $ServiceIDs = 164
+    $ServiceIDs = 164,9984
     $ServiceArea = "WU"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     $WindowsUpdate = Get-URLsFromID -IDs $ServiceIDs
@@ -1063,13 +1096,12 @@ function Test-NTP {
     Write-Log 'Both, custom and default, NTP servers tested did not answer as expected' -Component "Test$ServiceArea" -Type 3
     return $false
 }
-function Test-DiagnosticsDataUpload {
+function Test-DiagnosticsData {
     <#
-    ServiceIDs 182,9989
-    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#autopilot-dependencies
-    https://learn.microsoft.com/en-us/mem/intune/remote-actions/collect-diagnostics#requirements-for-windows-devices
+    ServiceIDs 69,9983
+    https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints
     #>
-    $ServiceIDs = 182, 9989
+    $ServiceIDs = 69,9983
     $ServiceArea = "Diagnostics"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     $Diagnostics = Get-URLsFromID -IDs $ServiceIDs
@@ -1079,6 +1111,27 @@ function Test-DiagnosticsDataUpload {
     }
     foreach ($DiagnosticsTarget in $Script:URLsToVerify) {
         Test-Network $DiagnosticsTarget
+    }
+    return $true
+}
+function Test-DiagnosticsDataUpload {
+    <#
+    .NOTES
+    ServiceIDs 182,9989
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#autopilot-dependencies
+    https://learn.microsoft.com/en-us/mem/intune/remote-actions/collect-diagnostics#requirements-for-windows-devices
+    Also called "Autopilot automatic device diagnostics collection"
+    #>
+    $ServiceIDs = 182, 9989
+    $ServiceArea = "DiagnosticsUpload"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $DiagUpload = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($DiagUpload)) {
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($DiagUploadTarget in $Script:URLsToVerify) {
+        Test-Network $DiagUploadTarget
     }
     return $true
 }
@@ -1195,6 +1248,7 @@ function Test-Legacy {
     Test-Hybrid Join?
     #>
 }
+#Special tests, not service area specific
 function Test-AuthenticatedProxy {
     <#
     ServiceIDs 9986
@@ -1280,12 +1334,11 @@ function Test-Autopilot {
     Sources:
     https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#windows-autopilot-deployment-service
     #Autopilot dependencies according to https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#autopilot-dependencies
-    #"www.msftncsi.com" #Only Windows <10? https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/internet-explorer-edge-open-connect-corporate-public-network#ncsi-active-probes-and-the-network-status-alert
     #>
     #ServiceIDs 164,165,169,173,182,9999
     #9999 = Autopilot
     #Import
-    $ServiceIDs = '' #TODO FAILME!!
+    $ServiceIDs = '9999'
     $Autopilot = Get-URLsFromID -IDs $ServiceIDs
     foreach ($Object in $Autopilot) {
         Test-DNS $Object.url
@@ -1295,12 +1348,24 @@ function Test-Autopilot {
     Test-WNS #169
     Test-TPMAttestation #173
     Test-DeliveryOptimization #164
-    Test-WNS #169
+    Test-DiagnosticsDataUpload #182
     #>
-    #TODO: Build logic for these tests :)
-    $WNSTest = Test-WNS
+    $TestWindowsActivation = Test-WindowsActivation
+    $EntraIDTest = Test-EntraID
+    $IntuneTest = Test-Intune #Needs to be evaluated!
+    $DiagnosticsDataUTest = Test-DiagnosticsDataUpload 
+    $WUTest = Test-WindowsUpdate
     $DOTest = Test-DeliveryOptimization
     $NTPTest = Test-NTP
+    $DNSTest = Test-DNSServers #Log only output!
+    $DiagnosticsDataTest = Test-DiagnosticsData
+    $NCSITest = Test-NCSI
+    $WNSTest = Test-WNS
+    $StoreTest = Test-MicrosoftStore
+    $TestM365 = Test-M365 #Needs to be evaluated!
+    $CRLTest = Test-CRL
+    $LegacyTest = Test-Legacy
+    $SelfDeployingTest = Test-SelfDeploying
     $TPMAttTest = Test-TPMAttestation
 }
 function Test-Intune {
@@ -1314,34 +1379,6 @@ function Test-Intune {
     <#
     #The inspection of SSL traffic is not supported on 'manage.microsoft.com', or 'dm.microsoft.com' endpoints.
     #Allow HTTP Partial response is required for Scripts & Win32 Apps endpoints.
-    #Intune core service
-    #Allow + Required
-    #"*.azureedge.net", @(443, 80) #Doesn't allow authenticated proxy! 
-    "manage.microsoft.com", @(443, 80)
-    "EnterpriseEnrollment.manage.microsoft.com", @(443, 80)
-    #Default + Required
-    #"*.do.dsp.mp.microsoft.com", @(7680, 3544, 443, 80)  #example see next line
-    "kv801.prod.do.dsp.mp.microsoft.com", @(7680, 3544, 443, 80)
-    "geo.prod.do.dsp.mp.microsoft.com", @(7680, 3544, 443, 80)
-    #"*.dl.delivery.mp.microsoft.com", @(7680, 3544, 443, 80) #example see next line
-    "2.dl.delivery.mp.microsoft.com", @(7680, 3544, 443, 80)
-    #"*.emdl.ws.microsoft.com", @(7680, 3544, 443, 80) #example see next line
-    "emdl.ws.microsoft.com", @(7680, 3544, 443, 80)
-    "bg.v4.emdl.ws.microsoft.com", @(7680, 3544, 443, 80)
-    #Default+Required
-    "swda01-mscdn.azureedge.net", 443
-    "swda02-mscdn.azureedge.net", 443
-    "swdb01-mscdn.azureedge.net", 443
-    "swdb02-mscdn.azureedge.net", 443
-    "swdc01-mscdn.azureedge.net", 443
-    "swdc02-mscdn.azureedge.net", 443
-    "swdd01-mscdn.azureedge.net", 443
-    "swdd02-mscdn.azureedge.net", 443
-    "swdin01-mscdn.azureedge.net", 443
-    "swdin02-mscdn.azureedge.net", 443
-    #Default
-    "account.live.com", 443
-    "login.live.com", 443
 #>
     if ($Enhanced) {
         Test-Autopilot
@@ -1495,8 +1532,8 @@ function Start-Tests {
 
 #Start coding!
 Initialize-Script
-
-Start-Tests
+Test-DNSServers
+#Start-Tests
 
 if ($OutputCSV) {
     Build-OutputCSV
