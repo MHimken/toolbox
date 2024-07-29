@@ -128,6 +128,9 @@ param(
     [switch]$DiagnosticsData,
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$DiagnosticsDataUpload,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$NCSI,
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
@@ -257,13 +260,12 @@ function Initialize-Script {
     Get-ScriptPath
     Import-CustomURLFile
     if ($UseMSJSON) {
-        #ToDo: Make the M365 switch available as public switch
         Get-M365Service -MEM
     }
     if ($UseMS365JSON) {
-        #ToDo: Make the M365 switch available as public switch
         Get-M365Service -M365
     }
+    #ToDo: create an entry to put in the log that repeats the options used to run the script and add it as TITLE to the out-gridview if it was requested
 }
 function Write-Log {
     <#
@@ -708,6 +710,10 @@ function Test-NTPviaUDP {
     return $true
 }
 function Test-TCPBurstMode {
+    <#
+    .NOTES
+    ToDo: Explain this!
+    #>
     param(
         $WorkObject
     )
@@ -724,6 +730,11 @@ function Test-Network {
     param(
         [PSCustomObject]$TestObject
     )
+    Write-Log "Testing $($TestObject.url) on port $($TestObject.port)" -Component 'TestNetwork'
+    if($TestObject -in $Script:FinalResultList){
+        Write-Log 'This URL/Port was already testet' -Component 'TestNetwork'
+        return $true
+    }
     $TestObject | Add-Member -Name 'DNSResult' -MemberType NoteProperty -Value ""
     $TestObject | Add-Member -Name 'TCPResult' -MemberType NoteProperty -Value ""
     $TestObject | Add-Member -Name 'HTTPStatusCode' -MemberType NoteProperty -Value ""
@@ -794,10 +805,10 @@ function Test-DNSServers {
     }
     foreach ($DNSTarget in $Script:URLsToVerify) {
         $UDPDNSTest = Resolve-DnsName "microsoft.com" -DnsOnly -Type A -Server $DNSTarget.url -NoHostsFile -QuickTimeout -ErrorAction SilentlyContinue
-        if(-not($UDPDNSTest)){
+        if (-not($UDPDNSTest)) {
             Write-Log "UDP DNS test failed for DNS server $($DNSTarget.url) - trying TCP fallback" -Component $ServiceArea -Type 2
             $TCPDNSTest = Resolve-DnsName "microsoft.com" -DnsOnly -Type A -Server $DNSTarget.url -NoHostsFile -TcpOnly -QuickTimeout -ErrorAction SilentlyContinue
-            if(-not($TCPDNSTest)){
+            if (-not($TCPDNSTest)) {
                 Write-Log "TCP DNS test failed for DNS server $($DNSTarget.url) - trying TCP fallback" -Component $ServiceArea -Type 2
             }
             Write-Log "TCP DNS test successful for DNS server $($DNSTarget.url)" -Component $ServiceArea
@@ -1012,6 +1023,8 @@ function Test-EntraID {
     https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/tshoot-connect-connectivity#connectivity-issues-in-the-installation-wizard
     "Of these URLs, the URLs listed in the following table are the absolute bare minimum to be able to connect to Microsoft Entra ID at all"
     As this list contains a lot of CRLs IDs 125,84 and 9993 (Test-CRL) also apply here - this is more than the bare minimum but CRLs should always be reachable.
+
+    ToDo: 9990 replace with other IDs?
     #>
     $ServiceIDs = 9990
     $ServiceArea = "EID"
@@ -1040,7 +1053,7 @@ function Test-WindowsUpdate {
     ServiceIDs 164,9984
     https://learn.microsoft.com/en-us/troubleshoot/windows-client/installing-updates-features-roles/windows-update-issues-troubleshooting#device-cant-access-update-files
     #>
-    $ServiceIDs = 164,9984
+    $ServiceIDs = 164, 9984
     $ServiceArea = "WU"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     $WindowsUpdate = Get-URLsFromID -IDs $ServiceIDs
@@ -1101,7 +1114,7 @@ function Test-DiagnosticsData {
     ServiceIDs 69,9983
     https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints
     #>
-    $ServiceIDs = 69,9983
+    $ServiceIDs = 69, 9983
     $ServiceArea = "Diagnostics"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     $Diagnostics = Get-URLsFromID -IDs $ServiceIDs
@@ -1229,7 +1242,7 @@ function Test-SelfDeploying {
     https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#autopilot-self-deploying-mode-and-autopilot-pre-provisioning
     ToDo
     #>
-    $ServiceIDs = 173,9998
+    $ServiceIDs = 173, 9998
     $ServiceArea = "SelfDepl"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     $SelfDepl = Get-URLsFromID -IDs $ServiceIDs
@@ -1245,7 +1258,7 @@ function Test-SelfDeploying {
 function Test-Legacy {
     <#
     .NOTES
-    Test-Hybrid Join?
+    Test-Hybrid Join? This might prove hard, as this is hardly documented (sure, it needs Entra-ID, but AD connectivity?)
     #>
 }
 #Special tests, not service area specific
@@ -1265,7 +1278,7 @@ function Test-AuthenticatedProxy {
     }
     foreach ($AuthenProxyTarget in $Script:URLsToVerify) {
         Test-Network $AuthenProxyTarget
-        if ($($Script:FinalResultList | Where-Object { $_.url -eq $AuthenProxyTarget.url -and $_.port -eq $AuthenProxyTarget.port -and $_.HTTPStatusCode -eq 401 })) {
+        if ($($Script:FinalResultList | Where-Object { ($_.url -eq $AuthenProxyTarget.url -and $_.port -eq $AuthenProxyTarget.port) -and ($_.HTTPStatusCode -in 407, 403, 401 ) })) {
             Write-Log -Message "The URL $($AuthenProxyTarget.url) requested authentication - this is not supported!" -Component "Test$ServiceArea" -Type 3
         }
     }
@@ -1339,9 +1352,15 @@ function Test-Autopilot {
     #9999 = Autopilot
     #Import
     $ServiceIDs = '9999'
-    $Autopilot = Get-URLsFromID -IDs $ServiceIDs
-    foreach ($Object in $Autopilot) {
-        Test-DNS $Object.url
+    $ServiceArea = 'AP'
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $AP = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($AP)) {
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($APTarget in $Script:URLsToVerify) {
+        Test-Network $APTarget
     }
     <#
     Test-NTP #165
@@ -1350,23 +1369,31 @@ function Test-Autopilot {
     Test-DeliveryOptimization #164
     Test-DiagnosticsDataUpload #182
     #>
-    $TestWindowsActivation = Test-WindowsActivation
-    $EntraIDTest = Test-EntraID
-    $IntuneTest = Test-Intune #Needs to be evaluated!
-    $DiagnosticsDataUTest = Test-DiagnosticsDataUpload 
-    $WUTest = Test-WindowsUpdate
-    $DOTest = Test-DeliveryOptimization
-    $NTPTest = Test-NTP
-    $DNSTest = Test-DNSServers #Log only output!
-    $DiagnosticsDataTest = Test-DiagnosticsData
-    $NCSITest = Test-NCSI
-    $WNSTest = Test-WNS
-    $StoreTest = Test-MicrosoftStore
-    $TestM365 = Test-M365 #Needs to be evaluated!
-    $CRLTest = Test-CRL
-    $LegacyTest = Test-Legacy
-    $SelfDeployingTest = Test-SelfDeploying
-    $TPMAttTest = Test-TPMAttestation
+    $resultlist = @{
+        TestWindowsActivation = Test-WindowsActivation
+        EntraIDTest           = Test-EntraID
+        #IntuneTest            = Test-Intune #Needs to be evaluated!
+        DiagnosticsDataUTest  = Test-DiagnosticsDataUpload 
+        WUTest                = Test-WindowsUpdate
+        DOTest                = Test-DeliveryOptimization
+        NTPTest               = Test-NTP
+        DNSTest               = Test-DNSServers #Log only output!
+        DiagnosticsDataTest   = Test-DiagnosticsData
+        NCSITest              = Test-NCSI
+        WNSTest               = Test-WNS
+        StoreTest             = Test-MicrosoftStore
+        #TestM365              = Test-M365 #Needs to be evaluated!
+        CRLTest               = Test-CRL
+        LegacyTest            = Test-Legacy
+        SelfDeployingTest     = Test-SelfDeploying
+        TPMAttTest            = Test-TPMAttestation
+    }
+    if ($resultlist.values -contains $false) {
+        Write-Log -Message "$resultlist" -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message "$resultlist" -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    return $true
 }
 function Test-Intune {
     param(
@@ -1478,6 +1505,9 @@ function Start-Tests {
         Test-DNSServers
     }
     if ($DiagnosticsData -or $TestAllServiceAreas) {
+        Test-DiagnosticsData
+    }
+    if($DiagnosticsDataUpload -or $TestAllServiceAreas){
         Test-DiagnosticsDataUpload
     }
     if ($NCSI -or $TestAllServiceAreas) {
@@ -1532,8 +1562,8 @@ function Start-Tests {
 
 #Start coding!
 Initialize-Script
-Test-DNSServers
-#Start-Tests
+
+Start-Tests
 
 if ($OutputCSV) {
     Build-OutputCSV
