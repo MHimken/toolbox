@@ -1,87 +1,139 @@
 <#
 .SYNOPSIS
-This is not finished! This script is used to perform network requirements testing for various services.
+This script will test network connections to various Intune services using PowerShell 7
 .DESCRIPTION
-Shoutouts: badssl.com and httpstat.us are amazing! WinAdmins Community - especially Chris.
-The script allows you to test network connectivity and performance for different services by specifying the URLs, ports, and protocols to test. It supports testing for services like Intune, Autopilot, Windows Activation, EntraID, Windows Update, Delivery Optimization, NTP, DNS, Diagnostics Data, NCSI, WNS, Windows Store, M365, and CRLs.
-.PARAMETER WorkingDirectory
-Specifies the working directory where the script will be executed. The default value is "C:\MEMNR\".
-.PARAMETER LogDirectory
-Specifies the directory where log files will be stored. The default value is "C:\MEMNR\".
-.PARAMETER CustomURLFile
-Specifies the path to the CSV file containing the URLs, ports, and protocols to test. The default value is "Get-MEMNetworkRequirements.csv".
-.PARAMETER MaxDelayInMS
-Specifies the maximum delay in milliseconds for each network request. The default value is 300.
-.PARAMETER BurstMode
-Specifies whether to enable burst mode, which divides the delay by 50 and tries different speeds. Give a warning when more than 10 URLs are tested. The default value is $false.
+Welcome to the first release of INR - Intune Network Requirements. This script will allow you to test several different service areas 
+related to Intune. The main way this script is intended to run is not once, but at least **twice**.
+**Requirements
+* PowerShell 7
+* RTFM
+
+Instructions:
+1. Run the script on an unmanaged network, but ideally close to you or on the same provider.
+2. Run the script using the same parameters on your managed network where you're experiencing issues
+3. Run the script again (if necessary) to compare the two results and get a difference between the results.
+
+This is the only way to reliably verify results. It is not possible to deterministically test the endpoints because there is no
+documentation of which endpoint has which responses.
+.PARAMETER TestAllServiceAreas
+Specifies whether to test all target services.
 .PARAMETER UseMSJSON
-Specifies whether to use MSJSON for network requests. The default value is $true.
-.PARAMETER UseCustomCSV
-Specifies whether to use a custom CSV file for network requirements. The default value is $true.
+Specifies whether to use MSJSON for network requests.
+.PARAMETER UseMS365JSON
+Specifies whether to use MS365JSON for network requests. 
+.PARAMETER CustomURLFile
+Recommended. Put this file next to the script. Specifies the path to the CSV file containing the URLs, ports, and protocols to test. The default value is "INRCustomList.csv".
 .PARAMETER AllowBestEffort
-Specifies whether to allow best effort testing for URLs that don't have an exact match. The default value is $true.
-.PARAMETER AllTargetTest
-Specifies whether to test all target services. This is a switch parameter.
-.PARAMETER Intune
-Specifies whether to test Intune service. This is a switch parameter.
-.PARAMETER Autopilot
-Specifies whether to test Autopilot service. This is a switch parameter.
-.PARAMETER WindowsActivation
-Specifies whether to test Windows Activation service. This is a switch parameter.
-.PARAMETER EntraID
-Specifies whether to test EntraID service. This is a switch parameter.
-.PARAMETER WindowsUpdate
-Specifies whether to test Windows Update service. This is a switch parameter.
-.PARAMETER DeliveryOptimization
-Specifies whether to test Delivery Optimization service. This is a switch parameter.
-.PARAMETER NTP
-Specifies whether to test NTP service. This is a switch parameter.
-.PARAMETER DNS
-Specifies whether to test DNS service. This is a switch parameter.
-.PARAMETER DiagnosticsData
-Specifies whether to test Diagnostics Data service. This is a switch parameter.
-.PARAMETER NCSI
-Specifies whether to test NCSI service. This is a switch parameter.
-.PARAMETER WNS
-Specifies whether to test WNS service. This is a switch parameter.
-.PARAMETER WindowsStore
-Specifies whether to test Windows Store service. This is a switch parameter.
-.PARAMETER M365
-Specifies whether to test M365 service. This is a switch parameter.
-.PARAMETER CRLs
-Specifies whether to test CRLs service. This is a switch parameter.
+Recommended. Specifies whether to allow best effort testing (will try to resolve wildcard URLs) for URLs that don't have an exact match. 
 .PARAMETER CheckCertRevocation
-Specifies whether to check certificate revocation for network requests. The default value is $true.
+Recommended. Will verify if certificates that are presented by URLs are verified.
+.PARAMETER GCC
+Will test the GCC specific URLs - this related to RemoteHelp and Device Health currently.
+.PARAMETER Intune
+Specifies whether to test all of the Intune service area (this merges a lot of different areas).
+.PARAMETER Autopilot
+Specifies whether to test all of the Autopilot service area (this merges a lot of different areas).
+.PARAMETER WindowsActivation
+Specifies whether to test the Windows Activation service area.
+.PARAMETER EntraID
+Specifies whether to test the EntraID service area.
+.PARAMETER WindowsUpdate
+Specifies whether to test the Windows Update service area.
+.PARAMETER DeliveryOptimization
+Specifies whether to test the Delivery Optimization service area.
+.PARAMETER NTP
+Specifies whether to test the NTP service area.
+.PARAMETER DNS
+Warning: This is not put into the result CSV. It will be available in the log. Specifies whether to test the DNS service area.
+.PARAMETER DiagnosticsData
+Specifies whether to test the Diagnostics Data service area.
+.PARAMETER DiagnosticsDataUpload
+Specifies whether to test the Diagnostics Data Upload service area.
+.PARAMETER NCSI
+Specifies whether to test the NCSI service area.
+.PARAMETER WindowsNotificationService
+Specifies whether to test the WindowsNotificationService service area.
+.PARAMETER WindowsStore
+Specifies whether to test the Windows Store service area.
+.PARAMETER M365
+Warning: This is a _lot_ of URLs and will run for a couple minutes. Specifies whether to test the M365 service area.
+.PARAMETER CRLs
+Specifies whether to test the CRLs service area. These are the well known CRLs by Microsoft, plus my own if you import the CSV.
 .PARAMETER SelfDeploying
-Specifies whether to test self-deploying service. This is a switch parameter.
+Specifies whether to test the self-deploying service area.
+.PARAMETER RemoteHelp
+Specifies whether to test the self-deploying service area.
+.PARAMETER TPMAttestation
+Specifies whether to test the self-deploying service area.
+.PARAMETER DeviceHealth
+Specifies whether to test the self-deploying service area.
+.PARAMETER Apple
+Specifies whether to test the self-deploying service area.
+.PARAMETER Android
+Specifies whether to test the self-deploying service area.
+.PARAMETER EndpointAnalytics
+Specifies whether to test the self-deploying service area.
+.PARAMETER AppInstaller
+Specifies whether to test the self-deploying service area.
+.PARAMETER AuthenticatedProxyOnly
+Specifies whether to test the self-deploying service area.
+.PARAMETER TestSSLInspectionOnly
+Specifies whether to test the self-deploying service area.
 .PARAMETER Legacy
-Specifies whether to test legacy service. This is a switch parameter.
+This is not implemented yet. Specifies whether to test legacy service.
+.PARAMETER TenantName
+This must be specified if you want some of the M365 URLS to be populated automatically. This is the first part of your first <tenantname>.onmicrosoft.com
+.PARAMETER MaxDelayInMS
+Default: 300ms. This is my recommended value because some addresses tend to respond slowly.
+.PARAMETER BurstMode
+Will use the MaxDelayInMs, divide it into 50ms chunks and then do a quick test. Use this to find out response times.
+.PARAMETER MergeResults
+Will trigger the result merge path. If two CSV files are in the working directory, it will merge those. Otherwise use -MergeCSVs.
+.PARAMETER MergeShowAllResults
+Will merge _all_ results not just differences.
+.PARAMETER MergeCSVs
+This will accept two CSV filesnames as strings. The files must be placed into the working directory.
 .PARAMETER NoLog
 Specifies whether to disable logging. This is a switch parameter.
 .PARAMETER TestMethods
-Specifies the test methods to use. The default value is an empty array.
+This is not implemented yet. This allows you to chose the test methods that the script will go through.
+.PARAMETER OutputCSV
+Output the results to a CSV file. This is not enabled by default. This is a recommended default switch.
+.PARAMETER ShowResults
+Shows the results in an Out-Gridview.
 .PARAMETER ToConsole
-Specifies whether to output log messages to the console. The default value is $true.
+Specifies whether to output log messages to the console. Enabling this won't create a log.
+.PARAMETER WorkingDirectory
+Specifies the working directory where the script will be executed. The default value is "C:\INR\".
+.PARAMETER LogDirectory
+Specifies the directory where log files will be stored. The default value is "C:\INR\".
 .EXAMPLE
-.\Get-IntuneNetworkRequirements.ps1 -UseMSJSON $true -CustomURLFile '.\INRCustomList.csv' -AllowBestEffort -CheckCertRevocation $true -WindowsStore -ShowResults $true
+This example will use the MS-JSON for MEM, my custom CSV, allow for wildcard handling in URLS, check 
+the CRLs of each certificate provided for the server area TPMAttestation and then display the results in a grid, 
+while displaying potential issues in the console for the service area TPMAttestation. 
+.\Get-IntuneNetworkRequirements.ps1 -UseMSJSON -CustomURLFile '.\INRCustomList.csv' -AllowBestEffort -CheckCertRevocation -TPMAttestation -ShowResults -ToConsole
 .EXAMPLE
-.\Get-IntuneNetworkRequirements.ps1 -UseMS365JSON $true -M365 -AllowBestEffort -CheckCertRevocation $true -ShowResults $true -TenantName svaninja
+This will ingest 2 files from the working directory and compare them. The comparison is written to another CSV file while also showing the results in a grid view. 
+.\Get-IntuneNetworkRequirements.ps1 -MergeResults -MergeCSVs ResultList_29072024_110030_SADAME-PC.csv,ResultList_30072024_084101_3T0M4W3.csv -ShowResults
 .NOTES
-    Version: 0.9
+    Version: 1.0
     Versionname: 
     Intial creation date: 19.02.2024
-    Last change date: 23.07.2024
+    Last change date: 01.08.2024
     Latest changes: https://github.com/MHimken/toolbox/tree/main/Autopilot/MEMNetworkRequirements/changelog.md
+    Shoutouts: 
+    * WinAdmins Community - especially Chris for helping me figure out some of the features.
+    * badssl.com and httpstat.us are awesome! 
 #>
-[CmdletBinding(DefaultParameterSetName = 'Default')]
+[CmdletBinding(DefaultParameterSetName = 'TestMSJSON')]
 param(
-    [Parameter(ParameterSetName = 'Default', Position = 0)]
-    [bool]$TestAllServiceAreas,
-    [Parameter(ParameterSetName = 'Default')]
+    [Parameter(ParameterSetName = 'AllAreas', Position = 0)]
+    [switch]$TestAllServiceAreas,
+    [Parameter(ParameterSetName = 'AllAreas')]
     [Parameter(ParameterSetName = 'TestMSJSON', Position = 0)]
-    [bool]$UseMSJSON = $true,
+    [switch]$UseMSJSON,
     [Parameter(ParameterSetName = 'TestMS365JSON', Position = 0)]
-    [bool]$UseMS365JSON = $true,
+    [switch]$UseMS365JSON,
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom', Position = 0)]
@@ -90,11 +142,11 @@ param(
     [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$AllowBestEffort,
-    [Parameter(ParameterSetName = 'Default')]
+    [Parameter(ParameterSetName = 'AllAreas')]
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
-    [bool]$CheckCertRevocation = $true,
+    [switch]$CheckCertRevocation,
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$GCC,
@@ -169,10 +221,10 @@ param(
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$AppInstaller,
+
+    #Not Service area specific
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
-    
-    #Not Service area specific
     [switch]$AuthenticatedProxyOnly,
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
@@ -193,24 +245,28 @@ param(
     [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$BurstMode, #Divide the delay by 50 and try different speeds. Give warning when more than 10 URLs are tested
-    
-    #Output options
-    [Parameter(ParameterSetName = 'Default')]
-    [Parameter(ParameterSetName = 'TestMSJSON')]
-    [Parameter(ParameterSetName = 'TestMS365JSON')]
-    [Parameter(ParameterSetName = 'TestCustom')]
-    [bool]$OutputCSV = $true,
-    [Parameter(ParameterSetName = 'Default')]
-    [Parameter(ParameterSetName = 'TestMSJSON')]
-    [Parameter(ParameterSetName = 'TestMS365JSON')]
-    [Parameter(ParameterSetName = 'TestCustom')]
-    [bool]$ShowResults = $true,
 
+    #Merge options
     [Parameter(ParameterSetName = 'Merge', Position = 0)]
     [switch]$MergeResults,
     [Parameter(ParameterSetName = 'Merge')]
     [switch]$MergeShowAllResults,
+    [Parameter(ParameterSetName = 'Merge')]
+    [string[]]$MergeCSVs,
 
+    #Output options
+    [Parameter(ParameterSetName = 'AllAreas')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestMS365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [Parameter(ParameterSetName = 'Merge')]
+    [switch]$OutputCSV,
+    [Parameter(ParameterSetName = 'AllAreas')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestMS365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [Parameter(ParameterSetName = 'Merge')]
+    [switch]$ShowResults,
     #Common parameters
     [switch]$NoLog,
     [switch]$ToConsole,
@@ -220,6 +276,10 @@ param(
 
 #Preparation
 function Get-ScriptPath {
+    <#
+    .SYNOPSIS
+    Get the current script path.
+    #>
     if ($PSScriptRoot) { 
         # Console or VS Code debug/run button/F5 temp console
         $ScriptRoot = $PSScriptRoot 
@@ -239,7 +299,11 @@ function Get-ScriptPath {
     $Script:PathToScript = $ScriptRoot
 }
 function Initialize-Script {
-    $Script:DateTime = Get-Date -Format ddMMyyyy_hhmmss
+    <#
+    .SYNOPSIS
+    Will initialize most of the required variables throughout this script.
+    #>
+    $Script:DateTime = Get-Date -Format ddMMyyyy_HHmmss
     $Script:GUID = (New-Guid).Guid
     $Script:M365ServiceURLs = [System.Collections.ArrayList]::new()
     $Script:DNSCache = [System.Collections.ArrayList]::new()
@@ -270,8 +334,8 @@ function Initialize-Script {
 function Write-Log {
     <#
     .DESCRIPTION
-        This is a modified version of Ryan Ephgrave's script
-    .LINK
+        This is a modified version of the script by Ryan Ephgrave.
+        .LINK
         https://www.ephingadmin.com/powershell-cmtrace-log-function/
     #>
     Param (
@@ -299,6 +363,10 @@ function Write-Log {
     }
 }
 function Import-CustomURLFile {
+    <#
+    .SYNOPSIS
+        Imports URLs from a custom CSV file. Automatically uses 'INRCustomList.csv' if no filename is specified.
+    #>
     if (-not($CustomURLFile)) {
         Write-Log 'No CSV provided - trying autodetect for filename ' -Component 'ImportCustomURLFile'
         $DefaultCSVName = "INRCustomList.csv"
@@ -330,6 +398,10 @@ function Import-CustomURLFile {
     }
 }
 function Get-URLsFromID {
+    <#
+    .SYNOPSIS
+    Will put the URLs for different service areas into one big arraylist.
+    #>
     param(  
         [int[]]$IDs,
         [int[]]$FilterPort
@@ -367,6 +439,10 @@ function Get-URLsFromID {
 
 #Import M365 Service-URLs
 function Find-WildcardURL {
+    <#
+    .SYNOPSIS
+    Will resolve wildcards to actual URLs. If AllowBestEffort is set might also remove the wildcards from URLs if they can't be matched otherwise
+    #>
     Write-Log -Message 'Now searching for nearest match for Wildcards' -Component 'FindWildcardURL'
     foreach ($Object in $Script:WildCardURLs) {
         Write-Log -Message "Searching for $($Object.url)" -Component 'FindWildcardURL'
@@ -399,6 +475,10 @@ function Find-WildcardURL {
     }
 }
 function Get-M365Service {
+    <#
+    .SYNOPSIS
+    Will grab M365 and MEM JSONs from Microsoft using a random GUID
+    #>
     param(
         [switch]$M365,
         [switch]$MEM
@@ -451,7 +531,10 @@ function Get-M365Service {
 
 #Test Functions
 function Test-SSLInspectionByKnownCRLs {
-    #Verify CRL against known good - this is an indicator for SSLInspection
+    <#
+    .SYNOPSIS
+    Verify CRL against known good - this is an indicator for SSLInspection
+    #>
     param(
         [string]$CRLURL,
         [string]$VerifyAgainstKnownGood
@@ -473,6 +556,12 @@ function Test-SSLInspectionByKnownCRLs {
     return $KnownCRL
 }
 function Test-SSL {
+    <#
+    .SYNOPSIS
+    Opens a TCP connection to a URL and attempts to secure it using the strongest encryption method available.
+    .NOTES
+    Initial idea: https://learn.microsoft.com/en-us/troubleshoot/azure/azure-monitor/log-analytics/windows-agents/ssl-connectivity-mma-windows-powershell
+    #>
     param(
         $SSLTarget, 
         $SSLPort = 443
@@ -553,6 +642,10 @@ function Test-SSL {
     return $Result
 }
 function Test-HTTP {
+    <#
+    .SYNOPSIS
+    Checks for HTTP(s) return codes. 403 and 401 can be indicators of (authenticated) proxy interruption.
+    #>
     param(
         [string]$HTTPURL,
         [int]$HTTPPort
@@ -580,7 +673,10 @@ function Test-HTTP {
     }
 }
 function Test-DNS {
-    #Verify answer isn't 0.0.0.0 or 127.0.0.1 or ::
+    <#
+    .SYNOPSIS
+    Verifies that DNS is working for a given URL and that the IP does not resolve a sinkhole (0.0.0.0 or 127.0.0.1 or ::).
+    #>
     param(
         [string]$DNSTarget
     )
@@ -619,6 +715,10 @@ function Test-DNS {
     return $DNSresult
 }
 function Test-TCPPort {
+    <#
+    .SYNOPSIS
+    Opens a TCP connection to a given URL.
+    #>
     param(
         [string]$TCPTarget,
         [int]$TCPPort,
@@ -672,6 +772,8 @@ function Test-TCPPort {
 function Test-NTPviaUDP {
     <#
     .SYNOPSIS
+    Will test an NTP server using UDP. This is the only UDP test available currently. If more endpoints are found (like DO) those might get added too
+    .DESCRIPTION
     The only service that will ever answer to a UDP request, because it has to, is a NTP server. There are other ways to test that though see the Test-NTP function
     HUGE thanks to https://github.com/proxb/PowerShell_Scripts/blob/master/Test-Port.ps1 and
     Jannik Reinhard for the idea to use NTP to test UDP https://github.com/JayRHa/Intune-Scripts/blob/main/Check-AutopilotPrerequisites/Check-AutopilotPrerequisites.ps1#L145
@@ -711,8 +813,8 @@ function Test-NTPviaUDP {
 }
 function Test-TCPBurstMode {
     <#
-    .NOTES
-    ToDo: Explain this!
+    .SYNOPSIS
+    Will test a given URL in 50ms chunks (50,100,150...) until $MaxDelayInMS is reached.
     #>
     param(
         $WorkObject
@@ -726,12 +828,18 @@ function Test-TCPBurstMode {
     }
 }
 function Test-Network {
-    #ToDo: Make each check based upon a switch that is default = on
+    <#
+    .SYNOPSIS
+    This is the core function of this script. It combines every possible test (DNS, CRL, TCP, TLS...) into one function.
+    .NOTES
+    ToDo: Make each check based upon a switch that is default = on
+    #>
+    
     param(
         [PSCustomObject]$TestObject
     )
     Write-Log "Testing $($TestObject.url) on port $($TestObject.port)" -Component 'TestNetwork'
-    if($TestObject -in $Script:FinalResultList){
+    if ($TestObject -in $Script:FinalResultList) {
         Write-Log 'This URL/Port was already testet' -Component 'TestNetwork'
         return $true
     }
@@ -790,9 +898,10 @@ function Test-Network {
 #Service Areas
 function Test-DNSServers {
     <#
+    .SYNOPSIS
+    This will test a mixture of public DNS servers.
     .NOTES
     ServiceIDs 999
-    ToDo, maybe do an actual DNS request to a public DNS or multiple?
     #>
     $ServiceIDs = 999
     $ServiceArea = "DNSServer"
@@ -801,6 +910,7 @@ function Test-DNSServers {
     $DNSServer = Get-URLsFromID -IDs $ServiceIDs
     if (-not($DNSServer)) {
         Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
+        Write-Log -Message 'Please use the CSV provided with this script and specify -CustomURLFile' -Component "Test$ServiceArea"
         return $false
     }
     foreach ($DNSTarget in $Script:URLsToVerify) {
@@ -819,6 +929,8 @@ function Test-DNSServers {
 }
 function Test-RemoteHelp {
     <#
+    .SYNOPSIS
+    This will test all URLs required for RemoteHelp.
     .NOTES
     ServiceIDs 181,187,189
     ServiceIDs GCC 188
@@ -842,6 +954,8 @@ function Test-RemoteHelp {
 }
 function Test-TPMAttestation {
     <#
+    .SYNOPSIS
+    This will test all URLs required for TPM attestation.
     .NOTES
     ServiceIDs 173,9998
     https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#autopilot-self-deploying-mode-and-autopilot-pre-provisioning
@@ -862,6 +976,8 @@ function Test-TPMAttestation {
 }
 function Test-WNS {
     <#
+    .SYNOPSIS
+    This will test all URLs required for the windows push notification service (WNS).
     .NOTES
     ServiceIDs 169,171
     https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#windows-push-notification-serviceswns-dependencies
@@ -881,11 +997,13 @@ function Test-WNS {
 }
 function Test-DeviceHealth {
     <#
-    Microsoft Azure Attestation (formerly Device Health)
-    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#migrating-device-health-attestation-compliance-policies-to-microsoft-azure-attestation
-    https://learn.microsoft.com/en-us/windows/client-management/mdm/healthattestation-csp
+    .SYNOPSIS
+    This will test all URLs required for Microsoft Azure Attestation (formerly Device Health).
+    .NOTES
     ServiceIDs 186
     GCC 9995
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#migrating-device-health-attestation-compliance-policies-to-microsoft-azure-attestation
+    https://learn.microsoft.com/en-us/windows/client-management/mdm/healthattestation-csp
     #>
     $ServiceIDs = 186
     if ($GCC) {
@@ -905,6 +1023,9 @@ function Test-DeviceHealth {
 }
 function Test-DeliveryOptimization {
     <#
+    .SYNOPSIS
+    This will test all URLs required for delivery optimization.
+    .NOTES
     ServiceIDs 172,164,9994
     https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#delivery-optimization-dependencies
     https://learn.microsoft.com/en-us/windows/deployment/do/waas-delivery-optimization-faq#what-hostnames-should-i-allow-through-my-firewall-to-support-delivery-optimization
@@ -935,6 +1056,9 @@ function Test-DeliveryOptimization {
 }
 function Test-Apple {
     <#
+    .SYNOPSIS
+    This will test all URLs required for managing Apple devices.
+    .NOTES
     ServiceIDs 178
     https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#apple-dependencies
     #>
@@ -955,6 +1079,9 @@ function Test-Apple {
 }
 function Test-Android {
     <#
+    .SYNOPSIS
+    This will test all URLs required for managing Android devices
+    .NOTES
     ServiceIDs 179,9992
     https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#android-aosp-dependencies
     #>
@@ -981,6 +1108,9 @@ function Test-Android {
 }
 function Test-CRL {
     <#
+    .SYNOPSIS
+    This will test all well-known CRLs by checking the availability of their respective URLs - _not_ the actual CRL.
+    .NOTES
     ServiceIDs 84,125,9993
     Source: Martin Himken - this isn't well documented. From the MSJSON we can assume these are correct
     #>
@@ -1000,6 +1130,9 @@ function Test-CRL {
 }
 function Test-WindowsActivation {
     <#
+    .SYNOPSIS
+    This will test all URLs required for windows activation.
+    .NOTES
     ServiceIDs 9991
     https://support.microsoft.com/en-us/topic/windows-activation-or-validation-fails-with-error-code-0x8004fe33-a9afe65e-230b-c1ed-3414-39acd7fddf52
     #>
@@ -1019,11 +1152,13 @@ function Test-WindowsActivation {
 }
 function Test-EntraID {
     <#
+    .SYNOPSIS
+    This will test all URLs required for Entra ID.
+    .NOTES
     ServiceIDs 9990,125,84,9993
     https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/tshoot-connect-connectivity#connectivity-issues-in-the-installation-wizard
     "Of these URLs, the URLs listed in the following table are the absolute bare minimum to be able to connect to Microsoft Entra ID at all"
     As this list contains a lot of CRLs IDs 125,84 and 9993 (Test-CRL) also apply here - this is more than the bare minimum but CRLs should always be reachable.
-
     ToDo: 9990 replace with other IDs?
     #>
     $ServiceIDs = 9990
@@ -1050,6 +1185,9 @@ function Test-EntraID {
 }
 function Test-WindowsUpdate {
     <#
+    .SYNOPSIS
+    This will test all URLs required for Windows Update, this does not include delivery optimization.
+    .NOTES
     ServiceIDs 164,9984
     https://learn.microsoft.com/en-us/troubleshoot/windows-client/installing-updates-features-roles/windows-update-issues-troubleshooting#device-cant-access-update-files
     #>
@@ -1068,6 +1206,9 @@ function Test-WindowsUpdate {
 }
 function Test-NTP {
     <#
+    .SYNOPSIS
+    This will test NTP through multiple methods, including sending an actual NTP request to Microsoft.
+    .NOTES
     ServiceIDs 165
     https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#autopilot-dependencies
     Would throw 0x800705B4 if the URL exists but isn't an NTP or 0x80072AF9 for not resolved
@@ -1111,6 +1252,9 @@ function Test-NTP {
 }
 function Test-DiagnosticsData {
     <#
+    .SYNOPSIS
+    This tests all URLs required to send diagnostic data to Microsoft endpoints.
+    .NOTES
     ServiceIDs 69,9983
     https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints
     #>
@@ -1129,6 +1273,8 @@ function Test-DiagnosticsData {
 }
 function Test-DiagnosticsDataUpload {
     <#
+    .SYNOPSIS
+    This tests all URLs required to send collected diagnostics data to Intune (yes, the .zip file).
     .NOTES
     ServiceIDs 182,9989
     https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#autopilot-dependencies
@@ -1150,6 +1296,9 @@ function Test-DiagnosticsDataUpload {
 }
 function Test-EndpointAnalytics {
     <#
+    .SYNOPSIS
+    This will test all URLs required for endpoint analytics to receive data.
+    .NOTES
     ServiceIDs 69,163,9988
     https://learn.microsoft.com/en-us/mem/analytics/troubleshoot#bkmk_endpoints
     #>
@@ -1168,6 +1317,9 @@ function Test-EndpointAnalytics {
 }
 function Test-NCSI {
     <#
+    .SYNOPSIS
+    This tests all the URLs required for the network connection status indicator to work.
+    .NOTES
     ServiceIDs 165,9987
     https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints
     https://learn.microsoft.com/en-us/windows/privacy/manage-windows-21h2-endpoints
@@ -1176,7 +1328,7 @@ function Test-NCSI {
     $ServiceArea = "NetworkIndicator"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     Write-Log "Service ID 165 is mixed up with NTP, hence Service ID 9987 is required to only test the correct URLs and ports" -Component "Test$ServiceArea" -Type 2
-    $NCSIActive = (Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Policies\Microsoft\Windows\NetworkConnectivityStatusIndicator -Name NoActiveProbe) -eq 0
+    $NCSIActive = (Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Policies\Microsoft\Windows\NetworkConnectivityStatusIndicator -Name NoActiveProbe -ErrorAction SilentlyContinue) -eq 0
     if (-not($NCSIActive)) {
         Write-Log 'The NCSI has been detected as disabled - continuing with network tests regardless' -Component "Test$ServiceArea" -Type 2
     }
@@ -1192,6 +1344,9 @@ function Test-NCSI {
 }
 function Test-MicrosoftStore {
     <#
+    .SYNOPSIS
+    This tests all the URLs that are required for the Microsoft Store to work. This includes Store updates.
+    .NOTES
     ServiceIDs 9996
     https://learn.microsoft.com/en-us/windows/privacy/manage-windows-11-endpoints 
     https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#microsoft-store
@@ -1220,6 +1375,9 @@ function Test-MicrosoftStore {
 }
 function Test-AppInstaller {
     <#
+    .SYNOPSIS
+    This tests all the URLs that are required for the AppInstaller to work. This includes winget.
+    .NOTES
     ServiceIDs 9996
     https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#microsoft-store
     #>
@@ -1238,9 +1396,11 @@ function Test-AppInstaller {
 }
 function Test-SelfDeploying {
     <#
+    .SYNOPSIS
+    This will test all the URLs that are required for the Autopilot self-deployment mode to work.
+    .NOTES
     ServiceID 173, 9998
     https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#autopilot-self-deploying-mode-and-autopilot-pre-provisioning
-    ToDo
     #>
     $ServiceIDs = 173, 9998
     $ServiceArea = "SelfDepl"
@@ -1259,11 +1419,15 @@ function Test-Legacy {
     <#
     .NOTES
     Test-Hybrid Join? This might prove hard, as this is hardly documented (sure, it needs Entra-ID, but AD connectivity?)
+    ToDo
     #>
 }
 #Special tests, not service area specific
 function Test-AuthenticatedProxy {
     <#
+    .SYNOPSIS
+    This will attempt to test if an authenticated proxy is being used for URLs marked as incompatible with such a system.
+    .NOTES
     ServiceIDs 9986
     These URLs don't allow authenticated proxies according to https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#access-for-managed-devices 
     This will use something.azureedge.com as an example for *.azureedge.com - yes, that is not a documented address.
@@ -1286,6 +1450,9 @@ function Test-AuthenticatedProxy {
 }
 function Test-SSLInspection {
     <#
+    .SYNOPSIS
+    This will attempt to test if an TLS/SSL inspection is being used for URLs marked as incompatible with such a system.
+    .NOTES
     ServiceIDs 9985
     https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#access-for-managed-devices
     This uses checkin.dm.microsoft.com as a standin for *.dm.microsoft.com - could use discovery.dm.microsoft.com as fallback
@@ -1317,6 +1484,13 @@ function Test-SSLInspection {
     return $true
 }
 function Test-M365 {
+    <#
+    .SYNOPSIS
+    Yes, this will test _every_ M365 Common URL regardless if it's required or not. Prepare for 15 minutes of runtime minimum.
+    .NOTES
+    ServiceIDs yes
+    https://learn.microsoft.com/en-us/microsoft-365/enterprise/urls-and-ip-address-ranges?
+    #>
     $ServiceIDs = 41, 43, 44, 45, 46, 47, 49, 50, 51, 53, 56, 59, 64, 66, 67, 68, 69, 70, 71, 73, 75, 78, 79, 83, 84, 86, 89, 91, 92, 93, 95, 96, 97, 105, 114, 116, 117, 118, 121, 122, 124, 125, 126, 147, 152, 153, 156, 158, 159, 160, 184
     $ServiceArea = "MS365"
     if (-not($UseMS365JSON)) {
@@ -1336,21 +1510,25 @@ function Test-M365 {
 }
 function Test-MDE {
     <#
+    .SYNOPSIS
+    Test all URLs required to use Microsoft Defender for Endpoint.
+    .NOTES
     ServiceIDs
     https://download.microsoft.com/download/6/b/f/6bfff670-47c3-4e45-b01b-64a2610eaefa/mde-urls-commercial.xlsx
-    ToDo
+    ToDo - sorry Felix, it's coming don't worry.
     #>
     
 }
 function Test-Autopilot {
     <#
-    Sources:
+    .SYNOPSIS
+    Test all URLs required to use Autopilot. This also includes a lot of other service areas.
+    .NOTES
+    ServiceIDs 164,165,169,173,182,9999
+    9999 = Autopilot
     https://learn.microsoft.com/en-us/autopilot/requirements?tabs=networking#windows-autopilot-deployment-service
-    #Autopilot dependencies according to https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#autopilot-dependencies
+    Autopilot dependencies according to https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#autopilot-dependencies
     #>
-    #ServiceIDs 164,165,169,173,182,9999
-    #9999 = Autopilot
-    #Import
     $ServiceIDs = '9999'
     $ServiceArea = 'AP'
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
@@ -1390,53 +1568,86 @@ function Test-Autopilot {
     }
     if ($resultlist.values -contains $false) {
         Write-Log -Message "$resultlist" -Component "Test$ServiceArea" -Type 3
-        Write-Log -Message "$resultlist" -Component "Test$ServiceArea" -Type 3
         return $false
     }
     return $true
 }
 function Test-Intune {
-    param(
-        [switch]$Enhanced
-    )
-    #https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints#access-for-managed-devices
-    #Last Checked 11.06.24
-    #ServiceIDs 97,170,172,163,164,9997
-    #9997 = Defender
     <#
-    #The inspection of SSL traffic is not supported on 'manage.microsoft.com', or 'dm.microsoft.com' endpoints.
-    #Allow HTTP Partial response is required for Scripts & Win32 Apps endpoints.
-#>
-    if ($Enhanced) {
-        Test-Autopilot
-        Test-RemoteHelp
-        Test-DeviceHealth
-        Test-AuthenticatedProxy
-        <#
-        #Auth
-        "login.microsoftonline.com", @(443, 80)
-        "graph.windows.net", @(443, 80)
-        #    "*.officeconfig.msocdn.com", @(443,80) #This URL only has Nameservers. Examples below
-        #    "prod.officeconfig.msocdn.com", @(443,80) #This is not in the list, but should exist
-        "config.office.com", 443
-        "enterpriseregistration.windows.net", @(443, 80)
-    
+    .SYNOPSIS
+    Test all URLs required to use Intuine. This also includes a lot of other service areas.
+    .NOTES
+    ServiceIDs 163,172,170,97,190,189 + Authentiation 56,150,59
+    9997 = Defender
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints
     #>
+    $ServiceIDs = 56, 150, 59, 163, 172, 170, 97, 190, 189, 9998, 9985
+    $ServiceArea = "Int"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $Int = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($Int)) {
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
+        return $false
     }
+    foreach ($IntTarget in $Script:URLsToVerify) {
+        Test-Network $IntTarget
+    }
+    $resultlist = @{
+        TestWindowsActivation = Test-Autopilot
+        EntraIDTest           = Test-RemoteHelp
+        WNSTest               = Test-WNS
+        DOTest                = Test-DeliveryOptimization
+        AppleTest             = Test-Apple
+        AndroidTest           = Test-Android
+        StoreTest             = Test-MicrosoftStore
+        DeviceHealth          = Test-DeviceHealth
+        WUTest                = Test-WindowsUpdate
+        EndpAnalytics         = Test-EndpointAnalytics
+        #MDE = Test-MDE #Not done!
+        DiagnosticsDataTest   = Test-DiagnosticsData
+        NTPTest               = Test-NTP
+    }
+    if ($resultlist.values -contains $false) {
+        Write-Log -Message "$resultlist" -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    return $true
 }
+
 #Data Functions
 function Build-OutputCSV {
-    $OutpathFilePath = $(Join-Path $WorkingDirectory -ChildPath "ResultList$("_"+$Script:DateTime + "_"+ $Env:COMPUTERNAME).csv")
-    $Script:FinalResultList | Export-Csv -Path $OutpathFilePath -Encoding utf8
+    <#
+    .SYNOPSIS
+    Creates either a URL result list or a merged CSV file.
+    #>
+    param(
+        [string[]]$InputCSVs
+    )
+    if (-not($MergeResults)) {
+        $OutpathFilePath = $(Join-Path $WorkingDirectory -ChildPath "ResultList$("_"+$Script:DateTime + "_"+ $Env:COMPUTERNAME).csv")
+        $Script:FinalResultList | Export-Csv -Path $OutpathFilePath -Encoding utf8
+    } else {
+        #ToDo fix the filename to something that contains what was merged and when!
+        $MergedCSVTargetFolder = $(Join-Path $WorkingDirectory -ChildPath '/MergedResults')
+        if (-not(Test-Path $MergedCSVTargetFolder)) { New-Item -Path $MergedCSVTargetFolder -ItemType Directory | Out-Null }
+        $OutpathFilePath = $(Join-Path $MergedCSVTargetFolder -ChildPath "/MergedResults$("_"+$Script:DateTime + "_"+ $Script:MergeCSVComputername1 + "_" + $Script:MergeCSVComputername2).csv")
+        $Script:ComparedResults | Export-Csv -Path $OutpathFilePath -Encoding utf8 -Force
+    }
+    
 }
 function Merge-ResultFiles {
+    <#
+    .SYNOPSIS
+    Merges two given CSV files.
+    .NOTES
+    ToDo: Find a way to compare multiple files efficiently
+    #>
     param(
         [PSCustomObject[]]$CSVInput
     )
     if ($CSVInput) {
         if ($CSVInput.count -ne 2) {
             Write-Log 'Currently, this script can only handle two file comparisons. Please provide only 2 CSVs' -Component 'MergeResultFiles' -Type 3
-            return $false
         }
     } else {
         Write-Log 'No input CSV given - triggering auto detection' -Component 'MergeResultFiles'
@@ -1450,13 +1661,20 @@ function Merge-ResultFiles {
         }         
         $CSVInput = $TempCSVInput.FullName
     }
+
     $Script:ComparedResults = [System.Collections.ArrayList]::new()
     for ($i = 0; $i -lt $CSVInput.Count; $i++) {
-        if (-not(Test-Path $CSVInput[$i])) {
-            Write-Log "File $($CSVInput[$i]) not found" -Component 'MergeResultFiles' -Type 3
+        [System.IO.DirectoryInfo]$CSVPath = Join-Path -Path $WorkingDirectory -ChildPath $CSVInput[$i]
+        if (-not(Test-Path $CSVPath)) {
+            Write-Log "File $($CSVPath) not found" -Component 'MergeResultFiles' -Type 3
             return $false
         }
-        New-Variable "ImportedCSV$($i+1)" -Value	$(Import-Csv -Path $CSVInput[$i])
+        #$culture = [cultureinfo]::InvariantCulture
+        $culture = [Globalization.CultureInfo]::CreateSpecificCulture('de-DE')
+        $TimeStamp = Get-Date([DateTime]::ParseExact("$($CSVPath.name.Replace('ResultList_','').substring(0,15))", 'ddMMyyyy_hhmmss', $culture)) -Format "dd.MM.yyyy HH:mm:ss"
+        New-Variable "MergeCSVComputername$($i+1)" -Value $($CSVPath.name.Split('_')[3].split('.')[0]) -Scope Script
+        New-Variable "MergeCSVTimestamp$($i+1)" -Value $TimeStamp -Scope Script
+        New-Variable "ImportedCSV$($i+1)" -Value $(Import-Csv -Path $CSVPath)
     }
     Write-Log 'CSV imported - checking and merging' -Component 'MergeResultFiles'
     if ($ImportedCSV1.count -ne $ImportedCSV2.count) {
@@ -1469,8 +1687,12 @@ function Merge-ResultFiles {
     if ($MergeShowAllResults) { Write-Log 'MergeShowAllResults is selected. All results will be merge into one result output instead of showing only differences' -Component 'MergeResultFiles' }
     foreach ($CSVLeftObject in $ImportedCSV1) {
         $Result = Compare-Object -ReferenceObject $CSVLeftObject -DifferenceObject $ImportedCSV2[$counter] -Property ID, URL, Port, DNSResult, TCPResult, HTTPStatusCode, SSLTest, SSLProtocol, Issuer, AuthException, SSLInterception
+        $CSVLeftObject | Add-Member -Name 'ComputerName' -MemberType NoteProperty -Value "$($Script:MergeCSVComputername1)"
+        $CSVLeftObject | Add-Member -Name 'TimeStamp' -MemberType NoteProperty -Value "$($Script:MergeCSVTimestamp1)"
         if ($Result) {
             Write-Log "Difference found at $($CSVLeftObject.url)" -Component 'MergeResultFiles'
+            $ImportedCSV2[$counter] | Add-Member -Name 'ComputerName' -MemberType NoteProperty -Value "$($Script:MergeCSVComputername2)"
+            $ImportedCSV2[$counter] | Add-Member -Name 'TimeStamp' -MemberType NoteProperty -Value "$($Script:MergeCSVTimestamp2)"
             $Script:ComparedResults.add($CSVLeftObject) | Out-Null
             $Script:ComparedResults.add($ImportedCSV2[$counter]) | Out-Null
         } elseif ($MergeShowAllResults) {
@@ -1478,8 +1700,13 @@ function Merge-ResultFiles {
         }
         $counter++
     }
+    $Script:ComparedResults = $Script:ComparedResults | Sort-Object -Property url, ComputerName
 }
 function Start-Tests {
+    <#
+    .SYNOPSIS
+    Starts either all, specific, or individual tests based on user input.
+    #>
     if ($Intune -or $TestAllServiceAreas) {
         Test-Intune
     }
@@ -1507,7 +1734,7 @@ function Start-Tests {
     if ($DiagnosticsData -or $TestAllServiceAreas) {
         Test-DiagnosticsData
     }
-    if($DiagnosticsDataUpload -or $TestAllServiceAreas){
+    if ($DiagnosticsDataUpload -or $TestAllServiceAreas) {
         Test-DiagnosticsDataUpload
     }
     if ($NCSI -or $TestAllServiceAreas) {
@@ -1565,16 +1792,22 @@ Initialize-Script
 
 Start-Tests
 
-if ($OutputCSV) {
+if ($OutputCSV -and -not($MergeResults)) {
     Build-OutputCSV
 }
 if ($MergeResults) {
-    Merge-ResultFiles
-    $Script:ComparedResults | Sort-Object -Property url | Out-GridView -Title 'Intune Network test results' -Wait
+    Merge-ResultFiles -CSVInput $MergeCSVs
+    if ($ShowResults) {
+        $Script:ComparedResults | Sort-Object -Property url | Out-GridView -Title "Merge result between: $($Script:MergeCSVComputername1) and $($Script:MergeCSVComputername2)" -Wait
+    }
+    if ($OutputCSV) {
+        Build-OutputCSV -InputCSVs $MergeCSVs
+    }
 }
 
 if ($ShowResults) {
     $Script:FinalResultList | Out-GridView -Title 'Intune Network test results' -Wait
 }
-
+Write-Log 'Thanks for using INR' -Component 'INRMain'
 Set-Location $CurrentLocation
+Exit 0
