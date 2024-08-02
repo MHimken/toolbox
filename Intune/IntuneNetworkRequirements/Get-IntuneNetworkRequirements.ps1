@@ -796,18 +796,14 @@ function Test-NTPviaUDP {
         [string]$Target,
         [int]$Port
     )
+    Write-Log "Test $Target via direct UDP request" -Component 'TestNTPviaUDP'
     $NTPData = New-Object byte[] 48
     $NTPData[0] = 27
     $udpobject = New-Object Net.Sockets.Udpclient([System.Net.Sockets.AddressFamily]::InterNetwork) 
     $udpobject.Client.Blocking = $False
     $udpobject.AllowNatTraversal($true)
     $Error.Clear()
-    if(Test-DNS -DNSTarget 'time.windows.com'){
-        $udpobject.Connect($Target, $Port) | Out-Null
-    }
-    else{
-        return $false
-    }
+    $udpobject.Connect($Target, $Port) | Out-Null
     
     if ($udpobject.client.Connected) {
         Write-Log -Message 'Sending UDP test message' -Component 'TestUDPPort'
@@ -1239,13 +1235,18 @@ function Test-NTP {
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     Write-Log 'Microsofts JSON claims more URLs for Port 123, where in reality its only time.windows.com' -Component "Test$ServiceArea"
     Write-Log 'There are more URLs related to NCSI in the Service ID 165, which will also be tested.' -Component "Test$ServiceArea" 
-    $CurrentTimeServer = w32tm /query /source
-    if ($CurrentTimeServer -like "*80070005*") {
-        Write-Log 'You need to run this script as admin to view the currently configured NTP server' -Component "Test$ServiceArea" -Type 2
-    } elseif ($CurrentTimeServer -ne 'time.windows.com') {
+    $NTPServerNotDefault = $true
+    $CurrentTimeServer = (w32tm /query /source).trim()
+    switch ($CurrentTimeServer) {
+        *80070005* { Write-Log 'You need to run this script as admin to view the currently configured NTP server' -Component "Test$ServiceArea" -Type 2 }
+        *80070426* { Write-Log 'The service has not been started' -Component "Test$ServiceArea" -Type 2 }
+        *time.windows.com* { $NTPServerNotDefault = $false; Write-Log 'time.windows.com is the default timeserver - skipping custom server test' -Component "Test$ServiceArea" }
+    }
+    if ($NTPServerNotDefault) {
         if ($Autopilot) {
             Write-Log 'time.windows.com is currently not the timeserver - this is a requirement for Autopilot' -Component "Test$ServiceArea" -Type 2
         }
+        $CurrentTimeServer = $CurrentTimeServer.Split(',')[0]
         $CustomTimeServerTestResult = Test-NTPviaUDP $CurrentTimeServer -Port 123
     }
     Write-Log 'Testing default NTP server' -Component "Test$ServiceArea" 
