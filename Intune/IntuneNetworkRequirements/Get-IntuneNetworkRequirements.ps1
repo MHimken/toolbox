@@ -121,13 +121,11 @@ This will ingest 2 files from the working directory and compare them. The compar
     Version: 1.0
     Versionname: 
     Intial creation date: 19.02.2024
-    Last change date: 01.08.2024
+    Last change date: 02.08.2024
     Latest changes: https://github.com/MHimken/toolbox/tree/main/Autopilot/MEMNetworkRequirements/changelog.md
     Shoutouts: 
     * WinAdmins Community - especially Chris for helping me figure out some of the features.
     * badssl.com and httpstat.us are awesome! 
-    ToDo:
-    * Test yyyyMMdd format
 #>
 [CmdletBinding(DefaultParameterSetName = 'TestMSJSON')]
 param(
@@ -1349,12 +1347,12 @@ function Test-NCSI {
     $ServiceArea = "NetworkIndicator"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     Write-Log "Service ID 165 is mixed up with NTP, hence Service ID 9987 is required to only test the correct URLs and ports" -Component "Test$ServiceArea" -Type 2
-    try {
-        $NCSIActive = (Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Policies\Microsoft\Windows\NetworkConnectivityStatusIndicator -Name NoActiveProbe) -eq 0
-    } catch {
+    try{
+        $NCSIActive= (Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Policies\Microsoft\Windows\NetworkConnectivityStatusIndicator -Name NoActiveProbe -ErrorAction Stop | Out-Null) -eq 0
+    }
+    catch{
         $NCSIActive = $true
     }
-
     if (-not($NCSIActive)) {
         Write-Log 'The NCSI has been detected as disabled - continuing with network tests regardless' -Component "Test$ServiceArea" -Type 2
     }
@@ -1740,79 +1738,79 @@ function Start-Tests {
         Write-Log -Message "Intune result: $(Test-Intune)" -Component 'StartTests'
     }
     if ($Autopilot -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-Autopilot)" -Component 'StartTests'
+        Write-Log -Message "Autopilot result: $(Test-Autopilot)" -Component 'StartTests'
     }
     if ($WindowsActivation -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-WindowsActivation)" -Component 'StartTests'
+        Write-Log -Message "Windows activation result: $(Test-WindowsActivation)" -Component 'StartTests'
     }
     if ($EntraID -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-EntraID)" -Component 'StartTests'
+        Write-Log -Message "Entra ID result: $(Test-EntraID)" -Component 'StartTests'
     }
     if ($WindowsUpdate -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-WindowsUpdate)" -Component 'StartTests'
+        Write-Log -Message "Windows Update result: $(Test-WindowsUpdate)" -Component 'StartTests'
     }
     if ($DeliveryOptimization -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-DeliveryOptimization)" -Component 'StartTests'
+        Write-Log -Message "Delivery Optimization result: $(Test-DeliveryOptimization)" -Component 'StartTests'
     }
     if ($NTP -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-NTP)" -Component 'StartTests'
+        Write-Log -Message "NTP result: $(Test-NTP)" -Component 'StartTests'
     }
     if ($DNS -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-DNSServers)" -Component 'StartTests'
+        Write-Log -Message "DNS result: $(Test-DNSServers)" -Component 'StartTests'
     }
     if ($DiagnosticsData -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-DiagnosticsData)" -Component 'StartTests'
+        Write-Log -Message "Diagnostics Data result: $(Test-DiagnosticsData)" -Component 'StartTests'
     }
     if ($DiagnosticsDataUpload -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-DiagnosticsDataUpload)" -Component 'StartTests'
+        Write-Log -Message "Diagnostics Data Upload result: $(Test-DiagnosticsDataUpload)" -Component 'StartTests'
     }
     if ($NCSI -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-NCSI)" -Component 'StartTests'
+        Write-Log -Message "NCSI result: $(Test-NCSI)" -Component 'StartTests'
     }
     if ($WindowsNotificationService -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-WNS)" -Component 'StartTests'
+        Write-Log -Message "WNS result: $(Test-WNS)" -Component 'StartTests'
     }
     if ($WindowsStore -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-MicrosoftStore)" -Component 'StartTests'
+        Write-Log -Message "Windows Store result: $(Test-MicrosoftStore)" -Component 'StartTests'
     }
     if ($M365 -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-M365)" -Component 'StartTests'
+        Write-Log -Message "M365 result: $(Test-M365)" -Component 'StartTests'
     }
     if ($CRLs -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-CRL)" -Component 'StartTests'
+        Write-Log -Message "CRLs result: $(Test-CRL)" -Component 'StartTests'
     }
     if ($SelfDeploying -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-SelfDeploying)" -Component 'StartTests'
+        Write-Log -Message "Self-Deploying result: $(Test-SelfDeploying)" -Component 'StartTests'
     }
     if ($RemoteHelp -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-RemoteHelp)" -Component 'StartTests'
+        Write-Log -Message "Remote Help result: $(Test-RemoteHelp)" -Component 'StartTests'
     }
     if ($TPMAttestation -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-TPMAttestation)" -Component 'StartTests'
+        Write-Log -Message "TPM Attestation result: $(Test-TPMAttestation)" -Component 'StartTests'
     }
     if ($DeviceHealth -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-DeviceHealth)" -Component 'StartTests'
+        Write-Log -Message "Device Health result: $(Test-DeviceHealth)" -Component 'StartTests'
     }
     if ($Apple -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-Apple)" -Component 'StartTests'
+        Write-Log -Message "Apple result: $(Test-Apple)" -Component 'StartTests'
     }
     if ($Android -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-Android)" -Component 'StartTests'
+        Write-Log -Message "Android result: $(Test-Android)" -Component 'StartTests'
     }
     if ($EndpointAnalytics -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-EndpointAnalytics)" -Component 'StartTests'
+        Write-Log -Message "Endpoint Analytics result: $(Test-EndpointAnalytics)" -Component 'StartTests'
     }
     if ($AppInstaller -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-AppInstaller)" -Component 'StartTests'
+        Write-Log -Message "App Installer result: $(Test-AppInstaller)" -Component 'StartTests'
     }
     if ($AuthenticatedProxyOnly -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-AuthenticatedProxy)" -Component 'StartTests'
+        Write-Log -Message "Authenticated Proxy result: $(Test-AuthenticatedProxy)" -Component 'StartTests'
     }
     if ($TestSSLInspectionOnly -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-SSLInspection)" -Component 'StartTests'
+        Write-Log -Message "SSL Inspection result: $(Test-SSLInspection)" -Component 'StartTests'
     }
     if ($Legacy -or $TestAllServiceAreas) {
-        Write-Log -Message "Intune result: $(Test-Legacy)" -Component 'StartTests'
+        Write-Log -Message "Legacy result: $(Test-Legacy)" -Component 'StartTests'
     }
 }
 
