@@ -135,12 +135,15 @@ param(
     [Parameter(ParameterSetName = 'AllAreas')]
     [Parameter(ParameterSetName = 'TestMSJSON', Position = 0)]
     [switch]$UseMSJSON,
+    [Parameter(ParameterSetName = 'AllAreas')]
     [Parameter(ParameterSetName = 'TestMS365JSON', Position = 0)]
     [switch]$UseMS365JSON,
+    [Parameter(ParameterSetName = 'AllAreas')]
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom', Position = 0)]
     [string]$CustomURLFile,
+    [Parameter(ParameterSetName = 'AllAreas')]
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
@@ -150,6 +153,7 @@ param(
     [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$CheckCertRevocation,
+    [Parameter(ParameterSetName = 'AllAreas')]
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$GCC,
@@ -238,8 +242,10 @@ param(
     
     #Special Methods
     #[string[]]$TestMethods, # ToDo
+    [Parameter(ParameterSetName = 'AllAreas', Mandatory)]
     [Parameter(ParameterSetName = 'TestMS365JSON', Mandatory)]
     [string]$TenantName,
+    [Parameter(ParameterSetName = 'AllAreas', Mandatory)]
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
