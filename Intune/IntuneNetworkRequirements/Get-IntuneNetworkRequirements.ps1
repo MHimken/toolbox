@@ -1676,7 +1676,11 @@ function Merge-ResultFiles {
 
     $Script:ComparedResults = [System.Collections.ArrayList]::new()
     for ($i = 0; $i -lt $CSVInput.Count; $i++) {
-        [System.IO.DirectoryInfo]$CSVPath = Join-Path -Path $WorkingDirectory -ChildPath $CSVInput[$i]
+        if (Test-Path $CSVInput[$i]) {
+            [System.IO.DirectoryInfo]$CSVPath = $CSVInput[$i]
+        } else {
+            [System.IO.DirectoryInfo]$CSVPath = Join-Path -Path $WorkingDirectory -ChildPath $CSVInput[$i]
+        }
         if (-not(Test-Path $CSVPath)) {
             Write-Log "File $($CSVPath) not found" -Component 'MergeResultFiles' -Type 3
             return $false
@@ -1694,7 +1698,6 @@ function Merge-ResultFiles {
         Write-Log 'This happens especially when the M365 JSON or a new version of my URL list was selected as that might change at any time' -Component 'MergeResultFiles'
         return $false
     }
-
     $counter = 0
     if ($MergeShowAllResults) { Write-Log 'MergeShowAllResults is selected. All results will be merge into one result output instead of showing only differences' -Component 'MergeResultFiles' }
     foreach ($CSVLeftObject in $ImportedCSV1) {
