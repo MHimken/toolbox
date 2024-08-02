@@ -245,7 +245,7 @@ param(
     [Parameter(ParameterSetName = 'AllAreas', Mandatory)]
     [Parameter(ParameterSetName = 'TestMS365JSON', Mandatory)]
     [string]$TenantName,
-    [Parameter(ParameterSetName = 'AllAreas', Mandatory)]
+    [Parameter(ParameterSetName = 'AllAreas')]
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
