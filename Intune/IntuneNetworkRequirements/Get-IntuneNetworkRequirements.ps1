@@ -320,7 +320,7 @@ function Initialize-Script {
     $LogPrefix = 'MEMNR'
     $Script:LogFile = Join-Path -Path $LogDirectory -ChildPath ('{0}_{1}.log' -f $LogPrefix, $Script:DateTime)
     if (-not(Test-Path $WorkingDirectory )) { New-Item $WorkingDirectory -ItemType Directory -Force | Out-Null }
-    if($PSVersionTable.psversion.major -lt 7){
+    if ($PSVersionTable.psversion.major -lt 7) {
         Write-Log -Message 'Please follow the manual - PowerShell 7 is currently required to run this script.' -Component 'InitialzeScript' -Type 3
         Exit 1
     }
@@ -1335,7 +1335,12 @@ function Test-NCSI {
     $ServiceArea = "NetworkIndicator"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     Write-Log "Service ID 165 is mixed up with NTP, hence Service ID 9987 is required to only test the correct URLs and ports" -Component "Test$ServiceArea" -Type 2
-    $NCSIActive = (Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Policies\Microsoft\Windows\NetworkConnectivityStatusIndicator -Name NoActiveProbe -ErrorAction SilentlyContinue) -eq 0
+    try {
+        $NCSIActive = (Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Policies\Microsoft\Windows\NetworkConnectivityStatusIndicator -Name NoActiveProbe) -eq 0
+    } catch {
+        $NCSIActive = $true
+    }
+
     if (-not($NCSIActive)) {
         Write-Log 'The NCSI has been detected as disabled - continuing with network tests regardless' -Component "Test$ServiceArea" -Type 2
     }
