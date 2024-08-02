@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
 This script will test network connections to various Intune services using PowerShell 7
@@ -124,6 +125,8 @@ This will ingest 2 files from the working directory and compare them. The compar
     Shoutouts: 
     * WinAdmins Community - especially Chris for helping me figure out some of the features.
     * badssl.com and httpstat.us are awesome! 
+    ToDo:
+    * Test yyyyMMdd format
 #>
 [CmdletBinding(DefaultParameterSetName = 'TestMSJSON')]
 param(
@@ -303,7 +306,8 @@ function Initialize-Script {
     .SYNOPSIS
     Will initialize most of the required variables throughout this script.
     #>
-    $Script:DateTime = Get-Date -Format ddMMyyyy_HHmmss
+
+    $Script:DateTime = Get-Date -Format yyyyMMdd_HHmmss
     $Script:GUID = (New-Guid).Guid
     $Script:M365ServiceURLs = [System.Collections.ArrayList]::new()
     $Script:DNSCache = [System.Collections.ArrayList]::new()
@@ -312,11 +316,14 @@ function Initialize-Script {
     $Script:URLsToVerify = [System.Collections.ArrayList]::new()
     $Script:FinalResultList = [System.Collections.ArrayList]::new()
     $Script:CRLURLsToCheck = [System.Collections.ArrayList]::new()
-    $Script:DateTime = Get-Date -Format ddMMyyyy_hhmmss
     if (-not(Test-Path $LogDirectory)) { New-Item $LogDirectory -ItemType Directory -Force | Out-Null }
     $LogPrefix = 'MEMNR'
     $Script:LogFile = Join-Path -Path $LogDirectory -ChildPath ('{0}_{1}.log' -f $LogPrefix, $Script:DateTime)
     if (-not(Test-Path $WorkingDirectory )) { New-Item $WorkingDirectory -ItemType Directory -Force | Out-Null }
+    if($PSVersionTable.psversion.major -lt 7){
+        Write-Log -Message 'Please follow the manual - PowerShell 7 is currently required to run this script.' -Component 'InitialzeScript' -Type 3
+        Exit 1
+    }
     $Script:ExternalIP = (ConvertFrom-Json (Invoke-WebRequest "https://geo-prod.do.dsp.mp.microsoft.com/geo")).ExternalIpAddress
     Write-Log -Message "External IP: $($Script:ExternalIP)" -Component 'Initialze'
     $Script:CurrentLocation = Get-Location
@@ -1671,7 +1678,7 @@ function Merge-ResultFiles {
         }
         #$culture = [cultureinfo]::InvariantCulture
         $culture = [Globalization.CultureInfo]::CreateSpecificCulture('de-DE')
-        $TimeStamp = Get-Date([DateTime]::ParseExact("$($CSVPath.name.Replace('ResultList_','').substring(0,15))", 'ddMMyyyy_hhmmss', $culture)) -Format "dd.MM.yyyy HH:mm:ss"
+        $TimeStamp = Get-Date([DateTime]::ParseExact("$($CSVPath.name.Replace('ResultList_','').substring(0,15))", 'yyyyMMdd_hhmmss', $culture)) -Format "dd.MM.yyyy HH:mm:ss"
         New-Variable "MergeCSVComputername$($i+1)" -Value $($CSVPath.name.Split('_')[3].split('.')[0]) -Scope Script
         New-Variable "MergeCSVTimestamp$($i+1)" -Value $TimeStamp -Scope Script
         New-Variable "ImportedCSV$($i+1)" -Value $(Import-Csv -Path $CSVPath)
