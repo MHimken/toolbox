@@ -118,10 +118,10 @@ while displaying potential issues in the console for the service area TPMAttesta
 This will ingest 2 files from the working directory and compare them. The comparison is written to another CSV file while also showing the results in a grid view. 
 .\Get-IntuneNetworkRequirements.ps1 -MergeResults -MergeCSVs ResultList_29072024_110030_SADAME-PC.csv,ResultList_30072024_084101_3T0M4W3.csv -ShowResults
 .NOTES
-    Version: 1.0
+    Version: 1.1
     Versionname: 
     Intial creation date: 19.02.2024
-    Last change date: 02.08.2024
+    Last change date: 21.08.2024
     Latest changes: https://github.com/MHimken/toolbox/tree/main/Autopilot/MEMNetworkRequirements/changelog.md
     Shoutouts: 
     * WinAdmins Community - especially Chris for helping me figure out some of the features.
@@ -330,10 +330,10 @@ function Initialize-Script {
         Exit 1
     }
     $Script:ExternalIP = (ConvertFrom-Json (Invoke-WebRequest "https://geo-prod.do.dsp.mp.microsoft.com/geo")).ExternalIpAddress
-    Write-Log -Message "External IP: $($Script:ExternalIP)" -Component 'Initialze'
+    Write-Log -Message "External IP: $($Script:ExternalIP)" -Component 'InitialzeScript'
     $Script:CurrentLocation = Get-Location
     Set-Location $WorkingDirectory
-    Get-ScriptPath
+    Get-ScriptPath        
     Import-CustomURLFile
     if ($UseMSJSON) {
         Get-M365Service -MEM
@@ -341,7 +341,6 @@ function Initialize-Script {
     if ($UseMS365JSON) {
         Get-M365Service -M365
     }
-    #ToDo: create an entry to put in the log that repeats the options used to run the script and add it as TITLE to the out-gridview if it was requested
 }
 function Write-Log {
     <#
@@ -373,6 +372,69 @@ function Write-Log {
             }
         }
     }
+}
+function Write-SettingsToLog{
+    if (-not($MergeResults)) {
+        Write-Log "Settings used to run the script:
+        General settings
+        TestAllServiceAreas: $TestAllServiceAreas
+        UseMSJSON: $UseMSJSON
+        UseMS365JSON: $UseMS365JSON
+        CustomURLFile: $CustomURLFile
+        AllowBestEffort: $AllowBestEffort
+        CheckCertRevocation: $CheckCertRevocation
+        GCC: $GCC
+    
+        ASAs
+        Intune: $Intune
+        Autopilot: $Autopilot
+        WindowsActivation: $WindowsActivation
+        EntraID: $EntraID
+        WindowsUpdate: $WindowsUpdate
+        DeliveryOptimization: $DeliveryOptimization
+        NTP: $NTP
+        DNS: $DNS
+        DiagnosticsData: $DiagnosticsData
+        DiagnosticsDataUpload: $DiagnosticsDataUpload
+        NCSI: $NCSI
+        WindowsNotificationService: $WindowsNotificationService
+        WindowsStore: $WindowsStore
+        M365: $M365
+        CRLs: $CRLs
+        SelfDeploying: $SelfDeploying
+        RemoteHelp: $RemoteHelp
+        TPMAttestation: $TPMAttestation
+        DeviceHealth: $DeviceHealth
+        Apple: $Apple
+        Android: $Android
+        EndpointAnalytics: $EndpointAnalytics
+        AppInstaller: $AppInstaller
+    
+        Other tests
+        AuthenticatedProxyOnly: $AuthenticatedProxyOnly
+        TestSSLInspectionOnly: $TestSSLInspectionOnly
+        Legacy: $Legacy
+    
+        Additional Settings
+        TenantName: $TenantName
+        MaxDelayInMS: $MaxDelayInMS
+        BurstMode: $BurstMode" -Component 'InitialzeScript'
+    } else {
+        Write-Log "Settings used to run the script:
+        Merge options
+        MergeResults: $MergeResults
+        MergeShowAllResults: $MergeShowAllResults
+        MergeCSVs: $MergeCSVs" -Component 'InitialzeScript'
+    }
+    Write-Log "Output options
+        OutputCSV: $OutputCSV
+        ShowResults: $ShowResults
+    
+        Common parameters
+        NoLog: $NoLog
+        ToConsole: $ToConsole
+        WorkingDirectory: $WorkingDirectory
+        LogDirectory: $LogDirectory" -Component 'InitialzeScript'
 }
 function Import-CustomURLFile {
     <#
@@ -606,6 +668,7 @@ function Test-SSL {
     if ($SSLStream.IsAuthenticated) {
         $SSLTest = $true
         $CertInfo = New-Object -TypeName Security.Cryptography.X509Certificates.X509Certificate2($SSLStream.RemoteCertificate)
+        #CLEANUP
         #$Test = New-Object -TypeName System.Net.Security.SslStreamCertificateContext.create($CertInfo)
         if ($CertInfo.Thumbprint -and $CheckCertRevocation) {
             Write-Log -Message "Grabbing CRL for $SSLTarget and verify against known-good" -Component 'TestSSL'
@@ -668,6 +731,7 @@ function Test-HTTP {
         default { $URIStart = "https://" }
     }
     try {
+        #MARKED FOR CLEANUP. Reason: PS5 only code.
         #We could use -SkipHttpErrorCheck in PS7...
         if ($PSVersionTable.psversion.major -ge 7) {
             $HTTPiwr = Invoke-WebRequest -Uri $($URIStart + $HTTPURL) -ConnectionTimeoutSeconds $(($MaxDelayInMS / 100)) -Method Get -SkipHttpErrorCheck
@@ -1347,10 +1411,9 @@ function Test-NCSI {
     $ServiceArea = "NetworkIndicator"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
     Write-Log "Service ID 165 is mixed up with NTP, hence Service ID 9987 is required to only test the correct URLs and ports" -Component "Test$ServiceArea" -Type 2
-    try{
-        $NCSIActive= (Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Policies\Microsoft\Windows\NetworkConnectivityStatusIndicator -Name NoActiveProbe -ErrorAction Stop | Out-Null) -eq 0
-    }
-    catch{
+    try {
+        $NCSIActive = (Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Policies\Microsoft\Windows\NetworkConnectivityStatusIndicator -Name NoActiveProbe -ErrorAction Stop | Out-Null) -eq 0
+    } catch {
         $NCSIActive = $true
     }
     if (-not($NCSIActive)) {
@@ -1574,7 +1637,6 @@ function Test-Autopilot {
     $resultlist = @{
         TestWindowsActivation = Test-WindowsActivation
         EntraIDTest           = Test-EntraID
-        #IntuneTest            = Test-Intune #Needs to be evaluated!
         DiagnosticsDataUTest  = Test-DiagnosticsDataUpload 
         WUTest                = Test-WindowsUpdate
         DOTest                = Test-DeliveryOptimization
@@ -1584,7 +1646,6 @@ function Test-Autopilot {
         NCSITest              = Test-NCSI
         WNSTest               = Test-WNS
         StoreTest             = Test-MicrosoftStore
-        #TestM365              = Test-M365 #Needs to be evaluated!
         CRLTest               = Test-CRL
         LegacyTest            = Test-Legacy
         SelfDeployingTest     = Test-SelfDeploying
@@ -1699,7 +1760,7 @@ function Merge-ResultFiles {
         }
         #$culture = [cultureinfo]::InvariantCulture
         $culture = [Globalization.CultureInfo]::CreateSpecificCulture('de-DE')
-        $TimeStamp = Get-Date([DateTime]::ParseExact("$($CSVPath.name.Replace('ResultList_','').substring(0,15))", 'yyyyMMdd_hhmmss', $culture)) -Format "dd.MM.yyyy HH:mm:ss"
+        $TimeStamp = Get-Date([DateTime]::ParseExact("$($CSVPath.name.Replace('ResultList_','').substring(0,15))", 'yyyyMMdd_HHmmss', $culture)) -Format "dd.MM.yyyy HH:mm:ss"
         New-Variable "MergeCSVComputername$($i+1)" -Value $($CSVPath.name.Split('_')[3].split('.')[0]) -Scope Script
         New-Variable "MergeCSVTimestamp$($i+1)" -Value $TimeStamp -Scope Script
         New-Variable "ImportedCSV$($i+1)" -Value $(Import-Csv -Path $CSVPath)
@@ -1835,6 +1896,7 @@ if ($MergeResults) {
 if ($ShowResults) {
     $Script:FinalResultList | Out-GridView -Title 'Intune Network test results' -Wait
 }
+Write-SettingsToLog
 Write-Log 'Thanks for using INR' -Component 'INRMain'
 Set-Location $CurrentLocation
 Exit 0
