@@ -7,7 +7,7 @@ Welcome to the first release of INR - Intune Network Requirements. This script w
 related to Intune. The main way this script is intended to run is not once, but at least **twice**.
 **Requirements
 * PowerShell 7
-* RTFM
+* RTFM https://manima.de/2024/08/intune-network-requirements-everything-i-learned/
 * Admin rights (if you want to test your currently set NTP server)
 
 Instructions:
@@ -64,23 +64,25 @@ Specifies whether to test the CRLs service area. These are the well known CRLs b
 .PARAMETER SelfDeploying
 Specifies whether to test the self-deploying service area.
 .PARAMETER RemoteHelp
-Specifies whether to test the self-deploying service area.
+Specifies whether to test the Remote Help service area.
 .PARAMETER TPMAttestation
-Specifies whether to test the self-deploying service area.
+Specifies whether to test the TPM attestation service area.
 .PARAMETER DeviceHealth
-Specifies whether to test the self-deploying service area.
+Specifies whether to test the device health service area.
 .PARAMETER Apple
-Specifies whether to test the self-deploying service area.
+Specifies whether to test the Apple (iOS/iPadOS) service area.
 .PARAMETER Android
-Specifies whether to test the self-deploying service area.
+Specifies whether to test the Android (Google) service area.
 .PARAMETER EndpointAnalytics
-Specifies whether to test the self-deploying service area.
+Specifies whether to test the Endpoint Analytics service area.
 .PARAMETER AppInstaller
-Specifies whether to test the self-deploying service area.
+Specifies whether to test the app installer (winget) service area.
+.PARAMETER UniversalPrint
+Specifies whether to test the universal print service area.
 .PARAMETER AuthenticatedProxyOnly
-Specifies whether to test the self-deploying service area.
+Will test if there is an authenticated proxy in use - does not test other service areas.
 .PARAMETER TestSSLInspectionOnly
-Specifies whether to test the self-deploying service area.
+Will test if there is any sort of SSL inspection - does not test other service areas.
 .PARAMETER Legacy
 This is not implemented yet. Specifies whether to test legacy service.
 .PARAMETER TenantName
@@ -89,6 +91,9 @@ This must be specified if you want some of the M365 URLS to be populated automat
 Default: 300ms. This is my recommended value because some addresses tend to respond slowly.
 .PARAMETER BurstMode
 Will use the MaxDelayInMs, divide it into 50ms chunks and then do a quick test. Use this to find out response times.
+.PARAMETER BrienMode
+This mode allows you to run the script multiple times in succession and automatically merge the results. This can be used to 
+change network settings in between running the script with the same parameters. The last two results will be compared 
 .PARAMETER MergeResults
 Will trigger the result merge path. If two CSV files are in the working directory, it will merge those. Otherwise use -MergeCSVs.
 .PARAMETER MergeShowAllResults
@@ -118,10 +123,10 @@ while displaying potential issues in the console for the service area TPMAttesta
 This will ingest 2 files from the working directory and compare them. The comparison is written to another CSV file while also showing the results in a grid view. 
 .\Get-IntuneNetworkRequirements.ps1 -MergeResults -MergeCSVs ResultList_29072024_110030_SADAME-PC.csv,ResultList_30072024_084101_3T0M4W3.csv -ShowResults
 .NOTES
-    Version: 1.1
-    Versionname: 
+    Version: 1.2
+    Versionname: Brien 
     Intial creation date: 19.02.2024
-    Last change date: 21.08.2024
+    Last change date: 01.10.2024
     Latest changes: https://github.com/MHimken/toolbox/tree/main/Autopilot/MEMNetworkRequirements/changelog.md
     Shoutouts: 
     * WinAdmins Community - especially Chris for helping me figure out some of the features.
@@ -143,12 +148,12 @@ param(
     [Parameter(ParameterSetName = 'TestCustom', Position = 0)]
     [string]$CustomURLFile,
     [Parameter(ParameterSetName = 'AllAreas')]
-    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON', Position = 1)]
     [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$AllowBestEffort,
     [Parameter(ParameterSetName = 'AllAreas')]
-    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestMSJSON', Position = 2)]
     [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$CheckCertRevocation,
@@ -227,6 +232,9 @@ param(
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$AppInstaller,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$UniversalPrint, 
 
     #Not Service area specific
     [Parameter(ParameterSetName = 'TestMSJSON')]
@@ -240,7 +248,6 @@ param(
     [switch]$Legacy,
     
     #Special Methods
-    #[string[]]$TestMethods, # ToDo
     [Parameter(ParameterSetName = 'AllAreas', Mandatory)]
     [Parameter(ParameterSetName = 'TestMS365JSON', Mandatory)]
     [string]$TenantName,
@@ -253,11 +260,21 @@ param(
     [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$BurstMode, #Divide the delay by 50 and try different speeds. Give warning when more than 10 URLs are tested
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestMS365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [int]$BrienMode,
 
     #Merge options
     [Parameter(ParameterSetName = 'Merge', Position = 0)]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestMS365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$MergeResults,
     [Parameter(ParameterSetName = 'Merge')]
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestMS365JSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$MergeShowAllResults,
     [Parameter(ParameterSetName = 'Merge')]
     [string[]]$MergeCSVs,
@@ -311,35 +328,47 @@ function Initialize-Script {
     .SYNOPSIS
     Will initialize most of the required variables throughout this script.
     #>
-
     $Script:DateTime = Get-Date -Format yyyyMMdd_HHmmss
-    $Script:GUID = (New-Guid).Guid
-    $Script:M365ServiceURLs = [System.Collections.ArrayList]::new()
-    $Script:DNSCache = [System.Collections.ArrayList]::new()
-    $Script:TCPCache = [System.Collections.ArrayList]::new()
-    $Script:WildCardURLs = [System.Collections.ArrayList]::new()
-    $Script:URLsToVerify = [System.Collections.ArrayList]::new()
-    $Script:FinalResultList = [System.Collections.ArrayList]::new()
-    $Script:CRLURLsToCheck = [System.Collections.ArrayList]::new()
-    if (-not(Test-Path $LogDirectory)) { New-Item $LogDirectory -ItemType Directory -Force | Out-Null }
-    $LogPrefix = 'MEMNR'
-    $Script:LogFile = Join-Path -Path $LogDirectory -ChildPath ('{0}_{1}.log' -f $LogPrefix, $Script:DateTime)
+    if (-not($Script:CurrentLocation)) {
+        $Script:CurrentLocation = Get-Location
+    } 
+    if ((Get-Location).path -ne $WorkingDirectory) {
+        Set-Location $WorkingDirectory
+    }
+    Get-ScriptPath
+    if (-not($Script:LogFile)) {
+        $LogPrefix = 'INR'
+        $Script:LogFile = Join-Path -Path $LogDirectory -ChildPath ('{0}_{1}.log' -f $LogPrefix, $Script:DateTime)
+        if (-not(Test-Path $LogDirectory)) { New-Item $LogDirectory -ItemType Directory -Force | Out-Null }
+    }
     if (-not(Test-Path $WorkingDirectory )) { New-Item $WorkingDirectory -ItemType Directory -Force | Out-Null }
     if ($PSVersionTable.psversion.major -lt 7) {
-        Write-Log -Message 'Please follow the manual - PowerShell 7 is currently required to run this script.' -Component 'InitialzeScript' -Type 3
+        Write-Log -Message 'Please follow the manual - PowerShell 7 is currently required to run this script.' -Component 'InitializeScript' -Type 3
         Exit 1
     }
+    $Script:GUID = (New-Guid).Guid
+    $Script:M365ServiceURLs = [System.Collections.ArrayList]::new()
+    $Script:WildCardURLs = [System.Collections.ArrayList]::new()
+    $Script:CRLURLsToCheck = [System.Collections.ArrayList]::new()
+    $Script:URLsToVerify = [System.Collections.ArrayList]::new()
+    $Script:DNSCache = [System.Collections.ArrayList]::new()
+    $Script:TCPCache = [System.Collections.ArrayList]::new()
+    if ($Script:FinalResultList) {
+        Get-Variable FinalResultList | Clear-Variable 
+    }
+    $Script:FinalResultList = [System.Collections.ArrayList]::new()
     $Script:ExternalIP = (ConvertFrom-Json (Invoke-WebRequest "https://geo-prod.do.dsp.mp.microsoft.com/geo")).ExternalIpAddress
-    Write-Log -Message "External IP: $($Script:ExternalIP)" -Component 'InitialzeScript'
-    $Script:CurrentLocation = Get-Location
-    Set-Location $WorkingDirectory
-    Get-ScriptPath        
+    Write-Log -Message "External IP: $($Script:ExternalIP)" -Component 'InitializeScript'
     Import-CustomURLFile
     if ($UseMSJSON) {
         Get-M365Service -MEM
     }
     if ($UseMS365JSON) {
         Get-M365Service -M365
+    }
+    if (-not($Script:M365ServiceURLs) -and -not($Script:ManualURLs)) {
+        Write-Log 'No domains have been imported, please specify -UseMSJSON, -UseMS365JSON or -CustomURLFile' -Component 'InitializeScript' -Type 3
+        exit 5
     }
 }
 function Write-Log {
@@ -373,7 +402,7 @@ function Write-Log {
         }
     }
 }
-function Write-SettingsToLog{
+function Write-SettingsToLog {
     if (-not($MergeResults)) {
         Write-Log "Settings used to run the script:
         General settings
@@ -446,11 +475,13 @@ function Import-CustomURLFile {
         $DefaultCSVName = "INRCustomList.csv"
         $JoinedDefaultCSVPath = Join-Path $Script:PathToScript -ChildPath $DefaultCSVName
         if (Test-Path $JoinedDefaultCSVPath) {
+            Write-Log "CSV found in $($Script:PathToScript)" -Component 'ImportCustomURLFile'
             $CustomURLFile = $DefaultCSVName
         } else {
             Write-Log 'Autodetection did not find a custom CSV file' -Component 'ImportCustomURLFile'
+            return
         }
-    }    
+    }
     Write-Log 'Adding custom URLs to the pool' -Component 'ImportCustomURLFile'
     $Header = 'URL', 'Port', 'Protocol', 'ID'
     $Script:ManualURLs = [System.Collections.ArrayList]::new()
@@ -481,7 +512,8 @@ function Get-URLsFromID {
         [int[]]$FilterPort
     )
     if ($Script:URLsToVerify) {
-        $script:URLsToVerify = [System.Collections.ArrayList]::new()
+        Get-Variable URLsToVerify | Clear-Variable
+        $Script:URLsToVerify = [System.Collections.ArrayList]::new()
     }
     foreach ($ID in $IDs) {
         if ($Script:ManualURLs) {
@@ -662,7 +694,6 @@ function Test-SSL {
             $AuthException = "Failed"
         }
     } catch [System.Management.Automation.MethodInvocationException] {
-        #TODO - Add a handler for random crashes of the tcp.socket
         Write-Log -Message 'The TCP socket closed unexpectedly. This could be random, repeat this test.' -Type 2 -Component 'TestSSL'
     }
     if ($SSLStream.IsAuthenticated) {
@@ -1237,7 +1268,6 @@ function Test-EntraID {
     https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/tshoot-connect-connectivity#connectivity-issues-in-the-installation-wizard
     "Of these URLs, the URLs listed in the following table are the absolute bare minimum to be able to connect to Microsoft Entra ID at all"
     As this list contains a lot of CRLs IDs 125,84 and 9993 (Test-CRL) also apply here - this is more than the bare minimum but CRLs should always be reachable.
-    ToDo: 9990 replace with other IDs?
     #>
     $ServiceIDs = 9990
     $ServiceArea = "EID"
@@ -1509,6 +1539,32 @@ function Test-Legacy {
     ToDo
     #>
 }
+function Test-UniversalPrint {
+    <#
+    .SYNOPSIS
+    This will test all the URLs that are required for Universal Print
+    .NOTES
+    ServiceID 9982,9981,9980
+    https://learn.microsoft.com/en-us/universal-print/fundamentals/universal-print-faqs
+    As this is a script that tests client connections, the connector URLs are _not tested_. 
+    Applicationinsight addresses are not documented. You can look at these by running "az account list-locations -o table"
+    #>
+    $ServiceIDs = 9982, 9980
+    if ($GCC) {
+        $ServiceIDs = 9981, 9980
+    }
+    $ServiceArea = "UniP"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $UniP = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($UniP)) {
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($UniPTarget in $Script:URLsToVerify) {
+        Test-Network $UniPTarget
+    }
+    return $true
+}
 #Special tests, not service area specific
 function Test-AuthenticatedProxy {
     <#
@@ -1708,24 +1764,20 @@ function Build-OutputCSV {
     param(
         [string[]]$InputCSVs
     )
-    if (-not($MergeResults)) {
+    if (-not($InputCSVs)) {
         $OutpathFilePath = $(Join-Path $WorkingDirectory -ChildPath "ResultList$("_"+$Script:DateTime + "_"+ $Env:COMPUTERNAME).csv")
         $Script:FinalResultList | Export-Csv -Path $OutpathFilePath -Encoding utf8
-    } else {
-        #ToDo fix the filename to something that contains what was merged and when!
+    } elseif ($InputCSVs.Count -eq 2) {
         $MergedCSVTargetFolder = $(Join-Path $WorkingDirectory -ChildPath '/MergedResults')
         if (-not(Test-Path $MergedCSVTargetFolder)) { New-Item -Path $MergedCSVTargetFolder -ItemType Directory | Out-Null }
         $OutpathFilePath = $(Join-Path $MergedCSVTargetFolder -ChildPath "/MergedResults$("_"+$Script:DateTime + "_"+ $Script:MergeCSVComputername1 + "_" + $Script:MergeCSVComputername2).csv")
         $Script:ComparedResults | Export-Csv -Path $OutpathFilePath -Encoding utf8 -Force
     }
-    
 }
 function Merge-ResultFiles {
     <#
     .SYNOPSIS
     Merges two given CSV files.
-    .NOTES
-    ToDo: Find a way to compare multiple files efficiently
     #>
     param(
         [PSCustomObject[]]$CSVInput
@@ -1761,13 +1813,19 @@ function Merge-ResultFiles {
         #$culture = [cultureinfo]::InvariantCulture
         $culture = [Globalization.CultureInfo]::CreateSpecificCulture('de-DE')
         $TimeStamp = Get-Date([DateTime]::ParseExact("$($CSVPath.name.Replace('ResultList_','').substring(0,15))", 'yyyyMMdd_HHmmss', $culture)) -Format "dd.MM.yyyy HH:mm:ss"
-        New-Variable "MergeCSVComputername$($i+1)" -Value $($CSVPath.name.Split('_')[3].split('.')[0]) -Scope Script
+        $CSVComputername = $($CSVPath.name.Split('_')[3].split('.')[0])
+        if ($i -ge 1) {
+            if ($CSVComputername -eq $Script:MergeCSVComputername1) {
+                $CSVComputername = $CSVComputername + "_older"
+            }
+        }
+        New-Variable "MergeCSVComputername$($i+1)" -Value $CSVComputername -Scope Script
         New-Variable "MergeCSVTimestamp$($i+1)" -Value $TimeStamp -Scope Script
         New-Variable "ImportedCSV$($i+1)" -Value $(Import-Csv -Path $CSVPath)
     }
     Write-Log 'CSV imported - checking and merging' -Component 'MergeResultFiles'
     if ($ImportedCSV1.count -ne $ImportedCSV2.count) {
-        Write-Log 'These CSV files have different lenghts - please valide that you used the same tests' -Component 'MergeResultFiles' -Type 3
+        Write-Log 'These CSV files have different lengths - please valide that you used the same tests' -Component 'MergeResultFiles' -Type 3
         Write-Log 'This happens especially when the M365 JSON or a new version of my URL list was selected as that might change at any time' -Component 'MergeResultFiles'
         return $false
     }
@@ -1789,6 +1847,7 @@ function Merge-ResultFiles {
         $counter++
     }
     $Script:ComparedResults = $Script:ComparedResults | Sort-Object -Property url, ComputerName
+    return $true
 }
 function Start-Tests {
     <#
@@ -1873,29 +1932,71 @@ function Start-Tests {
     if ($Legacy -or $TestAllServiceAreas) {
         Write-Log -Message "Legacy result: $(Test-Legacy)" -Component 'StartTests'
     }
+    if ($UniversalPrint -or $TestAllServiceAreas) {
+        Write-Log -Message "Universal Print result: $(Test-UniversalPrint)" -Component 'StartTests'
+    }
+}
+function Start-Brienmode {
+    $Null = Read-Host -Prompt "Please press any key to continue"
+    Initialize-Script
+    Start-Tests
+}
+function Start-ProcessingResults {
+    if ($BrienMode) {
+        Write-Output "BrienMode is activated: This is an interactive mode that will let you test multiple times on the same box"
+        Write-Output "Remember this will only compare the LATEST TWO results"
+        for ($i = 1; $i -le $BrienMode; $i++) {
+            if ($i -ge 2) {
+                Write-Log -Message 'RERUNNING TESTS WITH NEW NETWORK PARAMETERS' -Component 'BrienMode' -Type 2
+                Write-Warning "Please change your network now to run the test again - this will always create output CSVs"
+            }
+            Start-Brienmode
+            Build-OutputCSV
+            if ($ShowResults) {
+                $Script:FinalResultList | Out-GridView -Title "Intune Network test (Brien Mode) $($Script:MergeCSVComputername1) pass $i"
+            }
+        }
+        $MergeCSVs = (Get-ChildItem -Path $WorkingDirectory -Filter *.csv | Sort-Object -Property LastWriteTime -Top 2 -Descending).FullName
+        if (-not(Merge-ResultFiles -CSVInput $MergeCSVs)) {
+            Write-Log 'Something went wrong while comparing the files, please check the logs' -Component 'ProcessingResults' -Type 2
+            return $false
+        }
+        if (-not($Script:ComparedResults)) {
+            Write-Log 'The comparison found no differences between the two provided CSVs' -Component 'ProcessingResults' -Type 2
+        } else {
+            if ($ShowResults) {
+                $Script:ComparedResults | Sort-Object -Property url | Out-GridView -Title "Merge result between: $($Script:MergeCSVComputername1) and $($Script:MergeCSVComputername2)" -Wait
+            }
+            Build-OutputCSV -InputCSVs $MergeCSVs
+        }
+    } else {
+        if ($OutputCSV -and -not($MergeResults)) {
+            Build-OutputCSV
+        }
+        if ($MergeResults) {
+            if (-not(Merge-ResultFiles -CSVInput $MergeCSVs)) {
+                Write-Log 'The comparison found no differences between the two provided CSVs' -Component 'ProcessingResults' -Type 2
+            } else {
+                if ($ShowResults) {
+                    $Script:ComparedResults | Sort-Object -Property url | Out-GridView -Title "Merge result between: $($Script:MergeCSVComputername1) and $($Script:MergeCSVComputername2)" -Wait
+                }
+                if ($OutputCSV) {
+                    Build-OutputCSV -InputCSVs $MergeCSVs
+                }
+            }
+        }
+        if ($ShowResults) {
+            $Script:FinalResultList | Out-GridView -Title 'Intune Network test results' -Wait
+        }
+    }   
 }
 
 #Start coding!
 Initialize-Script
-
-Start-Tests
-
-if ($OutputCSV -and -not($MergeResults)) {
-    Build-OutputCSV
+if (-not($BrienMode)) {
+    Start-Tests
 }
-if ($MergeResults) {
-    Merge-ResultFiles -CSVInput $MergeCSVs
-    if ($ShowResults) {
-        $Script:ComparedResults | Sort-Object -Property url | Out-GridView -Title "Merge result between: $($Script:MergeCSVComputername1) and $($Script:MergeCSVComputername2)" -Wait
-    }
-    if ($OutputCSV) {
-        Build-OutputCSV -InputCSVs $MergeCSVs
-    }
-}
-
-if ($ShowResults) {
-    $Script:FinalResultList | Out-GridView -Title 'Intune Network test results' -Wait
-}
+Start-ProcessingResults
 Write-SettingsToLog
 Write-Log 'Thanks for using INR' -Component 'INRMain'
 Set-Location $CurrentLocation
