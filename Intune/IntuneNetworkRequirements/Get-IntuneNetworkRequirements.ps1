@@ -93,7 +93,8 @@ Default: 300ms. This is my recommended value because some addresses tend to resp
 Will use the MaxDelayInMs, divide it into 50ms chunks and then do a quick test. Use this to find out response times.
 .PARAMETER BrienMode
 This mode allows you to run the script multiple times in succession and automatically merge the results. This can be used to 
-change network settings in between running the script with the same parameters. The last two results will be compared 
+change network settings in between running the script with the same parameters. The last two results will be compared. Recommended
+value: 2
 .PARAMETER MergeResults
 Will trigger the result merge path. If two CSV files are in the working directory, it will merge those. Otherwise use -MergeCSVs.
 .PARAMETER MergeShowAllResults
@@ -115,8 +116,14 @@ Specifies the working directory where the script will be executed. The default v
 .PARAMETER LogDirectory
 Specifies the directory where log files will be stored. The default value is "C:\INR\".
 .EXAMPLE
+This example will use the MS-JSON for MEM, ingest the custom CSV if it exists in the same folder, allow wildcard 
+handling in URLS, check the CRLs of each certificate provided for the ASA TPM Attestation. The script will run twice, 
+asking you to change the network environment in between (e.g. from home to VPN), and then display all the results 
+of each pass and the merged results of the last two results.
+.\Get-IntuneNetworkRequirements.ps1 -UseMSJSON -AllowBestEffort -CheckCertRevocation -ShowResults -TPMAttestation -BrienMode 2
+.EXAMPLE
 This example will use the MS-JSON for MEM, my custom CSV, allow for wildcard handling in URLS, check 
-the CRLs of each certificate provided for the server area TPMAttestation and then display the results in a grid, 
+the CRLs of each certificate provided for the ASA TPMAttestation and then display the results in a grid, 
 while displaying potential issues in the console for the service area TPMAttestation. 
 .\Get-IntuneNetworkRequirements.ps1 -UseMSJSON -CustomURLFile '.\INRCustomList.csv' -AllowBestEffort -CheckCertRevocation -TPMAttestation -ShowResults -ToConsole
 .EXAMPLE
