@@ -956,7 +956,7 @@ function Test-Network {
     )
     Write-Log "Testing $($TestObject.url) on port $($TestObject.port)" -Component 'TestNetwork'
     if ($TestObject -in $Script:FinalResultList) {
-        Write-Log 'This URL/Port was already testet' -Component 'TestNetwork'
+        Write-Log 'This URL/Port was already tested' -Component 'TestNetwork'
         return $true
     }
     $TestObject | Add-Member -Name 'DNSResult' -MemberType NoteProperty -Value ""
