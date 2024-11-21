@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-This script will find devices in your tenant that exist more than twice.
+This script will find devices in your tenant that exist twice.
 .DESCRIPTION
 If you want to analyse how many devices are hybrid _and_ entra joined and both are linked to an autopilot object in your tenant 
 this script is for you. It will go by displayName. The runtime for a tenant with 20.000 devices is roughly 45 seconds. 
