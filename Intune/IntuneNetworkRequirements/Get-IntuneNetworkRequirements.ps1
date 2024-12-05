@@ -338,7 +338,8 @@ function Initialize-Script {
     $Script:DateTime = Get-Date -Format yyyyMMdd_HHmmss
     if (-not($Script:CurrentLocation)) {
         $Script:CurrentLocation = Get-Location
-    } 
+    }
+    if (-not(Test-Path $WorkingDirectory )) { New-Item $WorkingDirectory -ItemType Directory -Force | Out-Null } 
     if ((Get-Location).path -ne $WorkingDirectory) {
         Set-Location $WorkingDirectory
     }
@@ -348,7 +349,6 @@ function Initialize-Script {
         $Script:LogFile = Join-Path -Path $LogDirectory -ChildPath ('{0}_{1}.log' -f $LogPrefix, $Script:DateTime)
         if (-not(Test-Path $LogDirectory)) { New-Item $LogDirectory -ItemType Directory -Force | Out-Null }
     }
-    if (-not(Test-Path $WorkingDirectory )) { New-Item $WorkingDirectory -ItemType Directory -Force | Out-Null }
     if ($PSVersionTable.psversion.major -lt 7) {
         Write-Log -Message 'Please follow the manual - PowerShell 7 is currently required to run this script.' -Component 'InitializeScript' -Type 3
         Exit 1
