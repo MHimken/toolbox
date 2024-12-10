@@ -706,8 +706,6 @@ function Test-SSL {
     if ($SSLStream.IsAuthenticated) {
         $SSLTest = $true
         $CertInfo = New-Object -TypeName Security.Cryptography.X509Certificates.X509Certificate2($SSLStream.RemoteCertificate)
-        #CLEANUP
-        #$Test = New-Object -TypeName System.Net.Security.SslStreamCertificateContext.create($CertInfo)
         if ($CertInfo.Thumbprint -and $CheckCertRevocation) {
             Write-Log -Message "Grabbing CRL for $SSLTarget and verify against known-good" -Component 'TestSSL'
             $CRLURIarray = $CertInfo.Extensions |  Where-Object -FilterScript { $_.Oid.Value -eq '2.5.29.31' } | ForEach-Object -Process { $_.Oid.FriendlyName; $_.Format($true) }
@@ -724,17 +722,17 @@ function Test-SSL {
                     Write-Log "SSL Inspection very likely. $SSLTarget is not a known CRL address" -Component 'TestSSL' -Type 2
                     $SSLInspectionResult = $true
                 }
-            } elseif ($CRLURIarray[1].split('[').count -eq 2) {
-                $CRLURI = $CRLURIarray[1].Split('http://')[1].split('/')[0]
-                $KnownCRL = Test-SSLInspectionByKnownCRLs -CRLURL $CRLURI
+            } elseif ($CRLURIarray[1].split('[').count -ge 2) {
+                if ($CRLURIarray[1].split('[').count -eq 2) {
+                    $CRLURI = $CRLURIarray[1].Split('http://')[1].split('/')[0]
+                    $KnownCRL = Test-SSLInspectionByKnownCRLs -CRLURL $CRLURI
+                } elseif ($CRLURIarray[1].split('[').count -gt 2) {
+                    $TestMultipleCRLs = $CRLURIarray[1].split('=').split('[').trim() | Where-Object { $_.startswith("http://") } | ForEach-Object { Test-SSLInspectionByKnownCRLs -CRLURL $_.Split('http://')[1].split('/')[0] } | Where-Object { $_ -contains $true }
+                    if ($TestMultipleCRLs) { $KnownCRL = $true }
+                }
                 if (-not($KnownCRL)) {
                     Write-Log "Unknown CRL. $SSLTarget's certificate didn't provide any known CRL address" -Component 'TestSSL' -Type 2
-                }
-            } elseif ($CRLURIarray[1].split('[').count -gt 2) {
-                $TestMultipleCRLs = $CRLURIarray[1].split('=').split('[').trim() | Where-Object { $_.startswith("http://") } | ForEach-Object { Test-SSLInspectionByKnownCRLs -CRLURL $_.Split('http://')[1].split('/')[0] } | Where-Object { $_ -contains $true }
-                if ($TestMultipleCRLs) { $KnownCRL = $true }
-                if (-not($KnownCRL)) {
-                    Write-Log "Unknown CRLs. $SSLTarget's certificate didn't provide any known CRL addresses" -Component 'TestSSL' -Type 2
+                    $SSLInspectionResult = $true
                 }
             }
         }
@@ -1741,19 +1739,19 @@ function Test-Intune {
         Test-Network $IntTarget
     }
     $resultlist = @{
-        TestWindowsActivation = Test-Autopilot
-        EntraIDTest           = Test-RemoteHelp
-        WNSTest               = Test-WNS
-        DOTest                = Test-DeliveryOptimization
-        AppleTest             = Test-Apple
-        AndroidTest           = Test-Android
-        StoreTest             = Test-MicrosoftStore
-        DeviceHealth          = Test-DeviceHealth
-        WUTest                = Test-WindowsUpdate
-        EndpAnalytics         = Test-EndpointAnalytics
+        TestAutoPilot       = Test-Autopilot
+        EntraIDTest         = Test-RemoteHelp
+        WNSTest             = Test-WNS
+        DOTest              = Test-DeliveryOptimization
+        AppleTest           = Test-Apple
+        AndroidTest         = Test-Android
+        StoreTest           = Test-MicrosoftStore
+        DeviceHealth        = Test-DeviceHealth
+        WUTest              = Test-WindowsUpdate
+        EndpAnalytics       = Test-EndpointAnalytics
         #MDE = Test-MDE #Not done!
-        DiagnosticsDataTest   = Test-DiagnosticsData
-        NTPTest               = Test-NTP
+        DiagnosticsDataTest = Test-DiagnosticsData
+        NTPTest             = Test-NTP
     }
     if ($resultlist.values -contains $false) {
         Write-Log -Message "$resultlist" -Component "Test$ServiceArea" -Type 3
@@ -1817,7 +1815,6 @@ function Merge-ResultFiles {
             Write-Log "File $($CSVPath) not found" -Component 'MergeResultFiles' -Type 3
             return $false
         }
-        #$culture = [cultureinfo]::InvariantCulture
         $culture = [Globalization.CultureInfo]::CreateSpecificCulture('de-DE')
         $TimeStamp = Get-Date([DateTime]::ParseExact("$($CSVPath.name.Replace('ResultList_','').substring(0,15))", 'yyyyMMdd_HHmmss', $culture)) -Format "dd.MM.yyyy HH:mm:ss"
         $CSVComputername = $($CSVPath.name.Split('_')[3].split('.')[0])
