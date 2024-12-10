@@ -1,5 +1,10 @@
 # Changes
 
+## 10th of Dezember - Version 1.3
+
+- New: Created a first release
+- Add: zScaler IPS should now be successfully detected
+
 ## 1th of October - Version 1.2
 
 - Add: BrienMode added - this allows you to run the script multiple times on the same machine. See parameter description in the script.
