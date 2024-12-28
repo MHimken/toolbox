@@ -1,6 +1,11 @@
 # Changes
 
-## 10th of Dezember - Version 1.3
+## 28th of December - Version 1.2.2
+
+- New: Added AppAndScript switch
+- Add: Fixed domains from MC964310 <https://mc.merill.net/message/MC964310>
+
+## 10th of December - Version 1.2.1
 
 - New: Created a first release
 - Add: zScaler IPS should now be successfully detected

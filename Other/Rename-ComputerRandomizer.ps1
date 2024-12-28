@@ -7,11 +7,17 @@ Randomize the computername and reboot - keep in mind, that this was tested on an
 DO NOT TRY THIS ON AN ACTIVE DIRECTORY JOINED DEVICE
 ####################################################
 .PARAMETER CurseLevel
-Use an int to describe how curse you 
-
+Use an int to describe how cursed you want your computer name to be. 1 and 2 will avoid any explictely forbidden characters or names
+1 Takes a part of a GUID for the new name - very tame
+2 Will use random strings and letters - very tame
+#########
+I can't guarantee what will break if you use these!
+#########
+666 These are very cursed, but they don't seem to break anything (yet)
+999 These will definitely break things. I don't recommend you use these ever.
 .NOTES
 Initial Creation date: 30.11.24
-Last Update: 05.12.24
+Last Update: 10.12.24
 Version: 1.0
 #>
 [CmdletBinding()]
@@ -28,18 +34,21 @@ $Script:DisallowedCharacters = @("\", "/", ":", "*", "?", "`"", "<", ">", "|", "
 $Script:CursedNames = @("INTERACTIVE", "SELF", "SYSTEM", "LOCALHOST", "PRINTER", "NUL", "CON", "PRN", "AUX", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "💩")
 $Script:DoNotUse = @("AzureAD", "BUILTIN")
 $MaximumLength = 15
+function New-RandomString{
+
+    [char](Get-SecureRandom -Minimum 1 -Maximum 1250)
+}
 function New-ComputerNameObject {
     param(
         $Level
     )
     switch ($Level) {
-        "1" { $Script:NewComputerName = (New-Guid).Guid.Substring(0, 15) }
-        "2" {$Script:NewComputerName = Get-SecureRandom -Minimum 1 -Maximum 15 -Shuffle}
-        "666" {}#Create Emojis + hard to type stuff to hammer the point down
-        "999" {}#Use an explicitely disallowed/cursed name
+        "1" { $Script:NewComputerName = (New-Guid).Guid.Substring(0, $MaximumLength) }
+        "2" {$Script:NewComputerName = New-RandomString}
+        "666" {$Script:NewComputerName =$Script:CursedNames[(Get-SecureRandom -Minimum 0 -Maximum $Script:CursedNames.count)]}#Create Emojis + hard to type stuff to hammer the point down
+        "999" {$Script:NewComputerName = $Script:DoNotUse[(Get-SecureRandom -Minimum 0 -Maximum $Script:DoNotUse.count)]}#Use an explicitely disallowed/cursed name
         Default { $Script:NewComputerName = (New-Guid).Guid.Substring(0, 15) }
     }
-
 }
 
 function Confirm-ComputerNameIsValid {

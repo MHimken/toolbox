@@ -79,6 +79,8 @@ Specifies whether to test the Endpoint Analytics service area.
 Specifies whether to test the app installer (winget) service area.
 .PARAMETER UniversalPrint
 Specifies whether to test the universal print service area.
+.PARAMETER AppAndScript
+Specifies whether to test the deployment domains for Win32, Windows script, macOS app and macOS script deployment.
 .PARAMETER AuthenticatedProxyOnly
 Will test if there is an authenticated proxy in use - does not test other service areas.
 .PARAMETER TestSSLInspectionOnly
@@ -130,10 +132,10 @@ while displaying potential issues in the console for the service area TPMAttesta
 This will ingest 2 files from the working directory and compare them. The comparison is written to another CSV file while also showing the results in a grid view. 
 .\Get-IntuneNetworkRequirements.ps1 -MergeResults -MergeCSVs ResultList_29072024_110030_SADAME-PC.csv,ResultList_30072024_084101_3T0M4W3.csv -ShowResults
 .NOTES
-    Version: 1.2
+    Version: 1.2.2
     Versionname: Brien 
     Intial creation date: 19.02.2024
-    Last change date: 01.10.2024
+    Last change date: 28.12.2024
     Latest changes: https://github.com/MHimken/toolbox/tree/main/Autopilot/MEMNetworkRequirements/changelog.md
     Shoutouts: 
     * WinAdmins Community - especially Chris for helping me figure out some of the features.
@@ -241,7 +243,10 @@ param(
     [switch]$AppInstaller,
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
-    [switch]$UniversalPrint, 
+    [switch]$UniversalPrint,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$AppAndScript,
 
     #Not Service area specific
     [Parameter(ParameterSetName = 'TestMSJSON')]
@@ -1501,7 +1506,7 @@ function Test-AppInstaller {
     This tests all the URLs that are required for the AppInstaller to work. This includes winget.
     .NOTES
     ServiceIDs 9996
-    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=north-america#microsoft-store
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#microsoft-store
     #>
     $ServiceArea = "AppInstall"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
@@ -1667,6 +1672,27 @@ function Test-MDE {
     #>
     
 }
+function Test-AppAndScripts {
+    <#
+    .SYNOPSIS
+    This will test all the URLs that are required for Win32 App deployment and PowerShell Script Deployment for Windows and Mac
+    .NOTES
+    ServiceID 170
+    https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?#network-requirements-for-powershell-scripts-and-win32-apps
+    #>
+    $ServiceIDs = 170, 9979
+    $ServiceArea = "W32Script"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $W32Script = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($W32Script)) {
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($W32ScriptTarget in $Script:URLsToVerify) {
+        Test-Network $W32ScriptTarget
+    }
+    return $true    
+}
 function Test-Autopilot {
     <#
     .SYNOPSIS
@@ -1752,6 +1778,7 @@ function Test-Intune {
         #MDE = Test-MDE #Not done!
         DiagnosticsDataTest = Test-DiagnosticsData
         NTPTest             = Test-NTP
+        AppAndScript        = Test-AppAndScripts
     }
     if ($resultlist.values -contains $false) {
         Write-Log -Message "$resultlist" -Component "Test$ServiceArea" -Type 3
@@ -1938,6 +1965,9 @@ function Start-Tests {
     }
     if ($UniversalPrint -or $TestAllServiceAreas) {
         Write-Log -Message "Universal Print result: $(Test-UniversalPrint)" -Component 'StartTests'
+    }
+    if ($AppAndScript -or $TestAllServiceAreas) {
+        Write-Log -Message "Win32 and Script deployment result: $(Test-AppAndScripts)" -Component 'StartTests'
     }
 }
 function Start-Brienmode {
