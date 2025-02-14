@@ -16,6 +16,6 @@ $XPS = (Get-WindowsOptionalFeature -Online -FeatureName "Printing-XPSServices-Fe
 if ($PrintToPDF -or $XPS) {
     Exit 1
 } else {
-    Write-Host "Microsoft Outlook (New) not found."
+    Write-Host "Features PrintToPDF and XPS not installed"
     Exit 0
 }
