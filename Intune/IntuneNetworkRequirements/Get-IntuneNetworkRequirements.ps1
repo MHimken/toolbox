@@ -1100,6 +1100,8 @@ function Test-WNS {
     .NOTES
     ServiceIDs 169,171
     https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints?tabs=europe#windows-push-notification-serviceswns-dependencies
+    https://www.microsoft.com/en-us/download/details.aspx?id=44238
+    ToDo UPDATE to include login.live.com - see XML file.
     #>
     $ServiceIDs = 169, 171
     $ServiceArea = "WNS"

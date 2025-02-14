@@ -1,0 +1,107 @@
+<#
+DO NOT USE THIS SCRIPT!
+Verify Azure adresses by using a region and servicetag
+
+https://learn.microsoft.com/en-us/azure/virtual-network/service-tags-overview#available-service-tags
+#>
+
+function Get-ScriptPath {
+    <#
+    .SYNOPSIS
+    Get the current script path.
+    #>
+    if ($PSScriptRoot) { 
+        # Console or VS Code debug/run button/F5 temp console
+        $ScriptRoot = $PSScriptRoot 
+    } else {
+        if ($psISE) { 
+            Split-Path -Path $psISE.CurrentFile.FullPath
+        } else {
+            if ($profile -match 'VScode') { 
+                # VS Code "Run Code Selection" button/F8 in integrated console
+                $ScriptRoot = Split-Path $psEditor.GetEditorContext().CurrentFile.Path 
+            } else { 
+                Write-Output 'unknown directory to set path variable. exiting script.'
+                exit
+            } 
+        } 
+    }
+    $Script:PathToScript = $ScriptRoot
+}
+function Write-Log {
+    <#
+    .DESCRIPTION
+        This is a modified version of the script by Ryan Ephgrave.
+        .LINK
+        https://www.ephingadmin.com/powershell-cmtrace-log-function/
+    #>
+    Param (
+        [Parameter(Mandatory = $false)]
+        $Message,
+        $Component,
+        # Type: 1 = Normal, 2 = Warning (yellow), 3 = Error (red)
+        [ValidateSet('1', '2', '3')][int]$Type
+    )
+    if (-not($NoLog)) {
+        $Time = Get-Date -Format 'HH:mm:ss.ffffff'
+        $Date = Get-Date -Format 'MM-dd-yyyy'
+        if (-not($Component)) { $Component = 'Runner' }
+        if (-not($ToConsole)) {
+            $LogMessage = "<![LOG[$Message" + "]LOG]!><time=`"$Time`" date=`"$Date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"`" file=`"`">"
+            $LogMessage | Out-File -Append -Encoding UTF8 -FilePath $LogFile
+        } elseif ($ToConsole) {
+            switch ($type) {
+                1 { Write-Host "T:$Type C:$Component M:$Message" }
+                2 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Yellow -ForegroundColor Black }
+                3 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Red -ForegroundColor White }
+                default { Write-Host "T:$Type C:$Component M:$Message" }
+            }
+        }
+    }
+}
+function Get-AzureServiceURLs{
+    <#
+    .NOTES
+    TODO!
+    #>
+    param(
+        $Servicetag
+    )
+    $rawhtml = Invoke-RestMethod -Uri 'https://www.microsoft.com/en-us/download/confirmation.aspx?id=56519' -UseBasicParsing
+    $downloadAzureJSONURL = [Regex]::Match($rawhtml, 'https://download.microsoft.com[^"]*').Value
+    $AzureJSON = ConvertFrom-Json (Invoke-RestMethod -Uri $downloadAzureJSONURL )
+}
+
+#Provided by ChatGPT(!)
+function Convert-CIDRToIPList {
+    param (
+        [string]$CIDR
+    )
+
+    # Split the CIDR block into IP address and prefix length
+    $parts = $CIDR.Split('/')
+    $ipAddress = $parts[0]
+    $prefixLength = [int]$parts[1]
+
+    # Convert the IP address to a byte array
+    $ipBytes = [System.Net.IPAddress]::Parse($ipAddress).GetAddressBytes()
+
+    # Calculate the number of addresses in the block
+    $numAddresses = [math]::Pow(2, 32 - $prefixLength)
+
+    # Convert the byte array to an integer
+    [Array]::Reverse($ipBytes)
+    $ipInt = [BitConverter]::ToUInt32($ipBytes, 0)
+
+    # Generate the list of IP addresses
+    $ipList = @()
+    for ($i = 0; $i -lt $numAddresses; $i++) {
+        $currentIpInt = $ipInt + $i
+        $currentIpBytes = [BitConverter]::GetBytes($currentIpInt)
+        [Array]::Reverse($currentIpBytes)
+        $currentIp = [System.Net.IPAddress]::new($currentIpBytes)
+        $ipList += $currentIp.IPAddressToString
+    }
+
+    return $ipList
+}
