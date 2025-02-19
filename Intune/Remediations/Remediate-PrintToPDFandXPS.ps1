@@ -4,7 +4,7 @@ Script remediates a common blocker for feature Upgrades with Windows 11.
 .NOTES
 Version: 1.0
 Author: Martin Himken
-Original script name: Detect-PrintToPDForXPS
+Original script name: Remediate-PrintToPDForXPS
 
 Run this script using the logged-on credentials: No
 Enforce script signature check: No
