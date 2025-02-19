@@ -11,10 +11,11 @@ Enforce script signature check: No
 Run script in 64-bit PowerShell: Yes
 #> 
 $DetectNewOutlookDEVICE = Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq "Microsoft.OutlookForWindows" }
+$DetectNewOutlookAllUsers = Get-AppxPackage -AllUsers | Where-Object { $_.Name -eq "Microsoft.OutlookForWindows" }
 
-if ($DetectNewOutlookDEVICE) {
+if ($DetectNewOutlookDEVICE -or $DetectNewOutlookAllUsers) {
     Exit 1
 } else {
-    Write-Host "New Outlook seems to not be installed for this device"
+    Write-Host "New Outlook seems to not be installed for this device or all users"
     Exit 0
 }

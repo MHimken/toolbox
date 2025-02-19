@@ -12,7 +12,8 @@ Run script in 64-bit PowerShell: Yes
 #> 
 
 try {
-    Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq "Microsoft.OutlookForWindows" } | Remove-AppxProvisionedPackage -Online
+    Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq "Microsoft.OutlookForWindows" } | Remove-AppxProvisionedPackage -Online -ErrorAction Stop
+    Get-AppxPackage -AllUsers | Where-Object { $_.Name -eq "Microsoft.OutlookForWindows" } | Remove-AppxPackage -ErrorAction Stop
     Write-Host "Removal of new Outlook app successful"
 
 } catch {
