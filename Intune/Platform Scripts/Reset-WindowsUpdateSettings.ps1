@@ -6,9 +6,12 @@ This is to clean a computer completely of any Windows Update related keys. Very 
 * Will stop relevant services such as IME and Autopatch
 * Will delete legacy GPO/local policy paths (SOFTWARE\Policies\Windows\WindowsUpdate)
 * Will delete CSPs (SOFTWARE\Microsoft\PolicyManager\current\device\Update)
-* Will delete GPCache folder to get rid of stuck policies
+* Will delete GPCache folder to get rid of stuck policies (SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy\GPCache)
 * Will do gpupdate (if applicable) and Intune sync
 Should get rid of most of your problems when dealing with sticky policies.
+#################################################
+DO NOT RUN THIS ON A REGULAR BASIS. This script is a canonball, not a bullet.
+#################################################
 .NOTES
 Version: 1.0
 Author: Martin Himken
@@ -204,7 +207,7 @@ function Reset-KnowRWURegistryPaths {
     }
     if (-not($BackupDisabled)) {
         Write-Log "Creating backup of registry path related to windows update to $($Script:BackupDirectory)" -Component 'ResetKnownRegistryPaths'
-        Backup-RegistryToReg -Path $path -Root HKEY_LOCAL_MACHINE -RegName "$((Get-ItemProperty $CurrentRegPathPSDrive).PSChildName).reg" 
+        Backup-RegistryToReg -Path $path -Root HKEY_LOCAL_MACHINE -RegName "$((Get-Item $CurrentRegPathPSDrive).PSChildName).reg" 
     }
     Write-Log "Removing $CurrentRegPathPSDrive registry paths" -Component 'ResetKnownRegistryPaths'
     Remove-Item -Path $CurrentRegPathPSDrive -Force -Recurse
