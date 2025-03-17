@@ -12,12 +12,34 @@ Should get rid of most of your problems when dealing with sticky policies.
 #################################################
 DO NOT RUN THIS ON A REGULAR BASIS. This script is a canonball, not a bullet.
 #################################################
+.PARAMETER ResetLocalPolicies
+Enables or disables the reset of the local .pol file for machine settings as this can have unintended consequences
+.PARAMETER BackupDisabled
+##NOT RECOMMENDED## Disables all backups
+.PARAMETER GPUpdateTimeout
+Defines how long the script should wait for the gpupdate
+.PARAMETER IntuneSyncTimeout
+Defines how long the script should wait for the Intune sync to run
+.PARAMETER WorkingDirectory
+Specifies the working directory where the script will be executed. The default value is "C:\RWU\".
+.PARAMETER LogDirectory
+Specifies the directory where log files will be stored. The default value is "C:\RWU\".
+.EXAMPLE
+This example will run the script with, create the registry key backup in C:\RWU and restart required services.
+
+.\Reset-WindowsUpdateSettings.ps1
+.EXAMPLE
+If you have a slower group policy update you might want to use this as it will increase the wait time from 60 seconds to 120 seconds.
+This will also prevent the deletion of the .pol file which hold the machines policies.
+
+.\Reset-WindowsUpdateSettings.ps1 -ResetLocalPolicies:$False -GPupdateTime 120
 .NOTES
-Version: 1.0
+Version: 1.1
 Author: Martin Himken
 Original script name: Reset-WindowsUpdateSettings.ps1
 Initial creation date: 10.03.25
-Last change: 16.03.25
+Last change: 17.03.25
+Change: Added PARAMETER and EXAMPLE description
 #>
 
 param(
