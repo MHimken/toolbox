@@ -108,8 +108,9 @@ function Initialize-Script {
         $IsAutoPatchDevice = Test-Path "C:\Program Files\Windows Autopatch Client Broker\ClientBroker\ClientBroker.exe"
         if (-not($IsAutoPatchDevice)) {
             Write-Log 'Device is not managed by Autopatch' -Component 'InitializeScript'  
+        } else {
+            Write-Log 'Device is managed by Autopatch' -Component 'InitializeScript'
         }
-        Write-Log 'Device is managed by Autopatch' -Component 'InitializeScript'
     } else {
         Write-Log 'Device is not managed by Intune' -Component 'InitializeScript'
     }
