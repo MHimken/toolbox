@@ -109,7 +109,9 @@ function Initialize-Script {
         if (-not($IsAutoPatchDevice)) {
             Write-Log 'Device is not managed by Autopatch' -Component 'InitializeScript'  
         }
-        Write-Log 'Device is managed by Autopatch' -Component 'InitializeScript'
+        else {
+            Write-Log 'Device is managed by Autopatch' -Component 'InitializeScript'
+        }
     } else {
         Write-Log 'Device is not managed by Intune' -Component 'InitializeScript'
     }
