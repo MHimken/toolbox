@@ -8,6 +8,7 @@ This is to clean a computer completely of any Windows Update related keys. Very 
 * Will delete CSPs (SOFTWARE\Microsoft\PolicyManager\current\device\Update)
 * Will delete GPCache folder to get rid of stuck policies (SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy\GPCache)
 * Will do gpupdate (if applicable) and Intune sync
+* Will do ConfigMgr machine policy and software update scan actions (if applicable)
 Should get rid of most of your problems when dealing with sticky policies.
 #################################################
 DO NOT RUN THIS ON A REGULAR BASIS. This script is a canonball, not a bullet.
@@ -108,8 +109,9 @@ function Initialize-Script {
         $IsAutoPatchDevice = Test-Path "C:\Program Files\Windows Autopatch Client Broker\ClientBroker\ClientBroker.exe"
         if (-not($IsAutoPatchDevice)) {
             Write-Log 'Device is not managed by Autopatch' -Component 'InitializeScript'  
+        } else {
+            Write-Log 'Device is managed by Autopatch' -Component 'InitializeScript'
         }
-        Write-Log 'Device is managed by Autopatch' -Component 'InitializeScript'
     } else {
         Write-Log 'Device is not managed by Intune' -Component 'InitializeScript'
     }
@@ -118,6 +120,12 @@ function Initialize-Script {
         Write-Log 'Device is domain joined' -Component 'InitializeScript'
     } else {
         Write-Log 'Device is not domain joined' -Component 'InitializeScript'
+    }
+    $IsConfigMgrDevice = ($null -ne (Get-Service ccmexec -ErrorAction SilentlyContinue))
+    if ($IsConfigMgrDevice) {
+        Write-Log 'Device is running ConfigMgr client' -Component 'InitializeScript'
+    } else {
+        Write-Log 'Device is not running ConfigMgr client' -Component 'InitializeScript'
     }
 }
 function Write-Log {
@@ -172,6 +180,23 @@ function Reset-LocalPolicies {
             Write-Log "Sync successful" -Component 'ResetLocalPolicies'
         } else {
             Write-Log "Sync unsuccessful - maybe the wait time was not enough." -Component 'ResetLocalPolicies' -Type 2
+        }
+    }
+    if ($IsConfigMgrDevice) {
+        Write-Log "Starting ConfigMgr client actions" -Component 'ResetLocalPolicies'
+        try {
+            Invoke-CimMethod -Namespace 'root\CCM' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{sScheduleID='{00000000-0000-0000-0000-000000000021}'} -ErrorAction Stop 
+            Write-Log "ConfigMgr Machine Policy client action successful" -Component 'ResetLocalPolicies'
+        }
+        catch {
+            Write-Log "ConfigMgr Machine Policy client action unsuccessful" -Component 'ResetLocalPolicies' -Type 2
+        }
+        try {
+            Invoke-CimMethod -Namespace 'root\CCM' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{sScheduleID='{00000000-0000-0000-0000-000000000113}'} -ErrorAction Stop
+            Write-Log "ConfigMgr Software Update Scan client action successful" -Component 'ResetLocalPolicies'
+        }
+        catch {
+            Write-Log "ConfigMgr Software Update Scan client action unsuccessful" -Component 'ResetLocalPolicies' -Type 2
         }
     }
 }
