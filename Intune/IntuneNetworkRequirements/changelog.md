@@ -1,5 +1,14 @@
 # Changes
 
+## 2025
+
+## 2nd of July
+
+- Update: azureedge.net is not officially supported since March 2025
+- NOTE: While I updated my .csv, the JSON at least as of today still contains the azureedge.net endpoints
+
+## 2024
+
 ## 28th of December - Version 1.2.2
 
 - New: Added AppAndScript switch
