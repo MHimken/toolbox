@@ -1,3 +1,5 @@
+#Custom List for Intune Network Requirements made by Martin Himken
+#Timestamp: 2025-08-04
 "1.1.1.1", 53, UDP, 999
 "1.0.0.1", 53, UDP, 999
 "8.8.8.8", 53, UDP, 999
@@ -61,8 +63,8 @@
 "crl.entrust.net", 80, TCP, 9993
 "ocsp.entrust.net", 80, TCP, 9993
 "crl.sectigo.com", 80, TCP, 9993
-"graph.windows.net", 443, TCP, 9990
 "graph.windows.net", 443, TCP, 9988
+"graph.windows.net", 443, TCP, 9990
 "secure.aadcdn.microsoftonline-p.com", 443, TCP, 9990
 "login.microsoftonline.com", 443, TCP, 9990
 "www.d-trust.net", 80, TCP, 9993

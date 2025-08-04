@@ -1,0 +1,43 @@
+{
+    "Rules": [
+        {
+            "SettingName": "Processing-Successful",
+            "Operator": "IsEquals",
+            "DataType": "Boolean",
+            "Operand": true,
+            "MoreInfoUrl": "https://Your-Documentation-URL",
+            "RemediationStrings": [{
+                    "Language": "en_US",
+                    "Title": "Script execution state -> {ActualValue}",
+                    "Description": "Must be true -> processed successfully"
+                }
+            ]
+        },
+        {
+            "SettingName": "ApplicationInstalled",
+            "Operator": "IsEquals",
+            "DataType": "Boolean",
+            "Operand": true,
+            "MoreInfoUrl": "https://Your-Documentation-URL",
+            "RemediationStrings": [{
+                    "Language": "en_US",
+                    "Title": "SentinelOne Agent must be installed -> {ActualValue}.",
+                    "Description": "SentinelOne Agent must be installed"
+                }
+            ]
+        }, {
+            "SettingName": "DefinedProcessesRunning",
+            "Operator": "IsEquals",
+            "DataType": "Boolean",
+            "Operand": true,
+            "MoreInfoUrl": "https://Your-Documentation-URL",
+            "RemediationStrings": [{
+                    "Language": "en_US",
+                    "Title": "SentinelOne processes fully running -> {ActualValue}.",
+                    "Description": "All required SentinelOne Services must be running"
+                }
+            ]
+        }
+    ]
+}
+ 

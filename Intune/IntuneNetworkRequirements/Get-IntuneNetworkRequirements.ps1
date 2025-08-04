@@ -1,4 +1,4 @@
-#Requires -Version 7.0 -RunAsAdministrator
+#Requires -Version 7.0
 <#
 .SYNOPSIS
 This script will test network connections to various Intune services using PowerShell 7
@@ -247,6 +247,14 @@ param(
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$AppAndScript,
+    #Additional ASAs
+        #Visual Studio
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$VisualStudioFull,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$VisualStudioInstallation,
 
     #Not Service area specific
     [Parameter(ParameterSetName = 'TestMSJSON')]
@@ -379,6 +387,7 @@ function Initialize-Script {
         Get-M365Service -M365
     }
     if (-not($Script:M365ServiceURLs) -and -not($Script:ManualURLs)) {
+
         Write-Log 'No domains have been imported, please specify -UseMSJSON, -UseMS365JSON or -CustomURLFile' -Component 'InitializeScript' -Type 3
         exit 5
     }
@@ -450,6 +459,10 @@ function Write-SettingsToLog {
         Android: $Android
         EndpointAnalytics: $EndpointAnalytics
         AppInstaller: $AppInstaller
+        UniversalPrint: $UniversalPrint
+        AppAndScript: $AppAndScript
+        VisualStudioFull: $VisualStudioFull
+        VisualStudioInstallation: $VisualStudioInstallation
     
         Other tests
         AuthenticatedProxyOnly: $AuthenticatedProxyOnly
@@ -475,7 +488,10 @@ function Write-SettingsToLog {
         NoLog: $NoLog
         ToConsole: $ToConsole
         WorkingDirectory: $WorkingDirectory
-        LogDirectory: $LogDirectory" -Component 'InitialzeScript'
+        LogDirectory: $LogDirectory
+        BrienMode: $BrienMode
+        ScriptPath: $($Script:PathToScript)
+        LogFile: $($Script:LogFile)" -Component 'InitialzeScript'
 }
 function Import-CustomURLFile {
     <#
@@ -1340,17 +1356,15 @@ function Test-NTP {
     Write-Log 'Microsofts JSON claims more URLs for Port 123, where in reality its only time.windows.com' -Component "Test$ServiceArea"
     Write-Log 'There are more URLs related to NCSI in the Service ID 165, which will also be tested.' -Component "Test$ServiceArea" 
     $NTPServerNotDefault = $true
-    $CurrentTimeServer = (w32tm /query /source).trim()
-    switch ($CurrentTimeServer) {
-        *80070005* { Write-Log 'You need to run this script as admin to view the currently configured NTP server' -Component "Test$ServiceArea" -Type 2 }
-        *80070426* { Write-Log 'The service has not been started' -Component "Test$ServiceArea" -Type 2 }
-        *time.windows.com* { $NTPServerNotDefault = $false; Write-Log 'time.windows.com is the default timeserver - skipping custom server test' -Component "Test$ServiceArea" }
+    $CurrentTimeServer = (Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config\Status' -Name LastGoodSampleInfo -ErrorAction SilentlyContinue).split(';')[1]
+    if ($CurrentTimeServer -like '*time.windows.com*') {
+        $NTPServerNotDefault = $false
+        Write-Log 'time.windows.com is the default timeserver - skipping custom server test' -Component "Test$ServiceArea"
     }
     if ($NTPServerNotDefault) {
         if ($Autopilot) {
             Write-Log 'time.windows.com is currently not the timeserver - this is a requirement for Autopilot' -Component "Test$ServiceArea" -Type 2
         }
-        $CurrentTimeServer = $CurrentTimeServer.Split(',')[0]
         $CustomTimeServerTestResult = Test-NTPviaUDP $CurrentTimeServer -Port 123
     }
     Write-Log 'Testing default NTP server' -Component "Test$ServiceArea" 
@@ -1574,6 +1588,40 @@ function Test-UniversalPrint {
     }
     foreach ($UniPTarget in $Script:URLsToVerify) {
         Test-Network $UniPTarget
+    }
+    return $true
+}
+
+#Additional ASAs
+function Test-VisualStudio {
+    <#
+    .SYNOPSIS
+    This will test all the URLs that are required to "Use Visual Studio"
+    .NOTES
+    ServiceID 9978,9977,9976,56,89,97
+    https://learn.microsoft.com/en-us/visualstudio/install/install-and-use-visual-studio-behind-a-firewall-or-proxy-server
+    As this is a script that tests client connections, the connector URLs are _not tested_. 
+    Not enough data, hence not included (some areas might still be covered by other entries): 
+        * Cloud Explorer (missing)
+        * Cloud Services (partially covered)
+        * Service Fabric (partially covered)
+    The list also has many entries using wildcards, that are environment specific, hence not included.
+    #>
+    if($VisualStudioFull){
+        $ServiceIDs = 9978,9977,56,89,97,9976
+    }
+    if($VisualStudioInstallation){
+        $ServiceIDs = 9978,9977,56,89,97
+    }
+    $ServiceArea = "VSt"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $VSt = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($VSt)) {
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($VStTarget in $Script:URLsToVerify) {
+        Test-Network $VStTarget
     }
     return $true
 }
@@ -1849,7 +1897,7 @@ function Merge-ResultFiles {
         $CSVComputername = $($CSVPath.name.Split('_')[3].split('.')[0])
         if ($i -ge 1) {
             if ($CSVComputername -eq $Script:MergeCSVComputername1) {
-                $CSVComputername = $CSVComputername + "_older"
+                $CSVComputername = $CSVComputername + "_SameComputer"
             }
         }
         New-Variable "MergeCSVComputername$($i+1)" -Value $CSVComputername -Scope Script
@@ -1858,8 +1906,8 @@ function Merge-ResultFiles {
     }
     Write-Log 'CSV imported - checking and merging' -Component 'MergeResultFiles'
     if ($ImportedCSV1.count -ne $ImportedCSV2.count) {
-        Write-Log 'These CSV files have different lengths - please valide that you used the same tests' -Component 'MergeResultFiles' -Type 3
-        Write-Log 'This happens especially when the M365 JSON or a new version of my URL list was selected as that might change at any time' -Component 'MergeResultFiles'
+        Write-Log 'Please ensure that the row counts in these CSV files are the same and that the same tests were used and passed.' -Component 'MergeResultFiles' -Type 3
+        Write-Log 'This is particularly likely to happen if the M365 JSON or a new version of my URL list is selected, since these are subject to change.' -Component 'MergeResultFiles'
         return $false
     }
     $counter = 0
@@ -1970,6 +2018,9 @@ function Start-Tests {
     }
     if ($AppAndScript -or $TestAllServiceAreas) {
         Write-Log -Message "Win32 and Script deployment result: $(Test-AppAndScripts)" -Component 'StartTests'
+    }
+    if ($VisualStudioFull -or $VisualStudioInstallation) {
+        Write-Log -Message "Visual Studio Full result: $(Test-VisualStudio)" -Component 'StartTests'
     }
 }
 function Start-Brienmode {
