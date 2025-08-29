@@ -2,10 +2,15 @@
 
 ## 2025
 
+### 29th of August
+
+- Add: Microsoft Defender for Endpoint Endpoints
+- Fix: Parameter sets should now work as intended
+
 ### 4th of August
 
-- Added ASA for Visual Studio
-- Fixed a couple minor errors
+- Add: ASA for Visual Studio
+- Fix: a couple minor errors
 
 ### 2nd of July
 

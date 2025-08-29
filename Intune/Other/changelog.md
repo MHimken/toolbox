@@ -2,7 +2,11 @@
 
 ## 2025
 
+### 29th of August
+
+* Add: Search-IntuneSetting.ps1
+
 ### 4th of August
 
-* Added AutopilotDualDeviceFinder (unfinished)
-* Created changelog for "Other"
+* Add: AutopilotDualDeviceFinder (unfinished)
+* Add: changelog for "Other"

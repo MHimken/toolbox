@@ -28,7 +28,11 @@ Recommended. Put this file next to the script. Specifies the path to the CSV fil
 .PARAMETER AllowBestEffort
 Recommended. Specifies whether to allow best effort testing (will try to resolve wildcard URLs) for URLs that don't have an exact match. 
 .PARAMETER CheckCertRevocation
-Recommended. Will verify if certificates that are presented by URLs are verified.
+Recommended. Will verify if certificates that are presented by URLs are verified. This parameter _requires_ either -UseMSJSON, -UseMS365JSON or -CustomURLFile.
+That is because the switch requires that one of following IDs is available: 
+125 = Common CRLs (available in MSJson and MS365JSON)
+84 = Microsoft CRLs (available in MSJson and MS365JSON)
+9993 = Custom CRLs (from INRCustomList.csv). If your custom list does not contain this ID, certificate revocation checks will not be possible.
 .PARAMETER GCC
 Will test the GCC specific URLs - this related to RemoteHelp and Device Health currently.
 .PARAMETER Intune
@@ -79,6 +83,20 @@ Specifies whether to test the Endpoint Analytics service area.
 Specifies whether to test the app installer (winget) service area.
 .PARAMETER UniversalPrint
 Specifies whether to test the universal print service area.
+.PARAMETER VisualStudioFull
+Specifies whether to test all Visual Studio services.
+.PARAMETER VisualStudioInstallation
+Will test all required endpoints for Visual Studio installation.
+.PARAMETER DefenderFull
+Specifies whether to test the Defender Full service area.
+.PARAMETER DefenderOptional
+Specifies whether to test the Defender Optional service area.
+.PARAMETER DefenderLiveResponse
+Specifies whether to test the Defender Live Response service area.
+.PARAMETER DefenderVulnTool
+Specifies whether to test the Defender Vulnerability Management service area.
+.PARAMETER DefenderSmartScreen
+Specifies whether to test the Defender SmartScreen service area.
 .PARAMETER AppAndScript
 Specifies whether to test the deployment domains for Win32, Windows script, macOS app and macOS script deployment.
 .PARAMETER AuthenticatedProxyOnly
@@ -132,44 +150,54 @@ while displaying potential issues in the console for the service area TPMAttesta
 This will ingest 2 files from the working directory and compare them. The comparison is written to another CSV file while also showing the results in a grid view. 
 .\Get-IntuneNetworkRequirements.ps1 -MergeResults -MergeCSVs ResultList_29072024_110030_SADAME-PC.csv,ResultList_30072024_084101_3T0M4W3.csv -ShowResults
 .NOTES
-    Version: 1.2.2
-    Versionname: Brien 
+    Version: 1.3.0
+    Versionname: Brandgefaehrlich
     Intial creation date: 19.02.2024
-    Last change date: 28.12.2024
+    Last change date: 29.08.2025
     Latest changes: https://github.com/MHimken/toolbox/tree/main/Autopilot/MEMNetworkRequirements/changelog.md
     Shoutouts: 
     * WinAdmins Community - especially Chris for helping me figure out some of the features.
     * badssl.com and httpstat.us are awesome! 
 #>
-[CmdletBinding(DefaultParameterSetName = 'TestMSJSON')]
+
+[CmdletBinding()]
 param(
-    [Parameter(ParameterSetName = 'AllAreas', Position = 0)]
-    [switch]$TestAllServiceAreas,
-    [Parameter(ParameterSetName = 'AllAreas')]
-    [Parameter(ParameterSetName = 'TestMSJSON', Position = 0)]
+    #Main modes
+    [Parameter(ParameterSetName = 'AllAreas', Position = 1, Mandatory)]
+    [Parameter(ParameterSetName = 'TestMSJSON', Position = 0, Mandatory)]
     [switch]$UseMSJSON,
-    [Parameter(ParameterSetName = 'AllAreas')]
-    [Parameter(ParameterSetName = 'TestMS365JSON', Position = 0)]
+
+    [Parameter(ParameterSetName = 'AllAreas', Position = 2, Mandatory)]
+    [Parameter(ParameterSetName = 'TestMS365JSON', Position = 0, Mandatory)]
     [switch]$UseMS365JSON,
+
     [Parameter(ParameterSetName = 'AllAreas')]
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestMS365JSON')]
-    [Parameter(ParameterSetName = 'TestCustom', Position = 0)]
+    [Parameter(ParameterSetName = 'TestCustom', Position = 0, Mandatory)]
     [string]$CustomURLFile,
+
+    [Parameter(ParameterSetName = 'AllAreas', Position = 0, Mandatory)]
+    [switch]$TestAllServiceAreas,
+    
+    #Options
     [Parameter(ParameterSetName = 'AllAreas')]
     [Parameter(ParameterSetName = 'TestMSJSON', Position = 1)]
     [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$AllowBestEffort,
+
     [Parameter(ParameterSetName = 'AllAreas')]
     [Parameter(ParameterSetName = 'TestMSJSON', Position = 2)]
     [Parameter(ParameterSetName = 'TestMS365JSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$CheckCertRevocation,
+
     [Parameter(ParameterSetName = 'AllAreas')]
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$GCC,
+
     #Service Areas
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
@@ -248,13 +276,29 @@ param(
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$AppAndScript,
     #Additional ASAs
-        #Visual Studio
+    #Visual Studio
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$VisualStudioFull,
     [Parameter(ParameterSetName = 'TestMSJSON')]
     [Parameter(ParameterSetName = 'TestCustom')]
     [switch]$VisualStudioInstallation,
+    #Defender
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$DefenderFull,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$DefenderOptional,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$DefenderLiveResponse,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$DefenderVulnTool,
+    [Parameter(ParameterSetName = 'TestMSJSON')]
+    [Parameter(ParameterSetName = 'TestCustom')]
+    [switch]$DefenderSmartScreen,
 
     #Not Service area specific
     [Parameter(ParameterSetName = 'TestMSJSON')]
@@ -313,13 +357,17 @@ param(
     [Parameter(ParameterSetName = 'Merge')]
     [switch]$ShowResults,
     #Common parameters
-    [switch]$NoLog,
+    [switch]$NoOutput,
     [switch]$ToConsole,
     [System.IO.DirectoryInfo]$WorkingDirectory = "C:\INR\",
-    [System.IO.DirectoryInfo]$LogDirectory = "C:\INR\"
+    [System.IO.DirectoryInfo]$LogDirectory = "C:\INR\Logs"
 )
 
 #Preparation
+if ($CheckCertRevocation -and -not($UseMSJSON -or $UseMS365JSON -or (Get-Content $CustomURLFile | Where-Object {$_ -match '9993'}))) {
+    Write-Output "If you want to check certificate revocation, please specify at least one source of URLs (-UseMSJSON, -UseMS365JSON or -CustomURLFile). Exiting script." -ForegroundColor Red
+    exit 1
+}
 function Get-ScriptPath {
     <#
     .SYNOPSIS
@@ -352,7 +400,11 @@ function Initialize-Script {
     if (-not($Script:CurrentLocation)) {
         $Script:CurrentLocation = Get-Location
     }
-    if (-not(Test-Path $WorkingDirectory )) { New-Item $WorkingDirectory -ItemType Directory -Force | Out-Null } 
+    if (-not(Test-Path $WorkingDirectory )) { New-Item $WorkingDirectory -ItemType Directory -Force | Out-Null }
+    if ($OutputCSV) {
+        $Script:OutpathFilePath = $(Join-Path $WorkingDirectory -ChildPath "TestResults")
+        if (-not(Test-Path $Script:OutpathFilePath)) { New-Item $Script:OutpathFilePath -ItemType Directory -Force | Out-Null }
+    }
     if ((Get-Location).path -ne $WorkingDirectory) {
         Set-Location $WorkingDirectory
     }
@@ -395,9 +447,9 @@ function Initialize-Script {
 function Write-Log {
     <#
     .DESCRIPTION
-        This is a modified version of the script by Ryan Ephgrave.
-        .LINK
-        https://www.ephingadmin.com/powershell-cmtrace-log-function/
+    This is a (heavily) modified version of the script by Ryan Ephgrave.
+    .LINK
+    https://www.ephingadmin.com/powershell-cmtrace-log-function/
     #>
     Param (
         [Parameter(Mandatory = $false)]
@@ -406,7 +458,7 @@ function Write-Log {
         # Type: 1 = Normal, 2 = Warning (yellow), 3 = Error (red)
         [ValidateSet('1', '2', '3')][int]$Type
     )
-    if (-not($NoLog)) {
+    if (-not($NoOutput)) {
         $Time = Get-Date -Format 'HH:mm:ss.ffffff'
         $Date = Get-Date -Format 'MM-dd-yyyy'
         if (-not($Component)) { $Component = 'Runner' }
@@ -463,7 +515,12 @@ function Write-SettingsToLog {
         AppAndScript: $AppAndScript
         VisualStudioFull: $VisualStudioFull
         VisualStudioInstallation: $VisualStudioInstallation
-    
+        DefenderFull: $DefenderFull
+        DefenderOptional: $DefenderOptional
+        DefenderSmartScreen: $DefenderSmartScreen
+        DefenderLiveResponse: $DefenderLiveResponse
+        DefenderVulnTool: $DefenderVulnTool
+
         Other tests
         AuthenticatedProxyOnly: $AuthenticatedProxyOnly
         TestSSLInspectionOnly: $TestSSLInspectionOnly
@@ -1607,11 +1664,12 @@ function Test-VisualStudio {
         * Service Fabric (partially covered)
     The list also has many entries using wildcards, that are environment specific, hence not included.
     #>
-    if($VisualStudioFull){
-        $ServiceIDs = 9978,9977,56,89,97,9976
+    [string[]]$ServiceIDs = @()
+    if ($VisualStudioInstallation) {
+        $ServiceIDs = 9978, 9977, 56, 89, 97
     }
-    if($VisualStudioInstallation){
-        $ServiceIDs = 9978,9977,56,89,97
+    if ($VisualStudioFull) {
+        $ServiceIDs += 9976
     }
     $ServiceArea = "VSt"
     Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
@@ -1624,6 +1682,44 @@ function Test-VisualStudio {
         Test-Network $VStTarget
     }
     return $true
+}
+function Test-MDE {
+    <#
+    .SYNOPSIS
+    Test all URLs required to use Microsoft Defender for Endpoint.
+    .NOTES
+    ServiceIDs 6000, 6001, 6002, 6003
+    6000 = Core, 6001 = SmartScreen, 6002 = LiveResponse, 6003 = VulnerabilityManagement
+    Now, this is exctracted from an .xlsx file, so it may not include all URLs. 
+    **This method requires the custom CSV from this repo.**
+    https://aka.ms/MDE-streamlined-urls
+    Use this tool to do further testing https://aka.ms/mdeanalyzer
+    #>
+    [string[]]$ServiceIDs = @()
+    if ($DefenderFull) {
+        $ServiceIDs += 6000
+    }
+    if ($DefenderSmartScreen -or $DefenderFull -or $DefenderOptional) {
+        $ServiceIDs += 6001
+    }
+    if ($DefenderLiveResponse -or $DefenderFull -or $DefenderOptional) {
+        [int[]]$ServiceIDs += 6002
+    }
+    if ($DefenderVulnTool -or $DefenderFull -or $DefenderOptional) {
+        $ServiceIDs += 6003
+    }
+    $ServiceIDs = 6000, 6001, 6002, 6003
+    $ServiceArea = "Defender"
+    Write-Log "Testing Service Area $ServiceArea" -Component "Test$ServiceArea"
+    $Defender = Get-URLsFromID -IDs $ServiceIDs
+    if (-not($Defender)) {
+        Write-Log -Message "No matching ID found for service area: $ServiceArea" -Component "Test$ServiceArea" -Type 3
+        return $false
+    }
+    foreach ($DefenderTarget in $Script:URLsToVerify) {
+        Test-Network $DefenderTarget
+    }
+    return $true  
 }
 #Special tests, not service area specific
 function Test-AuthenticatedProxy {
@@ -1711,17 +1807,7 @@ function Test-M365 {
     }
     return $true
 }
-function Test-MDE {
-    <#
-    .SYNOPSIS
-    Test all URLs required to use Microsoft Defender for Endpoint.
-    .NOTES
-    ServiceIDs
-    https://download.microsoft.com/download/6/b/f/6bfff670-47c3-4e45-b01b-64a2610eaefa/mde-urls-commercial.xlsx
-    ToDo - sorry Felix, it's coming don't worry.
-    #>
-    
-}
+
 function Test-AppAndScripts {
     <#
     .SYNOPSIS
@@ -1741,7 +1827,7 @@ function Test-AppAndScripts {
     foreach ($W32ScriptTarget in $Script:URLsToVerify) {
         Test-Network $W32ScriptTarget
     }
-    return $true    
+    return $true
 }
 function Test-Autopilot {
     <#
@@ -1797,10 +1883,9 @@ function Test-Autopilot {
 function Test-Intune {
     <#
     .SYNOPSIS
-    Test all URLs required to use Intuine. This also includes a lot of other service areas.
+    Test all URLs required to use Intune. This also includes a lot of other service areas.
     .NOTES
     ServiceIDs 163,172,170,97,190,189 + Authentiation 56,150,59
-    9997 = Defender
     https://learn.microsoft.com/en-us/mem/intune/fundamentals/intune-endpoints
     #>
     $ServiceIDs = 56, 150, 59, 163, 172, 170, 97, 190, 189, 9998, 9985
@@ -1847,7 +1932,7 @@ function Build-OutputCSV {
         [string[]]$InputCSVs
     )
     if (-not($InputCSVs)) {
-        $OutpathFilePath = $(Join-Path $WorkingDirectory -ChildPath "ResultList$("_"+$Script:DateTime + "_"+ $Env:COMPUTERNAME).csv")
+        $OutpathFilePath = $(Join-Path $Script:OutpathFilePath -ChildPath "\ResultList$("_"+$Script:DateTime + "_"+ $Env:COMPUTERNAME).csv")
         $Script:FinalResultList | Export-Csv -Path $OutpathFilePath -Encoding utf8
     } elseif ($InputCSVs.Count -eq 2) {
         $MergedCSVTargetFolder = $(Join-Path $WorkingDirectory -ChildPath '/MergedResults')
@@ -2021,6 +2106,9 @@ function Start-Tests {
     }
     if ($VisualStudioFull -or $VisualStudioInstallation) {
         Write-Log -Message "Visual Studio Full result: $(Test-VisualStudio)" -Component 'StartTests'
+    }
+    if ($DefenderFull -or $DefenderSmartScreen -or $DefenderLiveResponse -or $DefenderVulnTool -or $DefenderOptional) {
+        Write-Log -Message "Microsoft Defender for Endpoint result: $(Test-MDE)" -Component 'StartTests'
     }
 }
 function Start-Brienmode {

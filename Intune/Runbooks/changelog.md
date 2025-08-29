@@ -2,6 +2,10 @@
 
 ## 2025
 
+### 25th of August
+
+* Add: Minor additions to the description
+
 ### 4th of August
 
 * Added folder "Runbooks"

@@ -26,7 +26,7 @@ param (
     [boolean]$CreateMode = $false, # Set to $false if you want to delete users instead of creating them
     [boolean]$DeleteMode = $true # Set to $true if you want to delete users
 )
-$ThrottleLimit = 10 # DO NOT INCREASE unless you know what you are doing! This is the maximum number of concurrent batch requests.
+$ThrottleLimit = 5 # DO NOT INCREASE unless you know what you are doing! This is the maximum number of concurrent batch requests.
 if (-not(Get-MgContext)) {
     Connect-MgGraph -CertificateThumbprint $CertificateThumbprint -ClientId $ClientID -TenantId $TenantId 
     if (-not(Get-MgContext)) {
@@ -85,7 +85,9 @@ function Initialize-Script {
     Get-Job -Name "$($Script:LogPrefix)-*" | Remove-Job -Force
     #Initialize variables
     $Script:Users = [System.Collections.ArrayList]::new()
-    $Script:NameDatabase = Invoke-RestMethod "https://random-word-api.herokuapp.com/word?number=5000&length=8&lang=de"
+    if($CreateMode){
+        $Script:NameDatabase = Invoke-RestMethod "https://random-word-api.herokuapp.com/word?number=5000&length=8&lang=de"
+    }
     $Script:BatchRequestsQueue = [System.Collections.ArrayList]::new()
     #$Script:BatchRequestsAnalyze = [System.Collections.ArrayList]::new()
     $Script:BatchRequests = [System.Collections.ArrayList]::new()
@@ -153,8 +155,8 @@ function New-UserList {
         Creates a list of random users.
     #>
     for ($i = 0; $i -lt $NumberOfUsers; $i++) {
-        $FirstName = $Script:NameDatabase | Get-Random | ForEach-Object{if($_ -match '[äöü]'){$_ -replace 'ä', 'ae' -replace 'ö', 'oe' -replace 'ü', 'ue'}else{$_}}
-        $LastName = $Script:NameDatabase | Get-Random | ForEach-Object{if($_ -match '[äöü]'){$_ -replace 'ä', 'ae' -replace 'ö', 'oe' -replace 'ü', 'ue'}else{$_}}
+        $FirstName = $Script:NameDatabase | Get-Random | ForEach-Object { if ($_ -match '[äöü]') { $_ -replace 'ä', 'ae' -replace 'ö', 'oe' -replace 'ü', 'ue' }else { $_ } }
+        $LastName = $Script:NameDatabase | Get-Random | ForEach-Object { if ($_ -match '[äöü]') { $_ -replace 'ä', 'ae' -replace 'ö', 'oe' -replace 'ü', 'ue' }else { $_ } }
         $UserPrincipalName = "$($FirstName.ToLower()).$($LastName.ToLower())@$UPN"
         $RandomUser = [PSCustomObject]@{
             accountEnabled    = $true
@@ -299,7 +301,7 @@ function Confirm-BatchRequests {
     #>
     Write-Log -Message "Analyzing batch requests..." -Component 'ConfirmBatch'
     #Save the current batch requests to retry them later if needed
-    $Script:RetryRequests = $Script:BatchRequestsQueue | ForEach-Object{$_}
+    $Script:RetryRequests = $Script:BatchRequestsQueue | ForEach-Object { $_ }
     #Clear the current batch requests queue to prepare for the retry batch
     $Script:BatchRequestsQueue = [System.Collections.ArrayList]::new()
     #Get the wait time from the batch requests if any requests were throttled
@@ -307,9 +309,13 @@ function Confirm-BatchRequests {
     $Jobs = Get-Job | Where-Object { $_.name -like "$($Script:LogPrefix)-BatchRequest-*" }
     foreach ($Job in $Jobs) {
         $BatchID = $Job.Name -replace "$($Script:LogPrefix)-BatchRequest-", ''
-        $Job.Output.responses | ForEach-Object {
+        $JobResponses =$Job.Output.responses
+        foreach($Job in $JobResponses) {
             $RetryRequestFullJSON = ConvertFrom-Json -InputObject ([string]$Script:RetryRequests[$BatchID].ArgumentToProvide) -AsHashtable
-            $SingleRetryRequest = $RetryRequestFullJSON.requests[$_.id]
+            $SingleRetryRequest = $RetryRequestFullJSON.requests[$Job.id]
+            if(-not($SingleRetryRequest)){
+                break
+            }
             $UserName = if ($SingleRetryRequest.body.displayName) { $SingleRetryRequest.body.displayName } else { "N/A" }
             if ($_.status -eq 200 -or $_.status -eq 201 -or $_.status -eq 204) {
                 Write-Log -Message "Request $($_.id) for $UserName in batch $BatchID completed successfully." -Component 'ConfirmBatch'
@@ -328,7 +334,7 @@ function Confirm-BatchRequests {
             } else {
                 Write-Log -Message "Request $($_.id) for $UserName in batch $BatchID failed with status $($_.status) and provided the following error:`n $($_.body.error.message)" -Component 'ConfirmBatch' -Type 3
             }
-            Clear-Variable -Name SingleRetryRequest,RetryRequestFullJSON -ErrorAction SilentlyContinue
+            Clear-Variable -Name SingleRetryRequest, RetryRequestFullJSON -ErrorAction SilentlyContinue
         }
         Remove-Job -Id $Job.Id -Force
     }
@@ -337,6 +343,7 @@ function Confirm-BatchRequests {
 Initialize-Script
 Write-Log -Message "Welcome to RUUG the random user generator!" -Component 'RUUG' -Finish #Finish here will generate the log file
 if ($CreateMode) {
+    Write-Log -Message "Creating $NumberOfUsers random users in Entra..." -Component 'RUUG'
     New-UserList
     Write-CreateUserBatchRequests
 }
@@ -344,30 +351,39 @@ if ($DeleteMode) {
     Write-Log -Message "Searching for users to delete..." -Component 'RUUG'
     Write-Log -Message "Keep in mind that with deletions the batch responses will not contain user information." -Component 'RUUG'
     Search-UsersToDelete
-    if($Script:UsersToDelete){
+    if ($Script:UsersToDelete) {
         Write-Log -Message "Found $($Script:UsersToDelete.value.Count) users to delete." -Component 'RUUG' -Finish
         Write-DeleteUserBatchRequests
     }
 }
-    
-Submit-BatchRequests
-while ((Get-Job | Where-Object { $_.name -like "$($Script:LogPrefix)-BatchRequest-*" }).state -ne 'Completed') {
-    Start-Sleep -Seconds 1
+if($null -eq $Script:BatchRequestsQueue -or $Script:BatchRequestsQueue.Count -eq 0) {
+    Write-Log -Message "No batch requests to process." -Component 'RUUG'
 }
-Write-Log -Message "All batch requests have been submitted and processed." -Component 'RUUG'
-Do {
-    Confirm-BatchRequests
-    if ($Script:BatchRequestsQueue.Count -eq 0) {
-        Write-Log -Message "No more batch requests to process." -Component 'RUUG'
-        break
-    }
-    Write-Log -message "Some requests were throttled and need to be retried." -Component 'RUUG' -Type 2
-    Write-Log -Message "Waiting for $($Script:MinimumWaitTimeFromBatchRequests) seconds before processing the next batch requests." -Component 'RUUG' -Finish
-    Start-Sleep -Seconds $Script:MinimumWaitTimeFromBatchRequests
-    Write-Log -Message 'Processing '
+else{
     Submit-BatchRequests
-} while ($Script:BatchRequestsQueue.Count -gt 0)
+}
 
+if ((Get-Job | Where-Object { $_.name -like "$($Script:LogPrefix)-BatchRequest-*" }).state -ne 'Completed') {
+    while ((Get-Job | Where-Object { $_.name -like "$($Script:LogPrefix)-BatchRequest-*" }).state -ne 'Completed') {
+        Start-Sleep -Seconds 1
+    }
+    Write-Log -Message "All batch requests have been submitted and processed." -Component 'RUUG'
+    Do {
+        Confirm-BatchRequests
+        if ($Script:BatchRequestsQueue.Count -eq 0) {
+            Write-Log -Message "No more batch requests to process." -Component 'RUUG'
+            break
+        }
+        Write-Log -message "Some requests were throttled and need to be retried." -Component 'RUUG' -Type 2
+        Write-Log -Message "Waiting for $($Script:MinimumWaitTimeFromBatchRequests) seconds before processing the next batch requests." -Component 'RUUG' -Finish
+        Start-Sleep -Seconds $Script:MinimumWaitTimeFromBatchRequests
+        Write-Log -Message 'Processing '
+        Submit-BatchRequests
+    } while ($Script:BatchRequestsQueue.Count -gt 0)
+}
+else{
+    Write-Log -Message "No jobs found" -Component 'RUUG'
+}
 #Finalize the script
 Write-Log -Message "Thank you for using this script!" -Component 'RUUG'
 Get-Job | Remove-Job -Force

@@ -5,14 +5,18 @@ This runbook adds primary user information to the extension attributes of Entra 
 This script updates the extension attributes of devices in Entra ID with primary user information from Intune.
 Required scopes: Device.ReadWrite.All, User.Read.All, and DeviceManagementManagedDevices.Read.All.
 Set up a runbook in Azure Automation with the necessary permissions to run this script.
+.PARAMETER NumberOfDays
+The number of days to look back for the last Intune sync. If the device has not synced within this time frame, it will be excluded from the update.
 .NOTES
     Version: 1.0
     Versionname: Add-PrimaryUserInfoToDevice-Runbook
     Intial creation date: 05.07.2025
-    Last change date: 05.08.2025
+    Last change date: 25.08.2025
     Latest changes: Initial Version
     Author: Martin Himken
-    Shoutouts: 
+    Shoutouts:
+    - Paul Contreras for the blog on how to set up the AA account with graph permissions
+    https://thesysadminchannel.com/graph-api-using-a-managed-identity-in-an-automation-runbook/
     - Adam Gross for the original idea and the extension attributes script
     https://github.com/AdamGrossTX/MMSFLL2024DemoContent/blob/main/AutomationBuildingBlocks/ExtensionAttributes.ps1
     ToDo: 
