@@ -5,7 +5,7 @@ THIS SCRIPT IS NOT DONE!
 .SYNOPSIS
 This script will find devices in your tenant that exist twice or more by displayName and are hybrid joined or Entra joined.
 .DESCRIPTION
-If you want to analyse how many devices are hybrid _and_ entra joined and both are linked to an autopilot object in your tenant 
+If you want to analyze how many devices are hybrid _and_ entra joined and both are linked to an autopilot object in your tenant 
 this script is for you. It will go by displayName. The runtime for a tenant with 20.000 devices is roughly 45 seconds. 
 .PARAMETER GroupName
 The name of the group that will used to remediate the devices that are found. The group will be created if it does not exist.
@@ -49,11 +49,11 @@ param(
     [string]$GroupName = "Autopilot_Entra_DE_FixAssociation_App",
     [int]$NumberOfDays = -360,
     [boolean]$AnalyzeOnly = $true, #For security reasons we don't delete devices by default. Set to $false if you want to delete devices.
-    [boolean]$Cleanup = $true, #ToDo: Set this to SWITCH when done!
+    [switch]$Cleanup = $false, #ToDo: Set this to SWITCH when done!
     [string]$CertificateThumbprint = "",
     [string]$ClientID = "",
     [string]$TenantId = "",
-    [string]$TenantAPIToUse = "/beta", # Change to /v1.0 if you want to use the stable API version
+    [string]$TenantAPIToUse = "/beta", # Change to /v1.0 if you want to use the "stable" API version
     [Parameter(Mandatory = $false)]
     [System.IO.DirectoryInfo]$WorkingDirectory = "C:\ADDF\",
     [Parameter(Mandatory = $false)]
@@ -174,6 +174,8 @@ function Initialize-Script {
     if (-not($Script:CurrentLocation)) {
         $Script:CurrentLocation = Get-Location
     }
+    if (-not($WorkingDirectory)) { $WorkingDirectory = "$Script:CurrentLocation" }
+    if (-not($LogDirectory)) { $LogDirectory = "$WorkingDirectory\Logs" }
     if (-not(Test-Path $WorkingDirectory )) { New-Item $WorkingDirectory -ItemType Directory -Force | Out-Null } 
     if ((Get-Location).path -ne $WorkingDirectory) {
         Set-Location $WorkingDirectory
@@ -195,6 +197,7 @@ function Initialize-Script {
     Get-IntuneDevices
     Get-EntraDevices
     #Initialize collections
+    [int]$Script:GlobalRequestCounter = 0
     $Script:DuplicateDevices = [System.Collections.ArrayList]::new()
     $Script:DevicesToBeDeleted = [System.Collections.ArrayList]::new()
     $Script:DevicesToBeRemediated = [System.Collections.ArrayList]::new()
@@ -308,6 +311,7 @@ function Invoke-BatchRequest {
         [switch]$Finalize
     )
     if ($Method -and $URL) {
+        $Script:GlobalRequestCounter++
         Add-BatchRequestObjectToQueue -Method $method -URL $URL -Headers $Headers -Body $Body
     }
     if ($Script:BatchRequests.count -eq 20 -or $Finalize) {
@@ -315,6 +319,7 @@ function Invoke-BatchRequest {
         $JSONRequests = $BatchRequestBody | ConvertTo-Json -Depth 10
         #$Results = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com$TenantAPIToUse/`$batch" -Body $JSONRequests -ContentType 'application/json' -ErrorAction Stop
         $PrepareJob = [PSCustomObject]@{
+            ID                = $Script:BatchRequestsQueue.Count
             Name              = "BatchRequest-$($Script:BatchRequestsQueue.Count)"
             ArgumentToProvide = @($JSONRequests)
         }
@@ -332,53 +337,43 @@ function Search-DuplicateDevices {
         their last sign-in date and whether they are hybrid or Entra joined. The function will also check for Autopilot IDs associated with the devices.
         It returns a list of devices that are candidates for deletion based on their activity and (approximate) last sign-in date.
     #>
-    $DuplicatedNames = ($Script:AllEntraDevices.value | Group-Object -Property displayName | Where-Object { $_.count -gt 1 })
-    $DuplicateDevicesSearchResult = [System.Collections.ArrayList]::new()
-    foreach ($DuplicatedDevice in $DuplicatedNames) {        
-        $DevicesDetails = [System.Collections.ArrayList]::new()
-        foreach ($Device in $DuplicatedDevice.Group) {
-            $SerialNumber = $Script:AllIntuneDevicesHashTable[$Device.deviceId].serialNumber
-            $DeviceDetails = [PSCustomObject]@{
-                ID                            = $Device.id
-                ApproximateLastSignInDateTime = $Device.approximateLastSignInDateTime
-                CreatedDate                   = $Device.createdDateTime
-                EnrolledBy                    = $Device.registeredOwners[0].userPrincipalName
-                EnrollmentProfileName         = $Device.enrollmentProfileName
+    $AllEntraDevicesWithAutopilotIDs = $Script:AllEntraDevices.value | Where-Object { $_.physicalIds -match '[ZTDID]:' }
+    $ZTDIDHashtable = @{}
+    foreach ($Device in $AllEntraDevicesWithAutopilotIDs) {
+        $DeviceZTDID = ($Device.physicalIds | Select-String -Pattern '[ZTDID]:' -SimpleMatch)
+        if ($DeviceZTDID) {
+            $ZTIIDOnly = $DeviceZTDID.line.Substring(8, 36)
+            if (-not($ZTDIDHashtable[$ZTIIDOnly])) {
+                $ZTDIDHashtable[$ZTIIDOnly] = @()
             }
-            $DevicesDetails.Add($DeviceDetails) | Out-Null
+            $ZTDIDHashtable[$ZTIIDOnly] += $Device
         }
-        $DupeObject = [PSCustomObject]@{
-            DisplayName        = $DuplicatedDevice.Name
-            DeviceDetails      = $DevicesDetails
-            SerialNumber       = $SerialNumber
-            AutopilotID        = $null
-            AutopilotTreatment = $false
-        }
-        # Get the physical IDs of the devices with duplicate names
-        $PhysicalIDs = $Script:AllEntraDevicesHashTable[$DuplicatedDevice.Name] | Select-Object -ExpandProperty physicalIds
-        # If devices have Autopilot IDs, we need to treat them differently
-        if ($PhysicalIDs | Select-String -Pattern '[ZTDID]:' -SimpleMatch) {
-            $AutopilotIDs = ($PhysicalIDs | Select-String -Pattern '[ZTDID]:' -SimpleMatch).line.Substring(8.36) | Select-Object -Unique
-        }
-        if ($AutopilotIDs) {
-            $DupeObject.AutopilotID = $AutopilotIDs
-        }
-        if ($AutopilotIDs.Count -eq 1) {
-            Write-Log -Message "Found matching Autopilot IDs ($($AutopilotIDs)) for devices pointing with duplicate names ($($DuplicatedDevice.Name)) " -Component 'FindDuplicateDevices' -Type 2
-            $DupeObject.AutopilotTreatment = $true
-        } else {
-            Write-Log -Message "Found different Autopilot IDs for devices with duplicate names ($($DuplicatedDevice.Name))" -Component 'FindDuplicateDevices' -Type 1
-        }
-        $DuplicateDevicesSearchResult.add($DupeObject) | Out-Null
-        if ($AutopilotIDs) { Clear-Variable AutopilotIDs }
     }
-    $Script:DuplicateDevices = $DuplicateDevicesSearchResult
+    $DuplicateDevices = $ZTDIDHashtable.GetEnumerator() | Where-Object { $_.Value.count -gt 1 }
+    $Script:DuplicateDevices = [System.Collections.ArrayList]::new()
+    foreach ($DuplicateDevice in $DuplicateDevices) {
+        foreach ($Device in $DuplicateDevice.Value) {
+            $Entry = [PSCustomObject]@{
+                AutopilotID = $DuplicateDevice.name
+                DeviceID = $Device.deviceId
+                id = $Device.id
+                DisplayName = $Device.displayName
+                SerialNumber = if ($Script:AllIntuneDevicesHashTable[$Device.deviceId]) { $Script:AllIntuneDevicesHashTable[$Device.deviceId].serialNumber.trim() } else { $null }
+                ApproximateLastSignInDateTime = $Device.ApproximateLastSignInDateTime
+                createdDateTime = $Device.createdDateTime
+                enrollmentProfileName = $Device.enrollmentProfileName
+            }
+            $Script:DuplicateDevices.Add($Entry) | Out-Null
+        }
+    }
 }
+
 function Select-DevicesToBeDeleted {
     <#
     .SYNOPSIS
     Analyze duplicate devices with duplicate names in the tenant and select candidates for deletion.
     #>
+    #ToDO: Adjust this script for the new DuplicateDevices structure
     $DevicesToBeDeleted = [System.Collections.ArrayList]::new()
     foreach ($Device in $Script:DuplicateDevices) {
         $DeviceDetails = $Device.DeviceDetails
@@ -529,9 +524,9 @@ function Get-RemediationGroupRemediationStatus {
         }
         $RemediatedDevice = [PSCustomObject]@{
             id           = $GroupMember.id
-            displayName  = if($Script:AllEntraDevicesHashTableByID[$GroupMember.id]) { $Script:AllEntraDevicesHashTableByID[$GroupMember.id].displayName } else { $null }
+            displayName  = if ($Script:AllEntraDevicesHashTableByID[$GroupMember.id]) { $Script:AllEntraDevicesHashTableByID[$GroupMember.id].displayName } else { $null }
             serialNumber = $DeviceSerialNumber
-            autopilotID  = if($Script:AllAutopilotDevicesHashTable[$DeviceSerialNumber]) { $Script:AllAutopilotDevicesHashTable[$DeviceSerialNumber].id } else { $null }
+            autopilotID  = if ($Script:AllAutopilotDevicesHashTable[$DeviceSerialNumber]) { $Script:AllAutopilotDevicesHashTable[$DeviceSerialNumber].id } else { $null }
             remediated   = $false
         }
         if ($DeviceSerialNumber -and $Script:AllAutopilotDevicesHashTable[$DeviceSerialNumber]) {
@@ -544,7 +539,7 @@ function Get-RemediationGroupRemediationStatus {
 }
 function Remove-RemediatedDevicesFromGroup {
     foreach ($RemediatedDevice in $($Script:RemediatedDeviceIDs).Where({ $_.remediated -eq $true })) {
-        Invoke-BatchRequest -Method "DELETE" -URL "/groups/$($Script:GroupId)/members/$($RemediatedDevice.id)/`$ref" -Headers @{ "Content-Type" = "application/json" } -Finalize
+        Invoke-BatchRequest -Method "DELETE" -URL "/groups/$($Script:GroupId)/members/$($RemediatedDevice.id)/`$ref" -Headers @{ "Content-Type" = "application/json" }
         Write-Log -Message "Added device $($RemediatedDevice.id) ($($RemediatedDevice.displayName)) to queue for removal from group $GroupName" -Component 'RemoveRemediatedDevicesFromGroup'
     }
 }
@@ -552,10 +547,10 @@ function Remove-RemediatedDevicesFromGroup {
 Write-Log -Message "Starting Autopilot Dual Device Finder" -Component 'ADDFMain' -Type 1
 Initialize-Script
 if (-not($Cleanup)) {
-    Write-Log -Message "Searching for devices with duplicate names in the tenant" -Component 'ADDFMain'
+    Write-Log -Message "Searching for devices with duplicate ZTDIDs in the tenant" -Component 'ADDFMain'
     Search-DuplicateDevices
     Write-Log -Message "Documenting the results in $($LogDirectory)" -Component 'ADDFMain' -Type 1
-    $Script:DuplicateDevices | Select-Object -Property DisplayName, SerialNumber, AutopilotID | Export-Csv -Path $WorkingDirectory\AutopilotDualDeviceFinder$($script:DateTime).csv -NoTypeInformation -Encoding UTF8 -Force -Delimiter ';' 
+    $Script:DuplicateDevices | Export-Csv -Path $WorkingDirectory\AutopilotDualDeviceFinder$($script:DateTime).csv -NoTypeInformation -Encoding UTF8 -Force -Delimiter ';'
 
     Write-Log -Message "Looking for devices that are candidates for deletion" -Component 'ADDFMain'
     Select-DevicesToBeDeleted
@@ -571,8 +566,8 @@ if (-not($Cleanup)) {
         Write-Log -Message "Preparing devices for deletion" -Component 'ADDFMain'
         Register-DevicesToBeDeleted
     }
-    if ($DevicesToBeDeleted.count -gt 0 -and -not($AnalyzeOnly)) {
-        $confirmation = Read-Host "There are $($DevicesToBeDeleted.count) devices that are candidates for deletion. Do you want to continue? (Y/N)"
+    if ($Script:DevicesToBeDeleted.count -gt 0 -and -not($AnalyzeOnly)) {
+        $confirmation = Read-Host "There are $($Script:DevicesToBeDeleted.count) devices that are candidates for deletion. Do you want to continue? (Y/N)"
         if ($confirmation -eq 'Y') {
             Write-Log -Message "Continuing..." -Component 'ADDFMain'
             foreach ($BatchRequest in $Script:BatchRequestsQueue) {
@@ -595,8 +590,8 @@ if (-not($Cleanup)) {
     #Log the results
     $AutopilotDevices = $Script:DuplicateDevices | Where-Object { $_.AutopilotID -ne $null }
     $AutopilotDeleteDevices = $Script:DevicesToBeDeleted | Where-Object { $_.AutopilotID -ne $null }
-    Write-Log -Message "Found $($Script:DuplicateDevices.count) devices with duplicate names" -Component 'ADDFMain' -Type 1
-    Write-Log -Message "Found $($Script:DuplicateDevices.DeviceDetails.count) of those devices had duplicated names" -Component 'ADDFMain' -Type 1
+    Write-Log -Message "Found $($Script:DuplicateDevices.count) devices with one or more duplicated devices" -Component 'ADDFMain' -Type 1
+    Write-Log -Message "Found $($Script:DuplicateDevices.DeviceDetails.count) total duplicates" -Component 'ADDFMain' -Type 1
     Write-Log -Message "Found $($Script:DevicesToBeDeleted.count) devices that were candidates for deletion" -Component 'ADDFMain'
     Write-Log -Message "Found $($AutopilotDeleteDevices.count) autopilot devices that were candidates for deletion out of $($AutopilotDevices.count)" -Component 'ADDFMain' -Type 1
 } else {
@@ -609,7 +604,7 @@ if (-not($Cleanup)) {
         Write-Log -Message "Removing remediated devices from group $($GroupName)" -Component 'ADDFMain'
         Remove-RemediatedDevicesFromGroup
         Invoke-BatchRequest -Finalize
-        $confirmation = Read-Host "There are $($DevicesToBeDeleted.count) devices that are candidates for deletion. Do you want to continue? (Y/N)"
+        $confirmation = Read-Host "There are $($Script:GlobalRequestCounter) devices that are candidates for deletion from the group. Do you want to continue? (Y/N)"
         if ($confirmation -eq 'Y') {
             Write-Log -Message "Continuing..." -Component 'ADDFMain'
             foreach ($BatchRequest in $Script:BatchRequestsQueue) {
@@ -619,6 +614,7 @@ if (-not($Cleanup)) {
                     Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com$TenantAPIToUse/`$batch" -Body $ArgumentToProvide -ContentType 'application/json' -ErrorAction Stop
                 } -ArgumentList $BatchRequest.ArgumentToProvide, $TenantAPIToUse | Out-Null
             }
+            $Script:GlobalRequestCounter = 0
         } else {
             Write-Log -Message "Operation canceled. No devices were deleted." -Component 'ADDFMain'
         }

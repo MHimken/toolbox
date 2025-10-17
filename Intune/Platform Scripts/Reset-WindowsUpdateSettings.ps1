@@ -35,18 +35,18 @@ This will also prevent the deletion of the .pol file which hold the machines pol
 
 .\Reset-WindowsUpdateSettings.ps1 -ResetLocalPolicies:$False -GPupdateTime 120
 .NOTES
-Version: 1.1
+Version: 1.2
 Author: Martin Himken
 Original script name: Reset-WindowsUpdateSettings.ps1
 Initial creation date: 10.03.25
-Last change: 17.03.25
+Last change: 03.09.25
 Change: Added PARAMETER and EXAMPLE description
 #>
 
 param(
     [System.IO.DirectoryInfo]$WorkingDirectory = "C:\RWU\",
     [System.IO.DirectoryInfo]$LogDirectory = "C:\RWU\",
-    [boolean]$ResetLocalPolicies=$true,
+    [boolean]$ResetLocalPolicies = $true,
     [switch]$BackupDisabled,
     [int]$GPUpdateTimeout = 60,
     [int]$IntuneSyncTimeout = 60
@@ -79,7 +79,7 @@ function Initialize-Script {
         .SYNOPSIS
         Will initialize most of the required variables throughout this script.
     #>
-    if($Script:DateTime){
+    if ($Script:DateTime) {
         Clear-Variable DateTime
     }
     $Script:DateTime = Get-Date -Format yyyyMMdd_HHmmss
@@ -97,7 +97,6 @@ function Initialize-Script {
         if (-not(Test-Path $LogDirectory)) { New-Item $LogDirectory -ItemType Directory -Force | Out-Null }
     }
     Write-Log 'Script is initialized - gathering information and initializing directories' -Component 'InitializeScript'
-    #####Custom content
     if (-not($BackupDisabled)) {
         Write-Log 'Creating Backup directory' -Component 'InitializeScript'
         $Script:BackupDirectory = $(Join-Path -Path $WorkingDirectory -ChildPath "$Script:DateTime")
@@ -106,8 +105,8 @@ function Initialize-Script {
     $Script:IsIntuneDevice = ($null -ne (Get-Service IntuneManagementExtension -ErrorAction SilentlyContinue))
     if ($Script:IsIntuneDevice) {
         Write-Log 'Device is managed by Intune' -Component 'InitializeScript'
-        $IsAutoPatchDevice = Test-Path "C:\Program Files\Windows Autopatch Client Broker\ClientBroker\ClientBroker.exe"
-        if (-not($IsAutoPatchDevice)) {
+        $Script:IsAutoPatchDevice = Test-Path "C:\Program Files\Windows Autopatch Client Broker\ClientBroker\ClientBroker.exe"
+        if (-not($Script:IsAutoPatchDevice)) {
             Write-Log 'Device is not managed by Autopatch' -Component 'InitializeScript'  
         } else {
             Write-Log 'Device is managed by Autopatch' -Component 'InitializeScript'
@@ -115,14 +114,14 @@ function Initialize-Script {
     } else {
         Write-Log 'Device is not managed by Intune' -Component 'InitializeScript'
     }
-    $IsActiveDirectoryDevice = (Get-CimInstance Win32_ComputerSystem).PartOfDomain
-    if ($IsActiveDirectoryDevice) {
+    $Script:IsActiveDirectoryDevice = (Get-CimInstance Win32_ComputerSystem).PartOfDomain
+    if ($Script:IsActiveDirectoryDevice) {
         Write-Log 'Device is domain joined' -Component 'InitializeScript'
     } else {
         Write-Log 'Device is not domain joined' -Component 'InitializeScript'
     }
-    $IsConfigMgrDevice = ($null -ne (Get-Service ccmexec -ErrorAction SilentlyContinue))
-    if ($IsConfigMgrDevice) {
+    $Script:IsConfigMgrDevice = ($null -ne (Get-Service ccmexec -ErrorAction SilentlyContinue))
+    if ($Script:IsConfigMgrDevice) {
         Write-Log 'Device is running ConfigMgr client' -Component 'InitializeScript'
     } else {
         Write-Log 'Device is not running ConfigMgr client' -Component 'InitializeScript'
@@ -161,16 +160,38 @@ function Write-Log {
 }
 function Reset-LocalPolicies {
     $MachinePolicyFile = "C:\Windows\System32\GroupPolicy\Machine\Registry.pol"
-    if(-not(Test-Path -Path $MachinePolicyFile)){
+    if (-not(Test-Path -Path $MachinePolicyFile)) {
         return $false
     }
     if (-not($BackupDisabled)) {
         Write-Log "Creating backup of machine registry.pol to $($Script:BackupDirectory)" -Component 'ResetLocalPolicies'
         Copy-Item $MachinePolicyFile -Destination $Script:BackupDirectory -Force
     }
+    if ($Script:IsConfigMgrDevice) {
+        Write-Log 'Since the device is managed by CM we might need to extract the custom port for UpdateServiceUrlAlternate and set that value again' -Component 'ResetLocalPolicies'
+        #$CurrentWorkloadConfiguration = (Get-CimInstance -Namespace root/ccm/InvAgt -ClassName CCM_System).ComgmtWorkloads
+        #$ValidWorkloadConfigurations = "2147479807","8209", "8211", "8213", "8215", "8217", "8219", "8221", "8223", "8273", "8275", "8277", "8279", "8281", "8283", "8285", "8287", "8337", "8339", "8341", "8343", "8345", "8347", "8349", "8351", "8401", "8403", "8405", "8407", "8409", "8411", "8413", "8415", "12337", "12339", "12341", "12343", "12345", "12347", "12349", "12351", "12401", "12403", "12405", "12407", "12409", "12411", "12413", "12415", "12465", "12467", "12469", "12471", "12473", "12475", "12477", "12479", "12529", "12531", "12533", "12535", "12537", "12539", "12541", "12543"
+        $CurrentWorkloadConfiguration = (Get-CimInstance -Namespace root/ccm/InvAgt -ClassName CCM_System).ComgmtWorkloads
+        if (-not[boolean]($CurrentWorkloadConfiguration -band 16)) {
+            Write-Log 'The workload for Windows Update is not moved' -Component 'ResetLocalPolicies'
+            try {
+                $UpdateServiceUrlAlternate = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Name 'UpdateServiceUrlAlternate' -ErrorAction SilentlyContinue
+            } catch {
+                Write-Log 'UpdateServiceUrlAlternate not found' -Component 'ResetLocalPolicies'
+            }
+            if ($UpdateServiceUrlAlternate) {
+                $CustomPort = ($UpdateServiceUrlAlternate).Split(':')[2]
+            } else {
+                $CustomPort = 8005
+            }
+            $UrlToRestore = "http://localhost:$CustomPort"
+        } else {
+            Write-Log 'The workload for Windows Update is moved - no need to check for custom port' -Component 'ResetLocalPolicies'
+        } 
+    }
     Write-Log 'Removing registry.pol' -Component 'ResetLocalPolicies'
     Remove-Item -Path $MachinePolicyFile -Force
-    if ($IsActiveDirectoryDevice -and (Test-ComputerSecureChannel)) {
+    if ($Script:IsActiveDirectoryDevice -and (Test-ComputerSecureChannel)) {
         Write-Log 'Computer is domain joined and domain is reachable - forcing gpupdate with target computer' -Component 'ResetLocalPolicies'
         $GPupdatePath = Join-Path -Path "$Env:SystemRoot" -ChildPath "\System32\gpupdate.exe"
         $GPUpdateArguments = "/target:computer /wait:$GPUpdateTimeout /force"
@@ -182,21 +203,31 @@ function Reset-LocalPolicies {
             Write-Log "Sync unsuccessful - maybe the wait time was not enough." -Component 'ResetLocalPolicies' -Type 2
         }
     }
-    if ($IsConfigMgrDevice) {
+    if ($Script:IsConfigMgrDevice) {
         Write-Log "Starting ConfigMgr client actions" -Component 'ResetLocalPolicies'
         try {
-            Invoke-CimMethod -Namespace 'root\CCM' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{sScheduleID='{00000000-0000-0000-0000-000000000021}'} -ErrorAction Stop 
+            Invoke-CimMethod -Namespace 'root\CCM' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{sScheduleID = '{00000000-0000-0000-0000-000000000021}' } -ErrorAction Stop 
             Write-Log "ConfigMgr Machine Policy client action successful" -Component 'ResetLocalPolicies'
-        }
-        catch {
+        } catch {
             Write-Log "ConfigMgr Machine Policy client action unsuccessful" -Component 'ResetLocalPolicies' -Type 2
         }
         try {
-            Invoke-CimMethod -Namespace 'root\CCM' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{sScheduleID='{00000000-0000-0000-0000-000000000113}'} -ErrorAction Stop
+            Invoke-CimMethod -Namespace 'root\CCM' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{sScheduleID = '{00000000-0000-0000-0000-000000000113}' } -ErrorAction Stop
             Write-Log "ConfigMgr Software Update Scan client action successful" -Component 'ResetLocalPolicies'
-        }
-        catch {
+        } catch {
             Write-Log "ConfigMgr Software Update Scan client action unsuccessful" -Component 'ResetLocalPolicies' -Type 2
+        }
+        if ($UrlToRestore) {
+            try {
+                $CurrentUpdateServiceUrlAlternate = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Name 'UpdateServiceUrlAlternate' -ErrorAction SilentlyContinue
+            } catch {
+                Write-Log "UpdateServiceUrlAlternate wasn't restored properly from CCM, setting manually" -Component 'ResetLocalPolicies' -Type 2
+            }
+            if (-not($CurrentUpdateServiceUrlAlternate)) {
+                New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows' -Name 'WindowsUpdate' -Force | Out-Null
+                New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Name 'UpdateServiceUrlAlternate' -Value $UrlToRestore -Force | Out-Null
+            }
+            Write-Log "Set UpdateServiceUrlAlternate to $UrlToRestore" -Component 'ResetLocalPolicies'
         }
     }
 }
@@ -209,14 +240,14 @@ function Start-IMESync {
     $Shell = New-Object -ComObject Shell.Application
     $Shell.open("intunemanagementextension://syncapp")
     $GUIDs = (Get-ChildItem HKLM:\SOFTWARE\Microsoft\Provisioning\OMADM\Accounts\ -Depth 0).PSChildName
-    foreach($GUID in $GUIDs){
+    foreach ($GUID in $GUIDs) {
         $IsIntuneGUID = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Enrollments\$GUID" -Name AADResourceID) -eq "https://manage.microsoft.com/"
-        if($IsIntuneGUID){
+        if ($IsIntuneGUID) {
             $DeviceEnrollerPath = "C:\Windows\System32\DeviceEnroller.exe"
             $DeviceEnrollerArgs = "/o $GUID /c /b"
             Write-Log 'Running devicecontroller to enforce the CSPs from Intune' -Component 'StartSync'
             $DeviceEnroller = Start-Process -FilePath $DeviceEnrollerPath -ArgumentList $DeviceEnrollerArgs -PassThru -WindowStyle Hidden -Wait
-            if($DeviceEnroller.ExitCode -ne 0){
+            if ($DeviceEnroller.ExitCode -ne 0) {
                 Write-Log 'You managed to make the Deviceenroller return with a non-zero return code somehow...' -Component 'StartSync' -Type 3
             }
         }
@@ -261,7 +292,7 @@ function Reset-KnowRWURegistryPaths {
     return $true
 }
 function Stop-UpdateServices {
-    if ($IsAutoPatchDevice) {
+    if ($Script:IsAutoPatchDevice) {
         Write-Log 'Attempting to stop the Autopatch service' -Component 'StopUpdateServices'
         Get-Service ClientBrokerUpgrader | Stop-Service -Force
     }
@@ -291,7 +322,7 @@ try {
         Start-IMESync
     }
     if ($ResetLocalPolicies) {
-        if(-not(Reset-LocalPolicies)){
+        if (-not(Reset-LocalPolicies)) {
             Write-Log 'No local .pol file' -Component 'RSUMain'
         }
     }
