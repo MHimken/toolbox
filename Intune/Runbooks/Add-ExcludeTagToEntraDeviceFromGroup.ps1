@@ -177,6 +177,8 @@ function Initialize-Cleanup {
                     extensionAttribute11 = $EntraDevice.extensionAttributes.extensionAttribute11
                     extensionAttribute12 = $EntraDevice.extensionAttributes.extensionAttribute12
                     extensionAttribute13 = $EntraDevice.extensionAttributes.extensionAttribute13
+                    extensionAttribute14 = $EntraDevice.extensionAttributes.extensionAttribute14
+                    extensionAttribute15 = $EntraDevice.extensionAttributes.extensionAttribute15
                 }
             }
             Write-Output "Removed Autopatch Exclude Tag from device $($EntraDevice.DisplayName) $($EntraDevice.id)."
@@ -224,6 +226,8 @@ function Initialize-SettingExtensionAttributes {
                     extensionAttribute11 = $EntraDevice.extensionAttributes.extensionAttribute11
                     extensionAttribute12 = $EntraDevice.extensionAttributes.extensionAttribute12
                     extensionAttribute13 = $EntraDevice.extensionAttributes.extensionAttribute13
+                    extensionAttribute14 = $EntraDevice.extensionAttributes.extensionAttribute14
+                    extensionAttribute15 = $EntraDevice.extensionAttributes.extensionAttribute15
                 }
             }
             $params = @{

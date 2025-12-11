@@ -52,6 +52,10 @@
     Last change date: 01.12.2025
     Latest changes: Initial Version
     Author: Martin Himken
+    To do:
+        - Add LAPS and BitLocker key retrieval and storage
+        - Add error handling for Graph API calls
+        - Add more logging messages
 #>
 param (
     [System.IO.DirectoryInfo]$CSV,
@@ -81,6 +85,11 @@ param (
     [int]$ThrottleLimit = 10 
 )
 if (-not(Get-MgContext)) {
+    Write-Output "No existing Microsoft Graph context found. Connecting to Microsoft Graph..."
+    if(-not($CertificateThumbprint) -or -not($ClientID) -or -not($TenantId)) {
+        Write-Output "CertificateThumbprint, ClientID, and TenantId parameters are required for authentication. Or pre-connect to Microsoft Graph before running the script."
+        exit
+    }
     Connect-MgGraph -CertificateThumbprint $CertificateThumbprint -ClientId $ClientID -TenantId $TenantId 
     if (-not(Get-MgContext)) {
         exit
@@ -705,7 +714,7 @@ If ($EnableCleanup) {
 #Export the results to a CSV file if required
 if ($OutputCSV) {
     Write-Log -Message "Exporting results to CSV file." -Component 'Main'
-    $Script:DocumentResults | Export-Csv -Path (Join-Path -Path (Get-Location).path -ChildPath "RemovedAutopilotDevicesResults_$($Script:DateTime).csv") -Delimiter ";" -NoTypeInformation -Force
+    $Script:DocumentResults | Export-Csv -Path (Join-Path -Path (Get-Location).path -ChildPath "RemovedAutopilotDevicesResults_$($Script:DateTime).csv") -Encoding utf8 -Delimiter ";" -NoTypeInformation -Force
 }
 # Show or export the results if required
 if ($ShowResults) {

@@ -1,17 +1,17 @@
 <#
-.SYNOPSIS:
+.SYNOPSIS
 This runbook adds primary user information to the extension attributes of Entra ID devices.
-.DESCRIPTION:
+.DESCRIPTION
 This script updates the extension attributes of devices in Entra ID with primary user information from Intune.
 Required scopes: Device.ReadWrite.All, User.Read.All, and DeviceManagementManagedDevices.Read.All.
 Set up a runbook in Azure Automation with the necessary permissions to run this script.
 .PARAMETER NumberOfDays
 The number of days to look back for the last Intune sync. If the device has not synced within this time frame, it will be excluded from the update.
 .NOTES
-    Version: 1.5
+    Version: 1.6
     Versionname: Add-PrimaryUserInfoToDevice-Runbook
     Intial creation date: 05.07.2025
-    Last change date: 25.11.2025
+    Last change date: 08.12.2025
     Latest changes: Refactored some code to improve performance and readability
     Author: Martin Himken
     Shoutouts:
@@ -24,8 +24,7 @@ The number of days to look back for the last Intune sync. If the device has not 
 #>
 
 param(
-    [int]$NumberOfDays = 365, # Number of Days to Look Back for Last Intune Sync
-    [string[]]$AutopatchExcludeGroupID = @("3073bff3-1625-499f-8f73-6874c7bd0153") # Autopatch Exclude Group IDs (optional)
+    [int]$NumberOfDays = 365 # Number of Days to Look Back for Last Intune Sync
 )
 # Stop editing here
 # Connect to Microsoft Graph using the Azure Automation Run As Account
@@ -71,7 +70,6 @@ $Script:BatchRequests = [System.Collections.ArrayList]::new()
 $Script:BatchRequestsQueue = [System.Collections.ArrayList]::new()
 $DateMinusNumberofDays = (Get-Date).AddDays(-$NumberOfDays).ToString("yyyy-MM-ddTHH:mm:ssZ")
 $TenantAPIToUse = "/beta" # Change to /v1.0 if you want to use the stable API version
- # Change to your Autopatch Exclude Group ID
 function Add-BatchRequestObjectToQueue {
     param(
         [string]$Method,
@@ -157,18 +155,10 @@ function Initialize-Script {
         Write-Output "Getting next link for Entra users"
         $Script:EntraUsers = Get-nextLinkData -OriginalObject $Script:EntraUsers
     }
-    $Script:EntraDevices = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/beta/devices/?`$expand=registeredOwners(`$select=id,name)&`$filter=(accountEnabled eq true) and (OperatingSystem eq 'Windows')&`$select=id,deviceId,DisplayName" -ErrorAction Stop
+    $Script:EntraDevices = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/beta/devices/?`$expand=registeredOwners(`$select=id,name)&`$filter=(accountEnabled eq true) and (OperatingSystem eq 'Windows')&`$select=id,deviceId,DisplayName,extensionAttributes" -ErrorAction Stop
     if ($Script:EntraDevices.'@odata.nextLink') {
         Write-Output "Getting next link for Entra devices"
         $Script:EntraDevices = Get-nextLinkData -OriginalObject $Script:EntraDevices
-    }
-    if($AutopatchExcludeGroupID){
-        foreach ($Group in $AutopatchExcludeGroupID){
-            $Script:AutopatchExcludeMembers = Invoke-MgGraphRequest -Uri "https://graph.microsoft.com/beta/groups/$Group/members?`$select=id" -ErrorAction Stop
-            Write-Output "Getting members of Autopatch Exclude Group $Group"
-            $Script:AutopatchExcludeMembers = Get-nextLinkData -OriginalObject $Script:AutopatchExcludeMembers
-        }
-        Write-Output "Found $($Script:AutopatchExcludeMembers.value.count) members in Autopatch Exclude Groups."
     }
 }
 
@@ -179,27 +169,17 @@ $counter = 0
 #Prepare a merged object to use for the batch request
 $deviceLookup = @{}
 $userLookup = @{}
-$AutopatchExcludeLookup = @{}
 foreach ($EntraDevice in $Script:EntraDevices.Value) {
     $deviceLookup[$EntraDevice.DeviceID.ToString()] = $EntraDevice
 }
 foreach ($EntraUser in $Script:EntraUsers.value) {
     $userLookup[$EntraUser.id.ToString()] = $EntraUser
 }
-foreach ($AutoPatchExcludeMember in $Script:AutopatchExcludeMembers.value) {
-    $AutopatchExcludeLookup[$AutoPatchExcludeMember.id.ToString()] = $AutoPatchExcludeMember
-}
 $Output = @{}
 foreach ($IntuneDevice in $Script:IntuneDevices.Value) {
     if (-not $deviceLookup.Contains($IntuneDevice.AzureADDeviceId.ToString())) {
         continue
     } else {
-        if ($AutopatchExcludeGroupID) {
-            $IsInAutopatchExcludeGroup = $AutopatchExcludeLookup.Contains($IntuneDevice.azureADDeviceId.ToString())
-            if ($IsInAutopatchExcludeGroup) {
-                $AutopatchTag = "AutopatchExcluded"
-            }
-        }
         $EntraUser = $userLookup[$IntuneDevice.userId.ToString()]
         $EntraDevice = $deviceLookup[$IntuneDevice.AzureADDeviceId.ToString()]
         $Body = @{
@@ -212,7 +192,14 @@ foreach ($IntuneDevice in $Script:IntuneDevices.Value) {
                 extensionAttribute5  = $EntraUser.companyName
                 extensionAttribute6  = $IntuneDevice.model
                 extensionAttribute7  = $IntuneDevice.notes
-                extensionAttribute10 = $AutopatchTag
+                extensionAttribute8  = $EntraDevice.extensionAttributes.extensionAttribute8 
+                extensionAttribute9  = $EntraDevice.extensionAttributes.extensionAttribute9
+                extensionAttribute10 = $EntraDevice.extensionAttributes.extensionAttribute10
+                extensionAttribute11 = $EntraDevice.extensionAttributes.extensionAttribute11
+                extensionAttribute12 = $EntraDevice.extensionAttributes.extensionAttribute12
+                extensionAttribute13 = $EntraDevice.extensionAttributes.extensionAttribute13
+                extensionAttribute14 = $EntraDevice.extensionAttributes.extensionAttribute14
+                extensionAttribute15 = $EntraDevice.extensionAttributes.extensionAttribute15
             }
         }
         $Message = "Updated device $($EntraDevice.DisplayName) $($EntraDevice.id) with user $($EntraUser.displayName)"
