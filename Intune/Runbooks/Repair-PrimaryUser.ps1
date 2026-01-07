@@ -114,12 +114,12 @@ function Get-nextLinkData {
 }
 function Initialize-Script {
     $Script:EntraUsers = Invoke-MGGraphRequest -Method GET -Uri "https://graph.microsoft.com/$TenantAPIToUse/users?`$select=id,userPrincipalName,displayName"
-    if($Script:EntraUsers.'@odata.nextLink') {
+    if ($Script:EntraUsers.'@odata.nextLink') {
         Write-Output "Getting next link for Entra users"
         $Script:EntraUsers = Get-nextLinkData -OriginalObject $Script:EntraUsers
     }
     $Script:IntuneDevices = Invoke-MGGraphRequest -Method GET -Uri "https://graph.microsoft.com/$TenantAPIToUse/deviceManagement/managedDevices?`$filter=(OperatingSystem eq 'Windows') and (managedDeviceOwnerType eq 'Company')&`$select=id,azureADDeviceId,deviceName,userId,usersLoggedOn"
-    if($Script:IntuneDevices.'@odata.nextLink') {
+    if ($Script:IntuneDevices.'@odata.nextLink') {
         Write-Output "Getting next link for Intune devices"
         $Script:IntuneDevices = Get-nextLinkData -OriginalObject $Script:IntuneDevices
     }
@@ -135,54 +135,66 @@ function Initialize-Script {
     $Script:BatchRequests = [System.Collections.ArrayList]::new()
     $Script:BatchRequestsQueue = [System.Collections.ArrayList]::new()
 }
-function Find-PrimaryUser{
+function Find-PrimaryUser {
     # Filter for devices that have users logged on
     $DevicesWithUsers = $Script:IntuneDevices.value | Where-Object { $_.usersLoggedOn.Count -gt 0 }
-    foreach($Device in $DevicesWithUsers){
+    $Script:PrimaryUserResults = [System.Collections.ArrayList]::new()
+    foreach ($Device in $DevicesWithUsers) {
         $CurrentPrimaryUserID = $Device.userId
         Write-Output "Processing device $($Device.deviceName) with current primary user ID $($CurrentPrimaryUserID)"
         # Get the top 10 users logged on to the device, this is to limit the amount of data request from graph later
         #$Device.usersLoggedOn.lastLogOnDateTime
-        $TopUsers = $Device.usersLoggedOn | Where-Object {$_.lastLogOnDateTime -gt (Get-Date).AddDays(-30)} | Sort-Object -Property LastLoggedOn -Descending | Select-Object -First 10
-        if($TopUsers.Count -eq 0){
-            Write-Output "No users logged on to device $($Device.deviceName) in the last 30 days, skipping"
+        $TopUsers = $Device.usersLoggedOn | Where-Object { $_.lastLogOnDateTime -gt (Get-Date).AddDays(-30) } | Sort-Object -Property LastLoggedOn -Descending | Select-Object -First 10
+        if ($TopUsers.Count -eq 0) {
+            #Write-Output "No users logged on to device $($Device.deviceName) in the last 30 days, skipping"
             continue
         }
-        if($TopUsers.Count -eq 1){
-            if($TopUsers.userID -eq $CurrentPrimaryUserID){
-                Write-Output "Device $($Device.deviceName) already has the correct primary user assigned: $($Script:EntraUsersLookup[$CurrentPrimaryUserID].displayName) ($CurrentPrimaryUserID)"
+        if ($Device.usersLoggedOn.count -eq 1) {
+            if ($TopUsers.userID -eq $CurrentPrimaryUserID) {
+                #Write-Output "Device $($Device.deviceName) already has the correct primary user assigned: $($Script:EntraUsersLookup[$CurrentPrimaryUserID].displayName) ($CurrentPrimaryUserID)"
                 continue
             }
         }
+
         # Get the sign-in counts for the users logged on to the device
         $UserCounts = @{}
-        $DateCutoff = (Get-Date).AddDays(-30).ToString("yyyy-MM-ddTHH:mm:ssZ") #30 is the maximum that makes sense for primary user calculation, plus the Graph API might time out with longer timeframes
-        foreach($User in $TopUsers){
-            $SignInData = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/$TenantAPIToUse/auditLogs/signIns/?`$filter=userId eq '$($User.userID)' and createdDateTime ge $($DateCutoff) and appDisplayName eq 'Windows Sign In'&?select=deviceDetail"
-            $CountDeviceMatches = ($SignInData.value | Where-Object { $_.deviceDetail.deviceId -eq $Device.azureADDeviceId }).count
+        #$DateCutoff = (Get-Date).AddDays(-30).ToString("yyyy-MM-ddTHH:mm:ssZ") #30 is the maximum that makes sense for primary user calculation, plus the Graph API might time out with longer timeframes
+        foreach ($User in $TopUsers) {
+            #$SignInData = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/$TenantAPIToUse/auditLogs/signIns/?`$filter=userId eq '$($User.userID)' and createdDateTime ge $($DateCutoff) and appDisplayName eq 'Windows Sign In'&?select=deviceDetail"
+            $SignInData = (Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/$TenantAPIToUse/auditLogs/signIns/?`$filter=userId eq '$($User.userID)'&?select=deviceDetail").value.deviceDetail
+            $CountDeviceMatches = ($SignInData | Where-Object { $_.deviceId -eq $Device.azureADDeviceId }).count 
             $UserCounts[$User.userID] = $CountDeviceMatches
+            #Write-Output "User $($User.userID) has $CountDeviceMatches sign-ins on device $($Device.deviceName)"
         }
-        # CONTINUE HERE!
-        $NewPrimaryUser = $UserCounts | Measure-Object -Property Value -Maximum
-        if($NewPrimaryUser.Key -eq $CurrentPrimaryUserID){
-            Write-Output "Device $($Device.deviceName) already has the correct primary user assigned: $($Script:EntraUsersLookup[$CurrentPrimaryUserID].displayName) ($CurrentPrimaryUserID)"
+        #$NewPrimaryUser = $UserCounts | Measure-Object -Property Value -Maximum
+        $NewPrimaryUser = $UserCounts.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 1
+        if ($NewPrimaryUser.Value -eq 0) {
+            #Write-Output "No sign-in data found for the users on device $($Device.deviceName), skipping"
+            continue
+        }
+        if ($NewPrimaryUser.Key -eq $CurrentPrimaryUserID) {
+            #Write-Output "Device $($Device.deviceName) already has the correct primary user assigned: $($Script:EntraUsersLookup[$CurrentPrimaryUserID].displayName) ($CurrentPrimaryUserID)"
             continue
         }
         $CompleteDeviceInformation = [PSCustomObject]@{
-            CurrentPrimaryUser = $null
-            CalculatedPrimaryUser = $null
-            UsersLoggedOn = $Device.usersLoggedOn.userID
+            CurrentPrimaryUser    = $CurrentPrimaryUserID
+            CalculatedPrimaryUser = $NewPrimaryUser.Key
+            DeviceName            = $Device.deviceName
+            DeviceID              = $Device.id
+            UsersLoggedOn         = $Device.usersLoggedOn.userID
         }
-        $CountedUserStats = @{}
-        foreach($User in $Device.usersLoggedOn.userID){
-            if($CountedUserStats.ContainsKey($User)){
-                $CountedUserStats[$User] += 1
-            } else {
-                $CountedUserStats[$User] = 1
-            }
-        }
+        $Script:PrimaryUserResults.Add($CompleteDeviceInformation) | Out-Null
     }
 }
 # Start coding!
 Initialize-Script
 Find-PrimaryUser
+foreach ($Result in $Script:PrimaryUserResults) {
+    Write-Output "Device $($Result.DeviceName) - Current Primary User: $($Script:EntraUsersLookup[$Result.CurrentPrimaryUser].displayName) ($($Result.CurrentPrimaryUser)) -> New Primary User: $($Script:EntraUsersLookup[$Result.CalculatedPrimaryUser].displayName) ($($Result.CalculatedPrimaryUser))"
+    # Prepare the batch request to update the primary user
+    $Body = @{
+        "@odata.id" = "https://graph.microsoft.com/beta/users/$($Result.CalculatedPrimaryUser)"
+    }
+    $JSONBody = $Body | ConvertTo-Json -Depth 10
+    Invoke-BatchRequest -Method POST -URL "/deviceManagement/managedDevices/$($Result.DeviceID)/users/`$ref" -Body $JSONBody
+}
