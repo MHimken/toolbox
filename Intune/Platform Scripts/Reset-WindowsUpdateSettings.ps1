@@ -35,12 +35,14 @@ This will also prevent the deletion of the .pol file which hold the machines pol
 
 .\Reset-WindowsUpdateSettings.ps1 -ResetLocalPolicies:$False -GPupdateTime 120
 .NOTES
-Version: 1.2
+Version: 1.3
 Author: Martin Himken
 Original script name: Reset-WindowsUpdateSettings.ps1
 Initial creation date: 10.03.25
-Last change: 03.09.25
-Change: Added PARAMETER and EXAMPLE description
+Last change: 23.01.26
+Changes:
+* Fix: Microsoft removed the ClientBrokerUpgrader service. Updated the script to handle this change gracefully.
+* Change: Won't log to file by default anymore
 #>
 
 param(
@@ -49,7 +51,9 @@ param(
     [boolean]$ResetLocalPolicies = $true,
     [switch]$BackupDisabled,
     [int]$GPUpdateTimeout = 60,
-    [int]$IntuneSyncTimeout = 60
+    [int]$IntuneSyncTimeout = 60,
+    [boolean]$Log = $false,
+    [switch]$ToConsole
 )
 function Get-ScriptPath {
     <#
@@ -141,7 +145,7 @@ function Write-Log {
         # Type: 1 = Normal, 2 = Warning (yellow), 3 = Error (red)
         [ValidateSet('1', '2', '3')][int]$Type
     )
-    if (-not($NoLog)) {
+    if ($Log) {
         $Time = Get-Date -Format 'HH:mm:ss.ffffff'
         $Date = Get-Date -Format 'MM-dd-yyyy'
         if (-not($Component)) { $Component = 'Runner' }
@@ -294,7 +298,21 @@ function Reset-KnowRWURegistryPaths {
 function Stop-UpdateServices {
     if ($Script:IsAutoPatchDevice) {
         Write-Log 'Attempting to stop the Autopatch service' -Component 'StopUpdateServices'
-        Get-Service ClientBrokerUpgrader | Stop-Service -Force
+        if (Get-Service ClientBrokerUpgrader -ErrorAction SilentlyContinue) {
+            Get-Service ClientBrokerUpgrader | Stop-Service -Force
+        } else {
+            Write-Log 'ClientBrokerUpgrader service not found, skipping stop' -Component 'StopUpdateServices'
+            Write-Log 'The ClientBrokerUpgrader service has been removed in Q4 of 2025 so this is expected' -Component 'StopUpdateServices'
+            Get-ScheduledTask -TaskName "Autopatch*" | ForEach-Object {
+                if ($_.state -ne 'Ready') {
+                    Write-Log 'Waiting for Autopatch scheduled tasks to be ready' -Component 'StartUpdateServices'
+                    Start-Sleep -Seconds 10
+                    if ((Get-ScheduledTask -TaskName $_.taskname).state -eq 'Ready') {
+                        Write-Log "Autopatch scheduled task $($_.taskname) is now ready" -Component 'StartUpdateServices'
+                    }
+                }
+            }
+        }
     }
     Write-Log 'Attempting to stop the Windows Update service' -Component 'StopUpdateServices'
     Get-Service wuauserv | Stop-Service -Force
@@ -305,7 +323,23 @@ function Start-UpdateServices {
     Start-Sleep -Seconds 10
     if ($IsAutoPatchDevice) {
         Write-Log 'Attempting to start the Autopatch service' -Component 'StartUpdateServices'
-        Get-Service ClientBrokerUpgrader | Start-Service
+        if (Get-Service ClientBrokerUpgrader -ErrorAction SilentlyContinue) {
+            Get-Service ClientBrokerUpgrader | Start-Service -ErrorAction Continue
+        } else {
+            Write-Log 'ClientBrokerUpgrader service not found, skipping start' -Component 'StartUpdateServices'
+            Write-Log 'The ClientBrokerUpgrader service has been removed in Q4 of 2025 so this is expected' -Component 'StartUpdateServices'
+            Get-ScheduledTask -TaskName "Autopatch*" | ForEach-Object {
+                if ($_.state -eq 'Running') {
+                    Write-Log "Autopatch scheduled task $($_.taskname) is already running" -Component 'StartUpdateServices'
+                    Start-Sleep -Seconds 10
+                    if ((Get-ScheduledTask -TaskName $_.taskname).state -eq 'Ready') {
+                        Write-Log "Autopatch scheduled task $($_.taskname) is now ready" -Component 'StartUpdateServices'
+                    }
+                } else {
+                    Start-ScheduledTask -TaskPath $_.TaskPath -TaskName $_.TaskName
+                }
+            }
+        }
     }
 }
 

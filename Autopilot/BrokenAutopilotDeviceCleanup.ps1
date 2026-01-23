@@ -469,7 +469,6 @@ function Invoke-BatchRequest {
     if ($Script:BatchRequests.count -eq 20 -or $Finalize) {
         $BatchRequestBody = [PSCustomObject]@{ requests = $Script:BatchRequests }
         $JSONRequests = $BatchRequestBody | ConvertTo-Json -Depth 10
-        #$Results = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com$TenantAPIToUse/`$batch" -Body $JSONRequests -ContentType 'application/json' -ErrorAction Stop
         $PrepareJob = [PSCustomObject]@{
             ID                = $Script:BatchRequestsQueue.Count
             Name              = "BatchRequest-$($Script:BatchRequestsQueue.Count)"
@@ -478,7 +477,7 @@ function Invoke-BatchRequest {
         $Script:BatchRequestsQueue.Add($PrepareJob) | Out-Null
         $Script:BatchRequests = [System.Collections.ArrayList]::new()
     }
-    return #$Results
+    return
 }
 function Submit-BatchRequests {
     <#
