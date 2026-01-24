@@ -39,10 +39,8 @@ Version: 1.3
 Author: Martin Himken
 Original script name: Reset-WindowsUpdateSettings.ps1
 Initial creation date: 10.03.25
-Last change: 23.01.26
-Changes:
-* Fix: Microsoft removed the ClientBrokerUpgrader service. Updated the script to handle this change gracefully.
-* Change: Won't log to file by default anymore
+Last change: 24.01.26
+Changes: see changelog.md
 #>
 
 param(
@@ -242,10 +240,12 @@ function Restart-IMEService {
 function Start-IMESync {
     Write-Log "Starting IME sync and waiting $IntuneSyncTimeout seconds" -Component 'StartSync'
     $Shell = New-Object -ComObject Shell.Application
+    # Trigger IME sync
     $Shell.open("intunemanagementextension://syncapp")
+    # Force DeviceEnroller to re-apply CSPs - for some reason this only works with the MMPC enrollment GUID, not the Intune Enrollment GUID
     $GUIDs = (Get-ChildItem HKLM:\SOFTWARE\Microsoft\Provisioning\OMADM\Accounts\ -Depth 0).PSChildName
     foreach ($GUID in $GUIDs) {
-        $IsIntuneGUID = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Enrollments\$GUID" -Name AADResourceID) -eq "https://manage.microsoft.com/"
+        $IsIntuneGUID = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Enrollments\$GUID" -Name AADResourceID) -eq "https://checkin.dm.microsoft.com"
         if ($IsIntuneGUID) {
             $DeviceEnrollerPath = "C:\Windows\System32\DeviceEnroller.exe"
             $DeviceEnrollerArgs = "/o $GUID /c /b"
