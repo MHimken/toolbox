@@ -1,0 +1,30 @@
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">
+  <Obj RefId="0">
+    <TN RefId="0">
+      <T>System.Collections.Hashtable</T>
+      <T>System.Object</T>
+    </TN>
+    <DCT>
+      <En>
+        <S N="Key">TenantID</S>
+        <S N="Value">902194e2-17cd-44f2-aac2-3a4ff4a5c99f</S>
+      </En>
+      <En>
+        <S N="Key">ClientID</S>
+        <S N="Value">18d73d8f-3ee3-4d9f-adad-71ac7abb9ec6</S>
+      </En>
+      <En>
+        <S N="Key">Method</S>
+        <S N="Value">Certificate</S>
+      </En>
+      <En>
+        <S N="Key">CertificateThumbprint</S>
+        <S N="Value">eedb77352ee48d0cbff058fe503452d816784081</S>
+      </En>
+      <En>
+        <S N="Key">Environment</S>
+        <S N="Value">Global</S>
+      </En>
+    </DCT>
+  </Obj>
+</Objs>

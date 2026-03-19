@@ -1,7 +1,9 @@
-# THIS SCRIPT IS NOT DONE!
 #Requires -Module Microsoft.Graph.Authentication
 #Requires -Version 7.0
 <#
+THIS SCRIPT IS NOT DONE!
+RUNBOOK WILL RUN OUT OF MEMORY FOR MORE THAN A COUPLE THOUSAND USERS! Test this before you do something with it.
+IT'S ALREADY ON THE TODO!
 .SYNOPSIS
     Repair Primary User assignment for Intune managed devices based on sign-in data.
 .DESCRIPTION
@@ -14,13 +16,16 @@
     Version: 1.0
     Versionname: Repair-PrimaryUserRunbook.ps1
     Intial creation date: 07.12.2025
-    Last change date: 13.01.2026
+    Last change date: 20.03.2026
     Latest changes: Initial Version
     Author: Martin Himken
+    ToDos:
+        - Cleanup code
+        - Split requesting sign-in logs into smaller chunks of a handful of days to avoid memory issues in large environments
 #>
 param(
     [string]$TenantAPIToUse = "beta",
-    [int]$ThrottleLimit = 40
+    [int]$ThrottleLimit = 5
 )
 # Stop editing here
 # Connect to Microsoft Graph using the Azure Automation Run As Account
@@ -107,7 +112,7 @@ function Submit-BatchRequests {
     $Script:BatchRequestsQueue | ForEach-Object -AsJob -ThrottleLimit $ThrottleLimit -Parallel {
         $TenantAPIToUse = if (-not($TenantAPIToUse)) { 'beta' }
         $URI = "https://graph.microsoft.com/$TenantAPIToUse/`$batch"
-        Invoke-MgGraphRequest -Method POST -Uri $URI -Body $ArgumentToProvide -ContentType 'application/json' -ErrorAction Stop
+        Invoke-MgGraphRequest -Method POST -Uri $URI -Body $_.ArgumentToProvide -ContentType 'application/json' -ErrorAction Stop
     }
 }
 function Get-nextLinkData {
@@ -127,6 +132,7 @@ function Get-nextLinkData {
         $Results.value += $Request.value
         $Results.'@odata.count' += $Request.'@odata.count'
         $nextLink = $Request.'@odata.nextLink'
+        Start-Sleep -Milliseconds 500 # Add a short delay to avoid hitting throttling limits
     }
     $Results.'@odata.nextLink' = $null
     return $Results
@@ -157,28 +163,31 @@ function Initialize-Script {
     $Script:SignInDataGrouped = $Script:SignInData.value | group-object -Property userId -AsHashTable
     $Script:DeviceTransformLookup = @{}
     foreach ($SignIn in $Script:SignInData.value) {
-        $DeviceIDs = $SignIn.deviceDetail.deviceId
+        $DeviceID = $SignIn.deviceDetail.deviceId
         $UserDisplayName = $SignIn.userDisplayName
-        foreach ($DeviceID in $DeviceIDs) {
-            $ExistingCustomObjects = [System.Collections.ArrayList]::new()
-            if (-not $Script:DeviceTransformLookup.ContainsKey($DeviceID)) {
-                $Script:DeviceTransformLookup[$DeviceID] = @()
-                $Counter = 1
-            } else {
-                if ($Script:DeviceTransformLookup[$DeviceID] | Where-Object { $_.userId -eq $SignIn.userId }) {
-                    $Counter = ($Script:DeviceTransformLookup[$DeviceID] | Where-Object { $_.userId -eq $SignIn.userId }).counter + 1
-                }
-                $ExistingCustomObjects.AddRange($Script:DeviceTransformLookup[$DeviceID])
+        if (-not $Script:DeviceTransformLookup.ContainsKey($DeviceID)) {
+            $CustomObject = [PSCustomObject]@{
+                UserName = $UserDisplayName
+                userId   = $SignIn.userId
+                count    = 1
             }
+            $Script:DeviceTransformLookup[$DeviceID] = @($CustomObject)
+        } else {
+            if ($Script:DeviceTransformLookup[$DeviceID] | Where-Object { $_.userId -eq $SignIn.userId }) {
+                $ExistingObject = $Script:DeviceTransformLookup[$DeviceID] | Where-Object { $_.userId -eq $SignIn.userId }
+                $ExistingObject.count++
+                continue
+            }
+            $CustomObject = [PSCustomObject]@{
+                UserName = $UserDisplayName
+                userId   = $SignIn.userId
+                count    = 1
+            }
+            $Script:DeviceTransformLookup[$DeviceID] += $CustomObject
         }
-        $CustomObject = [PSCustomObject]@{
-            UserName = $UserDisplayName
-            userId   = $SignIn.userId
-            count    = $Counter
-        }
-        #$ExistingCustomObjects.Add($CustomObject)
-        $Script:DeviceTransformLookup[$DeviceID].ExistingCustomObjects.add($CustomObject)
     }
+    # Sort DeviceTransformLookup so that the user with the most sign-ins for each device is first in the list
+    $Script:DeviceTransformLookup[$DeviceID] = $Script:DeviceTransformLookup[$DeviceID] | Sort-Object -Property count -Descending
 
     $Script:EntraUsersLookup = @{}
     foreach ($User in $Script:EntraUsers.value) {
@@ -188,83 +197,64 @@ function Initialize-Script {
     foreach ($Device in $Script:IntuneDevices.value) {
         $Script:IntuneDevicesLookup[$Device.id.ToString()] = $Device
     }
+    if ((Get-MgContext).AuthType -ne "accessToken") {
+        $Script:Output = [System.Collections.ArrayList]::new()
+        $Script:Runbook = $true
+    }
     $Script:BatchRequests = [System.Collections.ArrayList]::new()
     $Script:BatchRequestsQueue = [System.Collections.ArrayList]::new()
 }
 function Find-PrimaryUser {
     $DevicesWithUsers = $Script:IntuneDevices.value | Where-Object { $_.usersLoggedOn.Count -gt 0 }
     foreach ($Device in $DevicesWithUsers) {
-        $CurrentPrimaryUserID = $Device.userId
-        $TopUsers = $Device.usersLoggedOn | Where-Object { $_.lastLogOnDateTime -gt (Get-Date).AddDays(-30) } | Sort-Object -Property LastLoggedOn -Descending | Select-Object -First 10
-        if ($TopUsers.Count -eq 0) {
+        if ($Script:DeviceTransformLookup[$Device.azureADDeviceId]) {
+            $TopUser = $Script:DeviceTransformLookup[$Device.azureADDeviceId][0]
+            $SecondUser = if ($Script:DeviceTransformLookup[$Device.azureADDeviceId].Count -gt 1) { $Script:DeviceTransformLookup[$Device.azureADDeviceId][1] } else { $null }
+            if ($SecondUser -and $TopUser.count -eq $SecondUser.count) {
+                #Select a user at random if there is a tie in sign-in counts
+                $RandomIndex = Get-Random -Minimum 0 -Maximum 2
+                $TopUser = $Script:DeviceTransformLookup[$Device.azureADDeviceId][$RandomIndex] 
+            }
+        } else {
+            Write-Output "No sign-in data for device $($Device.deviceName) ($($Device.id)) - skipping primary user calculation"
             continue
         }
-        if ($Device.usersLoggedOn.count -eq 1) {
-            if ($TopUsers.userID -eq $CurrentPrimaryUserID) {
-                continue
+        $CurrentPrimaryUser = $Device.userId
+        $CalculatedPrimaryUser = $TopUser.userId
+        if ($CurrentPrimaryUser -ne $CalculatedPrimaryUser) {
+            $Method = "POST"
+            $Headers = @{
+                'Content-Type' = 'application/json'
             }
-        }
-        # Get the sign-in counts for the users logged on to the device
-        $UserCounts = @{}
-        foreach ($User in $TopUsers) {
-            $DeviceUserSignIns = $Script:DeviceTransformLookup[$Device.azureADDeviceId]
-            if ($DeviceUserSignIns) {
-                $CountDeviceMatches = ($DeviceUserSignIns | Where-Object { $_.userId -eq $User.userID }).count 
-            } else {
-                $CountDeviceMatches = 0
+            $Body = @{
+                '@odata.id' = "https://graph.microsoft.com/beta/users/$CalculatedPrimaryUser/"
             }
-            $UserCounts[$User.userID] = $CountDeviceMatches
-        }     
+            if ($Script:Runbook) {
+                Write-Output "Device $($Device.deviceName) - Current Primary User: $($Script:EntraUsersLookup[$CurrentPrimaryUser].displayName) ($($CurrentPrimaryUser)) -> New Primary User: $($Script:EntraUsersLookup[$CalculatedPrimaryUser].displayName) ($($CalculatedPrimaryUser))"
+            }
+            else{
+                $OutputObject = [PSCustomObject]@{
+                    DeviceName           = $Device.deviceName
+                    DeviceID             = $Device.id
+                    CurrentPrimaryUser   = $CurrentPrimaryUser
+                    UserNameCurrentPrimaryUser = $Script:EntraUsersLookup[$CurrentPrimaryUser].displayName
+                    CalculatedPrimaryUser = $CalculatedPrimaryUser
+                    UserNameCalculatedPrimaryUser = $Script:EntraUsersLookup[$CalculatedPrimaryUser].displayName
+                }
+                $Script:Output.Add($OutputObject) | Out-Null
+            }
+            Invoke-BatchRequest -Method $Method -URL "/deviceManagement/managedDevices/$($Device.id)/users/`$ref" -Headers $Headers -Body $Body
+            
+        } else {
+            #Write-Output "Device $($Device.deviceName) - Current Primary User is correct ($($Script:EntraUsersLookup[$CurrentPrimaryUser].displayName) ($($CurrentPrimaryUser))) - no update needed"
+        }   
     }
-    <#| ForEach-Object -AsJob -ThrottleLimit $ThrottleLimit -Parallel {
-        $AllEntraUsers = $using:EntraUsersLookup
-        $Device = $_
-        $CurrentPrimaryUserID = $Device.userId
-        $TopUsers = $Device.usersLoggedOn | Where-Object { $_.lastLogOnDateTime -gt (Get-Date).AddDays(-30) } | Sort-Object -Property LastLoggedOn -Descending | Select-Object -First 10
-        if ($TopUsers.Count -eq 0) {
-            #$SkipReason = "No users with sign-ins in the last 30 days"
-            continue
-        }
-        if ($Device.usersLoggedOn.count -eq 1) {
-            if ($TopUsers.userID -eq $CurrentPrimaryUserID) {
-                #$SkipReason = "Only one user logged on, and it's the current primary user"
-                continue
-            }
-        }
-        if (-not $SkipReason) {
-            # Get the sign-in counts for the users logged on to the device
-            $UserCounts = @{}
-            foreach ($User in $TopUsers) {
-                $CountDeviceMatches = ($SignInData | Where-Object { $_.deviceId -eq $Device.azureADDeviceId }).count 
-                $UserCounts[$User.userID] = $CountDeviceMatches
-                #Write-Output "User $($User.userID) has $CountDeviceMatches sign-ins on device $($Device.deviceName)"
-            }
-            #$NewPrimaryUser = $UserCounts | Measure-Object -Property Value -Maximum
-            $NewPrimaryUser = $UserCounts.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 1
-            if ($NewPrimaryUser.Value -eq 0) {
-                #$SkipReason = "No sign-ins found for any user on this device"
-                continue
-            }
-            if ($NewPrimaryUser.Key -eq $CurrentPrimaryUserID) {
-                #$SkipReason = "Calculated primary user is the same as the current primary user"
-                continue
-            }
-            $CompleteDeviceInformation = [PSCustomObject]@{
-                DeviceName                = $Device.deviceName
-                CurrentPrimaryUser        = $CurrentPrimaryUserID
-                CurrentPrimaryUserName    = $AllEntraUsers[$CurrentPrimaryUserID].displayName
-                CalculatedPrimaryUser     = $NewPrimaryUser.Key
-                CalculatedPrimaryUserName = $AllEntraUsers[$NewPrimaryUser.Key].displayName
-                DeviceID                  = $Device.id
-                #SkipReason                = $SkipReason
-            }
-            $CompleteDeviceInformation
-        }
-   }   #>
+    Invoke-BatchRequest -Finalize
 }
 # Start coding!
 Initialize-Script
 Find-PrimaryUser
+<#
 $JobStatus = (Get-Job -IncludeChildJob -State Running).count -gt 0
 while ($JobStatus) {
     Start-Sleep -Seconds 60
@@ -288,6 +278,7 @@ foreach ($Result in $JobOutputs) {
         Invoke-BatchRequest -Finalize
     }
 }
+#>
 # Get-Job | Remove-Job -Force # Uncomment to clean up jobs - we might want to keep RAM costs low in Azure Automation
-Write-Output "Prepared $counter batch requests to update primary users."
+Write-Output "Prepared $($Script:BatchRequestsQueue.Count) batches (20 each) requests to update primary users."
 Submit-BatchRequests
