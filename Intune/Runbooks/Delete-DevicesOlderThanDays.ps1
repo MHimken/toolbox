@@ -31,6 +31,7 @@ param (
     [switch]$ExportToCSV,
     [ValidateSet("Windows", "iOS", "Android", "macOS")]
     [string]$OSType, #this limits the script to only one target instead of all.
+    [string]$GroupIDToIgnore,
     [System.IO.DirectoryInfo]$FilePath = "C:\Temp\",
     [int]$ThrottleLimit = 5,
     [string]$TenantAPIToUse = 'beta'
@@ -50,6 +51,7 @@ if (-not(Get-MGContext)) {
         Exit 1
     }
     $requiredScopes = @(
+        "GroupMember.Read.All",
         "Device.ReadWrite.All",
         "BitlockerKey.Read.All",
         "DeviceLocalCredential.Read.All"
@@ -100,8 +102,21 @@ function Initialize-Script {
         Write-Output "Found more than 1000 Entra devices, retrieving next link data"
         $Script:AllEntraDevices = Get-nextLinkData -OriginalObject $Script:AllEntraDevices
     }
-    #Filter out Servers by OS Version
-    
+    #Filter out Servers by using GroupIDToIgnore if specified. This is to avoid accidentally deleting devices that are still in use but haven't signed in recently.
+    if ($GroupIDToIgnore) {
+        Write-Output "Filtering out devices that are members of group ID: $GroupIDToIgnore"
+        $DevicesToIgnore = Invoke-MgGraphRequest -Uri "$Script:GraphAPIBaseURL/groups/$GroupIDToIgnore/members?`$select=id" -ErrorAction Stop
+        if ($DevicesToIgnore.'@odata.nextLink') {
+            Write-Output "Found more than 1000 devices in the group to ignore, retrieving next link data"
+            $DevicesToIgnore = Get-nextLinkData -OriginalObject $DevicesToIgnore
+        }
+    }
+    # Remove filtered devices from the list of devices to process
+    if ($GroupIDToIgnore) {
+        $DevicesToIgnoreIDs = $DevicesToIgnore.value | ForEach-Object { $_.id }
+        $Script:AllEntraDevices.value = $Script:AllEntraDevices.value | Where-Object { -not ($DevicesToIgnoreIDs -contains $_.id) }
+        Write-Output "After filtering, $($Script:AllEntraDevices.value.Count) devices remain for analysis."
+    }
     $Script:AllEntraDevicesHashTable = @{}
     foreach ($Device in $Script:AllEntraDevices.value) {
         $Script:AllEntraDevicesHashTable[$Device.deviceId] = $Device
@@ -180,6 +195,7 @@ function Submit-BatchRequests {
     .SYNOPSIS
         Processes the batch requests in the queue.
     #>
+    <#
     foreach ($BatchRequest in $Script:BatchRequestsQueue) {
         $Script:BatchJobs = Start-ThreadJob -Name "RemoveEntraDevice-$($BatchRequest.Name)" -ThrottleLimit $ThrottleLimit -ScriptBlock {
             param($ArgumentToProvide, $TenantAPIToUse)
@@ -188,6 +204,12 @@ function Submit-BatchRequests {
             Invoke-MgGraphRequest -Method POST -Uri $URI -Body $ArgumentToProvide -ContentType 'application/json' -ErrorAction Stop
         } -ArgumentList @($BatchRequest.ArgumentToProvide, $TenantAPIToUse)
         Start-Sleep -Milliseconds (Get-Random -Minimum 1000 -Maximum 5000) # Random delay to avoid throttling
+    }
+#>
+    $Script:BatchRequestsQueue | ForEach-Object -AsJob -ThrottleLimit $ThrottleLimit -Parallel {
+        $TenantAPIToUse = if (-not($TenantAPIToUse)) { 'beta' }
+        $URI = "https://graph.microsoft.com/$TenantAPIToUse/`$batch"
+        Invoke-MgGraphRequest -Method POST -Uri $URI -Body $_.ArgumentToProvide -ContentType 'application/json' -ErrorAction Stop
     }
     Write-Output "Batch requests submitted."
 }
@@ -198,7 +220,7 @@ function Remove-EntraDevice {
     $ObjectID = $Script:AllEntraDevicesHashTable[$ID].id
     $Method = 'DELETE'
     $URL = "/devices/$ObjectID"
-    $Headers = @{
+        $Headers = @{
         'Content-Type' = 'application/json'
     }
     Invoke-BatchRequest -Method $Method -URL $URL -Headers $Headers
@@ -243,7 +265,7 @@ function Backup-BitlockerKey {
     }
     #Get the BitLocker recovery passwords for all recovery ids found
     $Script:BitLockerHashtable = @{}
-    foreach($RecoveryKeyID in $Script:AllRecoveryKeys.value){
+    foreach ($RecoveryKeyID in $Script:AllRecoveryKeys.value) {
         $RecoveryPassword = Invoke-MgGraphRequest -Method GET -Uri "$($Script:GraphAPIBaseURL)/informationProtection/bitlocker/recoveryKeys/$($RecoveryKeyID.id)/?`$select=key"
         $KeyObject = @{
             key = $RecoveryPassword.key
@@ -289,8 +311,8 @@ function Find-DevicesToRemove {
                 accountEnabled                = $Device.accountEnabled
                 ReasonToDelete                = $DeletionReason -join ", "
                 LAPSPasswords                 = (Get-LAPSKeys -DeviceID $Device.deviceId) -join "`n"
-                BitlockerKeys                 = if($Device.operatingSystem -eq "Windows") { ($Script:BitLockerHashtable[$Device.deviceId] | ForEach-Object { $_.key }) -join "`n" } else { "N/A" }
-                BitLockerKeyIDs               = if($Device.operatingSystem -eq "Windows") { ($Script:BitLockerHashtable[$Device.deviceId] | ForEach-Object { $_.id }) -join "`n" } else { "N/A" }
+                BitlockerKeys                 = if ($Device.operatingSystem -eq "Windows") { ($Script:BitLockerHashtable[$Device.deviceId] | ForEach-Object { $_.key }) -join "`n" } else { "N/A" }
+                BitLockerKeyIDs               = if ($Device.operatingSystem -eq "Windows") { ($Script:BitLockerHashtable[$Device.deviceId] | ForEach-Object { $_.id }) -join "`n" } else { "N/A" }
             }
             $Script:AllEntraDevicesToRemove.add($DeviceToRemove) | Out-Null
         }
@@ -301,7 +323,7 @@ function Find-DevicesToRemove {
 Initialize-Script
 
 Write-Output "Finding devices older than $DaysOld days for removal."
-if($OSType -eq "Windows" -or $Script:AllEntraDevices.value.operatingSystem -contains "Windows"){
+if ($OSType -eq "Windows" -or $Script:AllEntraDevices.value.operatingSystem -contains "Windows") {
     Write-Output "Targeting only Windows devices for removal."
     Backup-BitlockerKey
 } else {

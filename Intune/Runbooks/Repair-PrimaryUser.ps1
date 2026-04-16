@@ -25,7 +25,8 @@ IT'S ALREADY ON THE TODO!
 #>
 param(
     [string]$TenantAPIToUse = "beta",
-    [int]$ThrottleLimit = 5
+    [int]$ThrottleLimit = 5,
+    [int]$DaysToLookBack = 28 # make this divisible by 7 for better performance when retrieving sign-in data in weekly chunks
 )
 # Stop editing here
 # Connect to Microsoft Graph using the Azure Automation Run As Account
@@ -128,6 +129,7 @@ function Get-nextLinkData {
     $nextLink = $OriginalObject.'@odata.nextLink'
     $Results = $OriginalObject
     while ($nextLink) {
+        Write-Output "Retrieving next page of data from $nextLink"
         $Request = Invoke-MgGraphRequest -Uri $nextLink
         $Results.value += $Request.value
         $Results.'@odata.count' += $Request.'@odata.count'
@@ -151,44 +153,6 @@ function Initialize-Script {
         Write-Output "Getting next link for Intune devices"
         $Script:IntuneDevices = Get-nextLinkData -OriginalObject $Script:IntuneDevices
     }
-    
-    $DateCutoff = (Get-Date).AddDays(-30).ToString("yyyy-MM-ddTHH:mm:ssZ") #30 is the maximum that makes sense for primary user calculation, plus the Graph API might time out with longer timeframes
-    $DateCurrent = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssZ") 
-    $Script:SignInData = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/auditLogs/signIns/?`$filter=createdDateTime ge $DateCutoff and createdDateTime le $DateCurrent and appDisplayName eq 'Windows Sign In'&?select=userDisplayName,userId,deviceDetail"
-    if ($Script:SignInData.'@odata.nextLink') {
-        Write-Output "Getting next link for Sign-In data - this will take a while..."
-        $Script:SignInData = Get-nextLinkData -OriginalObject $Script:SignInData
-    }
-    $Script:SignInDataLookup = @{}
-    $Script:SignInDataGrouped = $Script:SignInData.value | group-object -Property userId -AsHashTable
-    $Script:DeviceTransformLookup = @{}
-    foreach ($SignIn in $Script:SignInData.value) {
-        $DeviceID = $SignIn.deviceDetail.deviceId
-        $UserDisplayName = $SignIn.userDisplayName
-        if (-not $Script:DeviceTransformLookup.ContainsKey($DeviceID)) {
-            $CustomObject = [PSCustomObject]@{
-                UserName = $UserDisplayName
-                userId   = $SignIn.userId
-                count    = 1
-            }
-            $Script:DeviceTransformLookup[$DeviceID] = @($CustomObject)
-        } else {
-            if ($Script:DeviceTransformLookup[$DeviceID] | Where-Object { $_.userId -eq $SignIn.userId }) {
-                $ExistingObject = $Script:DeviceTransformLookup[$DeviceID] | Where-Object { $_.userId -eq $SignIn.userId }
-                $ExistingObject.count++
-                continue
-            }
-            $CustomObject = [PSCustomObject]@{
-                UserName = $UserDisplayName
-                userId   = $SignIn.userId
-                count    = 1
-            }
-            $Script:DeviceTransformLookup[$DeviceID] += $CustomObject
-        }
-    }
-    # Sort DeviceTransformLookup so that the user with the most sign-ins for each device is first in the list
-    $Script:DeviceTransformLookup[$DeviceID] = $Script:DeviceTransformLookup[$DeviceID] | Sort-Object -Property count -Descending
-
     $Script:EntraUsersLookup = @{}
     foreach ($User in $Script:EntraUsers.value) {
         $Script:EntraUsersLookup[$User.id.ToString()] = $User
@@ -204,6 +168,72 @@ function Initialize-Script {
     $Script:BatchRequests = [System.Collections.ArrayList]::new()
     $Script:BatchRequestsQueue = [System.Collections.ArrayList]::new()
 }
+function Get-SignInData {
+    <#
+    .SYNOPSIS
+        Retrieves sign-in data from Microsoft Graph API for the specified time range and application filter.
+    .DESCRIPTION
+        This function retrieves sign-in data for Windows Sign In events. Due to resource constraints in Azure Automation, the function can be configured to retrieve a limited number of pages of sign-in data. The retrieved data is then processed to create a lookup for device sign-ins and user activity.
+    .PARAMETER NumberOfPagesToRetrieve
+        Specifies the number of pages of sign-in data to retrieve. Each page contains a set number of records as defined by the Graph API. Setting this parameter can help manage memory usage in environments with a large number of sign-in events.
+    .NOTES
+    Todos:
+        - Test
+    #>
+
+    param(
+        [int]$NumberOfDaysToLookBack = 28
+    )
+    $Script:SignInDataLookup = @{}
+    $Script:DeviceTransformLookup = @{}
+    if (-not($Script:NumberOfRunsRequired) -and $NumberOfDaysToLookBack -gt 4) {
+        $Script:NumberOfRunsRequired = $NumberOfDaysToLookBack / 4
+        Write-output "Number of runs required to retrieve sign-in data in 7-day chunks: $($Script:NumberOfRunsRequired)"
+    }
+    for ($i = 0; $i -lt $Script:NumberOfRunsRequired; $i++) {
+        $DateCutoff = (Get-Date).AddDays( - ($DaysToLookBack - ($i * 7))).ToString("yyyy-MM-ddTHH:mm:ssZ")
+        $DateCurrent = (Get-Date).AddDays( - ($DaysToLookBack - (($i + 1) * 7))).ToString("yyyy-MM-ddTHH:mm:ssZ")
+        Write-Output "Retrieving sign-in data from $DateCutoff to $DateCurrent"
+        $Script:SignInData = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/auditLogs/signIns/?`$filter=createdDateTime ge $DateCutoff and createdDateTime le $DateCurrent and appDisplayName eq 'Windows Sign In'&?select=userDisplayName,userId,deviceDetail"
+        # Show amount of pages estimated to retrieve based on '@odata.count' and amount of records per page
+        $RecordsPerPage = 100 # Graph API default page size
+        $TotalRecords = $Script:SignInData.'@odata.count'
+        $EstimatedPages = [math]::Ceiling($TotalRecords / $RecordsPerPage)
+        Write-Output "Estimated pages to retrieve: $EstimatedPages"
+        if ($Script:SignInData.'@odata.nextLink') {
+            Write-Output "Getting next link for Sign-In data - this will take a while. Run $($i + 1) of $($Script:NumberOfRunsRequired)"
+            $Script:SignInData = Get-nextLinkData -OriginalObject $Script:SignInData
+        }
+        $Script:SignInDataGrouped = $Script:SignInData.value | Group-Object -Property userId -AsHashTable
+        foreach ($SignIn in $Script:SignInData.value) {
+            $DeviceID = $SignIn.deviceDetail.deviceId
+            $UserDisplayName = $SignIn.userDisplayName
+            if (-not $Script:DeviceTransformLookup.ContainsKey($DeviceID)) {
+                $CustomObject = [PSCustomObject]@{
+                    UserName = $UserDisplayName
+                    userId   = $SignIn.userId
+                    count    = 1
+                }
+                $Script:DeviceTransformLookup[$DeviceID] = @($CustomObject)
+            } else {
+                if ($Script:DeviceTransformLookup[$DeviceID] | Where-Object { $_.userId -eq $SignIn.userId }) {
+                    $ExistingObject = $Script:DeviceTransformLookup[$DeviceID] | Where-Object { $_.userId -eq $SignIn.userId }
+                    $ExistingObject.count++
+                    continue
+                }
+                $CustomObject = [PSCustomObject]@{
+                    UserName = $UserDisplayName
+                    userId   = $SignIn.userId
+                    count    = 1
+                }
+                $Script:DeviceTransformLookup[$DeviceID] += $CustomObject
+            }
+        }
+        # Sort DeviceTransformLookup so that the user with the most sign-ins for each device is first in the list
+        $Script:DeviceTransformLookup[$DeviceID] = $Script:DeviceTransformLookup[$DeviceID] | Sort-Object -Property count -Descending
+        Clear-Variable -Name SignInData, SignInDataGrouped -Force
+    }
+}
 function Find-PrimaryUser {
     $DevicesWithUsers = $Script:IntuneDevices.value | Where-Object { $_.usersLoggedOn.Count -gt 0 }
     foreach ($Device in $DevicesWithUsers) {
@@ -216,7 +246,7 @@ function Find-PrimaryUser {
                 $TopUser = $Script:DeviceTransformLookup[$Device.azureADDeviceId][$RandomIndex] 
             }
         } else {
-            Write-Output "No sign-in data for device $($Device.deviceName) ($($Device.id)) - skipping primary user calculation"
+            #Write-Output "No sign-in data for device $($Device.deviceName) ($($Device.id)) - skipping primary user calculation"
             continue
         }
         $CurrentPrimaryUser = $Device.userId
@@ -231,14 +261,13 @@ function Find-PrimaryUser {
             }
             if ($Script:Runbook) {
                 Write-Output "Device $($Device.deviceName) - Current Primary User: $($Script:EntraUsersLookup[$CurrentPrimaryUser].displayName) ($($CurrentPrimaryUser)) -> New Primary User: $($Script:EntraUsersLookup[$CalculatedPrimaryUser].displayName) ($($CalculatedPrimaryUser))"
-            }
-            else{
+            } else {
                 $OutputObject = [PSCustomObject]@{
-                    DeviceName           = $Device.deviceName
-                    DeviceID             = $Device.id
-                    CurrentPrimaryUser   = $CurrentPrimaryUser
-                    UserNameCurrentPrimaryUser = $Script:EntraUsersLookup[$CurrentPrimaryUser].displayName
-                    CalculatedPrimaryUser = $CalculatedPrimaryUser
+                    DeviceName                    = $Device.deviceName
+                    DeviceID                      = $Device.id
+                    CurrentPrimaryUser            = $CurrentPrimaryUser
+                    UserNameCurrentPrimaryUser    = $Script:EntraUsersLookup[$CurrentPrimaryUser].displayName
+                    CalculatedPrimaryUser         = $CalculatedPrimaryUser
                     UserNameCalculatedPrimaryUser = $Script:EntraUsersLookup[$CalculatedPrimaryUser].displayName
                 }
                 $Script:Output.Add($OutputObject) | Out-Null
@@ -253,8 +282,11 @@ function Find-PrimaryUser {
 }
 # Start coding!
 Initialize-Script
+Get-SignInData -NumberOfDaysToLookBack $DaysToLookBack
 Find-PrimaryUser
-<#
+
+Write-Output "Prepared $($Script:BatchRequestsQueue.Count) batches (20 each) requests to update primary users."
+Submit-BatchRequests
 $JobStatus = (Get-Job -IncludeChildJob -State Running).count -gt 0
 while ($JobStatus) {
     Start-Sleep -Seconds 60
@@ -278,7 +310,4 @@ foreach ($Result in $JobOutputs) {
         Invoke-BatchRequest -Finalize
     }
 }
-#>
-# Get-Job | Remove-Job -Force # Uncomment to clean up jobs - we might want to keep RAM costs low in Azure Automation
-Write-Output "Prepared $($Script:BatchRequestsQueue.Count) batches (20 each) requests to update primary users."
-Submit-BatchRequests
+Get-Job | Remove-Job -Force # Uncomment to clean up jobs - we might want to keep RAM costs low in Azure Automation
