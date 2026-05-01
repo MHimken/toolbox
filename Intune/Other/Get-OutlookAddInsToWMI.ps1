@@ -45,7 +45,7 @@ $OfficeAddInsTargets  = @(
     [PSCustomObject]@{ Product = 'Visio';     SubPath = 'Software\Microsoft\Office\Visio\Addins' }
 )
 
-#region ── WMI helpers ──────────────────────────────────────────────────────────
+#region -- WMI helpers -------------------------------------------------------------------
 
 function Initialize-WMIClass {
     <#
@@ -116,7 +116,7 @@ function Write-WMIInstance {
 
 #endregion
 
-#region ── Registry helpers ─────────────────────────────────────────────────────
+#region -- Registry helpers -------------------------------------------------------------------
 
 function Get-AllUserProfiles {
     <#
@@ -185,7 +185,7 @@ function Resolve-SIDToUsername {
 
 #endregion
 
-#region ── Main ─────────────────────────────────────────────────────────────────
+#region -- Main -------------------------------------------------------------------
 
 Write-Host "Initializing WMI class '$WMIClassName'..." -ForegroundColor Cyan
 Initialize-WMIClass -Namespace $WMINamespace -ClassName $WMIClassName

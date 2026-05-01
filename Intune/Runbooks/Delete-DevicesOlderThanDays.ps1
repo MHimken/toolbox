@@ -20,7 +20,7 @@
     Version: 1.0
     Versionname: Delete-DevicesOlderThanDays
     Initial creation date: 20.03.2026
-    Last change date: 20.03.2026
+    Last change date: 16.04.2026
     Latest changes: Initial Version
     ToDo:
         - Cleanup
@@ -31,7 +31,7 @@ param (
     [switch]$ExportToCSV,
     [ValidateSet("Windows", "iOS", "Android", "macOS")]
     [string]$OSType, #this limits the script to only one target instead of all.
-    [string]$GroupIDToIgnore,
+    [string]$GroupIDToIgnore = "",
     [System.IO.DirectoryInfo]$FilePath = "C:\Temp\",
     [int]$ThrottleLimit = 5,
     [string]$TenantAPIToUse = 'beta'
@@ -177,13 +177,13 @@ function Invoke-BatchRequest {
     if ($Method -and $URL) {
         Add-BatchRequestObjectToQueue -Method $method -URL $URL -Headers $Headers -Body $Body
     }
-    if ($Script:BatchRequests.count -eq 20 -or $Finalize) {
+    if ($Script:BatchRequests.count -eq 20 -or ($Finalize -and $Script:BatchRequests.count -gt 0)) {
         $BatchRequestBody = [PSCustomObject]@{ requests = $Script:BatchRequests }
         $JSONRequests = $BatchRequestBody | ConvertTo-Json -Depth 10
         $PrepareJob = [PSCustomObject]@{
             ID                = $Script:BatchRequestsQueue.Count
             Name              = "BatchRequest-$($Script:BatchRequestsQueue.Count)"
-            ArgumentToProvide = @($JSONRequests)
+            ArgumentToProvide = $JSONRequests
         }
         $Script:BatchRequestsQueue.Add($PrepareJob) | Out-Null
         $Script:BatchRequests = [System.Collections.ArrayList]::new()
@@ -195,23 +195,37 @@ function Submit-BatchRequests {
     .SYNOPSIS
         Processes the batch requests in the queue.
     #>
-    <#
+    if (-not $Script:BatchRequestsQueue -or $Script:BatchRequestsQueue.Count -eq 0) {
+        Write-Output "No batch requests to submit."
+        return
+    }
+
+    $TenantApiVersion = if ([string]::IsNullOrWhiteSpace($TenantAPIToUse)) { 'beta' } else { $TenantAPIToUse }
+    $URI = "https://graph.microsoft.com/$TenantApiVersion/`$batch"
+
+    $BatchCounter = 0
     foreach ($BatchRequest in $Script:BatchRequestsQueue) {
-        $Script:BatchJobs = Start-ThreadJob -Name "RemoveEntraDevice-$($BatchRequest.Name)" -ThrottleLimit $ThrottleLimit -ScriptBlock {
-            param($ArgumentToProvide, $TenantAPIToUse)
-            $TenantAPIToUse = if ($TenantAPIToUse) { $TenantAPIToUse } else { 'beta' }
-            $URI = "https://graph.microsoft.com/$TenantAPIToUse/`$batch"
-            Invoke-MgGraphRequest -Method POST -Uri $URI -Body $ArgumentToProvide -ContentType 'application/json' -ErrorAction Stop
-        } -ArgumentList @($BatchRequest.ArgumentToProvide, $TenantAPIToUse)
-        Start-Sleep -Milliseconds (Get-Random -Minimum 1000 -Maximum 5000) # Random delay to avoid throttling
+        $BatchCounter++
+        try {
+            $BatchResponse = Invoke-MgGraphRequest -Method POST -Uri $URI -Body $BatchRequest.ArgumentToProvide -ContentType 'application/json' -ErrorAction Stop
+            $AllResponses = @($BatchResponse.responses)
+            $FailedResponses = @($AllResponses | Where-Object { $_.status -ge 400 })
+
+            if ($FailedResponses.Count -gt 0) {
+                Write-Output "Batch $BatchCounter completed with $($FailedResponses.Count) failed request(s)."
+                foreach ($FailedResponse in $FailedResponses) {
+                    Write-Output "  Request id '$($FailedResponse.id)' failed with status $($FailedResponse.status)."
+                }
+            } else {
+                Write-Output "Batch $BatchCounter completed successfully with $($AllResponses.Count) request(s)."
+            }
+        } catch {
+            Write-Output "Batch $BatchCounter submission failed: $($_.Exception.Message)"
+            throw
+        }
     }
-#>
-    $Script:BatchRequestsQueue | ForEach-Object -AsJob -ThrottleLimit $ThrottleLimit -Parallel {
-        $TenantAPIToUse = if (-not($TenantAPIToUse)) { 'beta' }
-        $URI = "https://graph.microsoft.com/$TenantAPIToUse/`$batch"
-        Invoke-MgGraphRequest -Method POST -Uri $URI -Body $_.ArgumentToProvide -ContentType 'application/json' -ErrorAction Stop
-    }
-    Write-Output "Batch requests submitted."
+
+    Write-Output "Batch requests completed."
 }
 function Remove-EntraDevice {
     param (
@@ -230,6 +244,7 @@ function Remove-DeprecatedDevices {
         Write-Output "Removing device: $($Device.displayName) with Device ID: $($Device.deviceId) Last Sign-In: $($Device.approximateLastSignInDateTime)"
         Remove-EntraDevice -ID $Device.deviceId
     }
+    
 }
 function Get-LAPSKeys {
     param (
@@ -336,6 +351,9 @@ if ($ExportToCSV -and -not($Script:token)) {
 }
 
 Remove-DeprecatedDevices
+
+# Flush any remaining requests (<20) into the queue before submission.
+Invoke-BatchRequest -Finalize
 
 Submit-BatchRequests
 
