@@ -163,9 +163,10 @@ function ConvertTo-HumanReadableUpdateRows {
                 ClickSignal           = $Update.ClickSignal
                 RelatedRestart        = $Update.RelatedRestart
                 RelatedRestartAt      = $Update.RestartEventAt
-                UserPrincipal         = if ($Update.UserPrincipal) { $Update.UserPrincipal } else { 'Unknown' }
-                UserSid               = if ($Update.UserSid) { $Update.UserSid } else { 'Unknown' }
-                SamAccountName        = if ($IncludeSamAccountName -and $Update.SamAccountName) { $Update.SamAccountName } elseif ($IncludeSamAccountName) { 'Unknown' } else { $null }
+                UserName              = $Update.UserName
+                UserPrincipal         = $Update.UserPrincipal
+                UserSid               = $Update.UserSid
+                SamAccountName        = if ($IncludeSamAccountName) { $Update.SamAccountName } else { $null }
                 UpdateStatusSummary   = $StatusSummary
                 AttentionSummary      = $AttentionSummary
                 EventCount            = $Update.EventCount
@@ -479,16 +480,16 @@ function Get-LocalUserSessions {
         [datetime]$EndTime
     )
 
-    $FilterHashtable = @{
-        LogName   = 'Security'
-        Id        = 4624, 4634, 4647
-        StartTime = $StartTime
-        EndTime   = $EndTime
-    }
+    $t1 = $StartTime.ToUniversalTime().ToString('s')
+    $t2 = $EndTime.ToUniversalTime().ToString('s')
+    $FilterXPath = "*[System[TimeCreated[@SystemTime>'$t1' and @SystemTime<'$t2'] and (EventID=4624 or EventID=4634 or EventID=4647)]]"
 
     try {
-        $SecurityEvents = Get-WinEvent -FilterHashtable $FilterHashtable -ErrorAction Stop | Sort-Object -Property TimeCreated
+        $SecurityEvents = Get-WinEvent -LogName 'Security' -FilterXPath $FilterXPath -ErrorAction Stop | Sort-Object -Property TimeCreated
     } catch {
+        if ($_.Exception.Message -match 'No events were found') {
+            return [object[]]@()
+        }
         Write-Warning "Failed to query Security event log for session correlation. $_"
         return [object[]]@()
     }
@@ -571,16 +572,16 @@ function Get-LocalRestartEvents {
         [datetime]$EndTime
     )
 
-    $FilterHashtable = @{
-        LogName   = 'System'
-        Id        = 1074, 1076, 6005, 6006, 6008
-        StartTime = $StartTime
-        EndTime   = $EndTime
-    }
+    $t1 = $StartTime.ToUniversalTime().ToString('s')
+    $t2 = $EndTime.ToUniversalTime().ToString('s')
+    $FilterXPath = "*[System[TimeCreated[@SystemTime>'$t1' and @SystemTime<'$t2'] and (EventID=1074 or EventID=1076 or EventID=6005 or EventID=6006 or EventID=6008)]]"
 
     try {
-        $RestartEvents = Get-WinEvent -FilterHashtable $FilterHashtable -ErrorAction Stop | Sort-Object -Property TimeCreated
+        $RestartEvents = Get-WinEvent -LogName 'System' -FilterXPath $FilterXPath -ErrorAction Stop | Sort-Object -Property TimeCreated
     } catch {
+        if ($_.Exception.Message -match 'No events were found') {
+            return [object[]]@()
+        }
         Write-Warning "Failed to query System event log for restart correlation. $_"
         return [object[]]@()
     }
@@ -615,16 +616,12 @@ function Get-LocalUpdateClientEvents {
         [datetime]$EndTime
     )
 
-    $FilterHashtable = @{
-        LogName      = 'System'
-        ProviderName = 'Microsoft-Windows-WindowsUpdateClient'
-        Id           = 19, 20, 43, 44
-        StartTime    = $StartTime
-        EndTime      = $EndTime
-    }
+    $t1 = $StartTime.ToUniversalTime().ToString('s')
+    $t2 = $EndTime.ToUniversalTime().ToString('s')
+    $FilterXPath = "*[System[TimeCreated[@SystemTime>'$t1' and @SystemTime<'$t2'] and Provider[@Name='Microsoft-Windows-WindowsUpdateClient'] and (EventID=19 or EventID=20 or EventID=43 or EventID=44)]]"
 
     try {
-        $ClientEvents = Get-WinEvent -FilterHashtable $FilterHashtable -ErrorAction Stop | Sort-Object -Property TimeCreated
+        $ClientEvents = Get-WinEvent -LogName 'System' -FilterXPath $FilterXPath -ErrorAction Stop | Sort-Object -Property TimeCreated
     } catch {
         return [object[]]@()
     }
@@ -682,16 +679,16 @@ function Get-LocalLockStateEvents {
         [datetime]$EndTime
     )
 
-    $FilterHashtable = @{
-        LogName   = 'Security'
-        Id        = 4800, 4801
-        StartTime = $StartTime
-        EndTime   = $EndTime
-    }
+    $t1 = $StartTime.ToUniversalTime().ToString('s')
+    $t2 = $EndTime.ToUniversalTime().ToString('s')
+    $FilterXPath = "*[System[TimeCreated[@SystemTime>'$t1' and @SystemTime<'$t2'] and (EventID=4800 or EventID=4801)]]"
 
     try {
-        $LockEvents = Get-WinEvent -FilterHashtable $FilterHashtable -ErrorAction Stop | Sort-Object -Property TimeCreated
+        $LockEvents = Get-WinEvent -LogName 'Security' -FilterXPath $FilterXPath -ErrorAction Stop | Sort-Object -Property TimeCreated
     } catch {
+        if ($_.Exception.Message -match 'No events were found') {
+            return [object[]]@()
+        }
         return [object[]]@()
     }
 
@@ -730,6 +727,60 @@ function Get-LockStateAtTimestamp {
     }
 
     return $LastLockStateEvent.State
+}
+
+function Get-SignedInSessionsAtTimestamp {
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [datetime]$Timestamp,
+        [Parameter(Mandatory = $false)]
+        [object[]]$Sessions,
+        [Parameter(Mandatory = $false)]
+        [object[]]$LockEvents
+    )
+
+    if ($null -eq $Timestamp -or -not $Sessions -or $Sessions.Count -eq 0) {
+        return [object[]]@()
+    }
+
+    $LockStateAtTimestamp = Get-LockStateAtTimestamp -Timestamp $Timestamp -LockEvents $LockEvents
+    if ($LockStateAtTimestamp -eq 'Locked') {
+        return [object[]]@()
+    }
+
+    $ActiveSessions = @(
+        $Sessions |
+            Where-Object {
+                $_.SessionStart -le $Timestamp -and
+                ($null -eq $_.SessionEnd -or $_.SessionEnd -gt $Timestamp)
+            } |
+            Sort-Object -Property SessionStart -Descending
+    )
+
+    if ($ActiveSessions.Count -eq 0) {
+        return [object[]]@()
+    }
+
+    $SeenUsers = @{}
+    $DistinctSessions = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($Session in $ActiveSessions) {
+        $UserKey = if (-not [string]::IsNullOrWhiteSpace($Session.Sid)) {
+            "sid:$($Session.Sid)"
+        } elseif (-not [string]::IsNullOrWhiteSpace($Session.UserPrincipal)) {
+            "principal:$($Session.UserPrincipal.ToLowerInvariant())"
+        } else {
+            "name:$($Session.Domain)\\$($Session.UserName)"
+        }
+
+        if (-not $SeenUsers.ContainsKey($UserKey)) {
+            $SeenUsers[$UserKey] = $true
+            $DistinctSessions.Add($Session)
+        }
+    }
+
+    return [object[]]@($DistinctSessions)
 }
 
 function Get-NotificationConfidence {
@@ -1399,19 +1450,13 @@ function Get-UpdateSummary {
         $DisplayEvent = $null
     }
 
-    $MatchedSession = Get-BestSessionMatch -Timestamp $CorrelationTimestamp -Sessions $Sessions -CorrelationWindowMinutes $SessionWindowMinutes
+    $NotificationTimestamp = $DisplayEvent.Timestamp
+    $SignedInSessions = Get-SignedInSessionsAtTimestamp -Timestamp $NotificationTimestamp -Sessions $Sessions -LockEvents $LockEvents
+    $SignedInUserCount = @($SignedInSessions).Count
+    $MatchedSession = if ($SignedInUserCount -eq 1) { $SignedInSessions[0] } else { $null }
     $MatchedRestartEvent = Get-BestRestartMatch -Timestamp $LastSeen -RestartEvents $RestartEvents -CorrelationWindowMinutes $RestartWindowMinutes
     $RestartClassification = Get-UpdateRestartClassification -Events $OrderedEvents -RestartEvent $MatchedRestartEvent
-    $LockStateAtNotification = Get-LockStateAtTimestamp -Timestamp $CorrelationTimestamp -LockEvents $LockEvents
-
-    $FallbackIdentity = if ($MatchedSession) {
-        $null
-    } else {
-        ($LocalIdentityFallback | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Sid) } | Select-Object -First 1)
-    }
-    if ($null -eq $FallbackIdentity -and -not $MatchedSession) {
-        $FallbackIdentity = $LocalIdentityFallback | Select-Object -First 1
-    }
+    $LockStateAtNotification = Get-LockStateAtTimestamp -Timestamp $NotificationTimestamp -LockEvents $LockEvents
 
     $OrderedUpdateStatusValues = @($OrderedEvents.UpdateStatus | Where-Object { $_ } | Select-Object -Unique)
     $OrderedAttentionReasons = @($OrderedEvents.AttentionRequiredReason | Where-Object { $_ } | Select-Object -Unique)
@@ -1448,9 +1493,41 @@ function Get-UpdateSummary {
 
     $NotificationConfidence = Get-NotificationConfidence -NotificationDisplayed $NotificationDisplayedState -NotificationNotShownSignal $NotProcessedEvent.Task -NotificationProcessedReason $NotificationProcessedReason -NotificationNotProcessedReason $NotificationNotProcessedReason -SessionLockStateAtNotification $LockStateAtNotification -UserClickedAt $InteractionEvent.Timestamp
     $ExclusivityInterpretation = Get-ExclusivityInterpretation -AttentionReasons $OrderedAttentionReasons
-    $ResolvedUserPrincipal = if ($MatchedSession.UserPrincipal) { $MatchedSession.UserPrincipal } else { $FallbackIdentity.UserPrincipal }
-    $ResolvedUserSid = if ($MatchedSession.Sid) { $MatchedSession.Sid } else { $FallbackIdentity.Sid }
-    $ResolvedSamAccountName = if ($MatchedSession.UserName) { $MatchedSession.UserName } else { $FallbackIdentity.SamAccountName }
+    $ResolvedUserName = if ($SignedInUserCount -gt 1) {
+        'Multiple'
+    } elseif ($MatchedSession) {
+        $MatchedSession.UserName
+    } else {
+        $null
+    }
+    $ResolvedUserDomain = if ($SignedInUserCount -gt 1) {
+        'Multiple'
+    } elseif ($MatchedSession) {
+        $MatchedSession.Domain
+    } else {
+        $null
+    }
+    $ResolvedUserPrincipal = if ($SignedInUserCount -gt 1) {
+        'Multiple'
+    } elseif ($MatchedSession) {
+        $MatchedSession.UserPrincipal
+    } else {
+        $null
+    }
+    $ResolvedUserSid = if ($SignedInUserCount -gt 1) {
+        'Multiple'
+    } elseif ($MatchedSession) {
+        $MatchedSession.Sid
+    } else {
+        $null
+    }
+    $ResolvedSamAccountName = if ($SignedInUserCount -gt 1) {
+        'Multiple'
+    } elseif ($MatchedSession) {
+        $MatchedSession.UserName
+    } else {
+        $null
+    }
     $RelatedRestart = if ($MatchedRestartEvent) { '✅' } else { '❌' }
 
     [PSCustomObject]@{
@@ -1480,17 +1557,17 @@ function Get-UpdateSummary {
         InstallEvidenceEventId = $GlobalInstallEvidence.EventId
         UserClickedAt           = $InteractionEvent.Timestamp
         ClickSignal             = $InteractionEvent.Task
-        SessionCorrelationTime  = $CorrelationTimestamp
-        UserName                = $MatchedSession.UserName
-        UserDomain              = $MatchedSession.Domain
+        SessionCorrelationTime  = $NotificationTimestamp
+        UserName                = $ResolvedUserName
+        UserDomain              = $ResolvedUserDomain
         UserPrincipal           = $ResolvedUserPrincipal
         UserSid                 = $ResolvedUserSid
         SamAccountName          = $ResolvedSamAccountName
-        LogonId                 = $MatchedSession.LogonId
-        LogonType               = $MatchedSession.LogonType
-        LogonTypeLabel          = $MatchedSession.LogonTypeLabel
-        SessionStart            = $MatchedSession.SessionStart
-        SessionEnd              = $MatchedSession.SessionEnd
+        LogonId                 = if ($SignedInUserCount -eq 1) { $MatchedSession.LogonId } else { $null }
+        LogonType               = if ($SignedInUserCount -eq 1) { $MatchedSession.LogonType } else { $null }
+        LogonTypeLabel          = if ($SignedInUserCount -eq 1) { $MatchedSession.LogonTypeLabel } else { $null }
+        SessionStart            = if ($SignedInUserCount -eq 1) { $MatchedSession.SessionStart } else { $null }
+        SessionEnd              = if ($SignedInUserCount -eq 1) { $MatchedSession.SessionEnd } else { $null }
         RelatedRestart          = $RelatedRestart
         RestartClassificationRaw = $RestartClassification
         RestartEventAt          = $MatchedRestartEvent.Timestamp
