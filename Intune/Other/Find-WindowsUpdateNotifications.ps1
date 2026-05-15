@@ -10,7 +10,9 @@ param(
     [switch]$IncludeSamAccountName,
     [int]$SessionLookbackDays = 30,
     [int]$SessionCorrelationWindowMinutes = 240,
-    [int]$RestartCorrelationWindowMinutes = 120
+    [int]$RestartCorrelationWindowMinutes = 120,
+    [int]$AttemptSplitGapMinutes = 15,
+    [int]$InstallResultCorrelationWindowMinutes = 720
 )
 
 function Test-IsAdministrator {
@@ -111,20 +113,41 @@ function ConvertTo-HumanReadableUpdateRows {
                 'Unknown'
             }
 
-            $NotificationDisplayed = if ($Update.UserClickedAt) {
-                'Yes'
-            } elseif ($Update.NotificationNotShownSignal -eq 'Notification Not Processed') {
-                'No'
-            } elseif ($Update.NotificationDisplayedAt) {
-                'Maybe'
+            $NotificationDisplayed = if ($Update.NotificationDisplayedState) {
+                $Update.NotificationDisplayedState
             } else {
                 'Unknown'
             }
 
+            $NotificationType = if ($Update.NotificationType) {
+                $Update.NotificationType
+            } else {
+                'Unknown'
+            }
+
+            $UpdateSuccessfulDisplay = switch ($Update.UpdateSuccessful) {
+                'Yes' { '✅' }
+                'No' { '❌' }
+                default { '❔' }
+            }
+
+            $InstallEvidenceDisplay = switch ($Update.InstallEvidenceFromWUClient) {
+                'Installed' { '✅ Installed (WUClient)' }
+                'Failed' { '❌ Failed (WUClient)' }
+                'Seen' { '🟨 Seen (WUClient)' }
+                'NoKbMatch' { 'No KB Match (WUClient)' }
+                default { 'No Evidence (WUClient)' }
+            }
+
             [PSCustomObject]@{
+                AttemptNumber         = $Update.AttemptNumber
                 FirstSeen             = $Update.FirstSeen
                 LastSeen              = $Update.LastSeen
                 Title                 = $Update.Title
+                UpdateSuccessful      = $UpdateSuccessfulDisplay
+                InstallEvidenceFromWUClient = $InstallEvidenceDisplay
+                InstallEvidenceAt     = $Update.InstallEvidenceAt
+                NotificationType      = $NotificationType
                 NotificationDisplayed = $NotificationDisplayed
                 NotificationAt        = $Update.NotificationDisplayedAt
                 NotificationNotShownAt = $Update.NotificationNotShownAt
@@ -132,6 +155,9 @@ function ConvertTo-HumanReadableUpdateRows {
                 NotificationNotProcessedReason = $Update.NotificationNotProcessedReason
                 SessionLockStateAtNotification = $Update.SessionLockStateAtNotification
                 NotificationConfidence = $NotificationConfidence
+                ExclusivityInterpretation = $Update.ExclusivityInterpretation
+                UpdateSuccessAt       = $Update.UpdateSuccessSignalAt
+                UpdateSuccessSignalType = $Update.UpdateSuccessSignalType
                 ClickedByUser         = if ($Update.UserClickedAt) { 'Yes' } else { 'No' }
                 ClickAt               = $Update.UserClickedAt
                 ClickSignal           = $Update.ClickSignal
@@ -165,7 +191,7 @@ function Show-HumanReadableReport {
         return
     }
 
-    $Rows | Sort-Object -Property FirstSeen | Format-Table -AutoSize | Out-Host
+    $Rows | Sort-Object -Property NotificationAt, FirstSeen -Descending | Format-Table -AutoSize | Out-Host
 }
 
 function Get-LocalRegistryUserIdentities {
@@ -298,11 +324,11 @@ function Get-XmlNodeText {
 function Get-EventDataMap {
     param(
         [Parameter(Mandatory = $false)]
-        $Event
+        $EventRecordXml
     )
 
     $EventDataMap = @{}
-    $DataNodes = @($Event.EventData.Data)
+    $DataNodes = @($EventRecordXml.EventData.Data)
 
     foreach ($DataNode in $DataNodes) {
         if ($null -eq $DataNode) {
@@ -323,17 +349,17 @@ function Get-EventDataMap {
 function Get-EventTimestamp {
     param(
         [Parameter(Mandatory = $false)]
-        $Event
+        $EventRecordXml
     )
 
     $TimeCreated = $null
 
-    if ($Event.System.TimeCreated.SystemTime) {
-        $TimeCreated = $Event.System.TimeCreated.SystemTime
-    } elseif ($Event.TimeCreated.SystemTime) {
-        $TimeCreated = $Event.TimeCreated.SystemTime
-    } elseif ($Event.System.TimeCreated.'#text') {
-        $TimeCreated = $Event.System.TimeCreated.'#text'
+    if ($EventRecordXml.System.TimeCreated.SystemTime) {
+        $TimeCreated = $EventRecordXml.System.TimeCreated.SystemTime
+    } elseif ($EventRecordXml.TimeCreated.SystemTime) {
+        $TimeCreated = $EventRecordXml.TimeCreated.SystemTime
+    } elseif ($EventRecordXml.System.TimeCreated.'#text') {
+        $TimeCreated = $EventRecordXml.System.TimeCreated.'#text'
     }
 
     if ([string]::IsNullOrWhiteSpace([string]$TimeCreated)) {
@@ -581,6 +607,73 @@ function Get-LocalRestartEvents {
     )
 }
 
+function Get-LocalUpdateClientEvents {
+    param(
+        [Parameter(Mandatory = $true)]
+        [datetime]$StartTime,
+        [Parameter(Mandatory = $true)]
+        [datetime]$EndTime
+    )
+
+    $FilterHashtable = @{
+        LogName      = 'System'
+        ProviderName = 'Microsoft-Windows-WindowsUpdateClient'
+        Id           = 19, 20, 43, 44
+        StartTime    = $StartTime
+        EndTime      = $EndTime
+    }
+
+    try {
+        $ClientEvents = Get-WinEvent -FilterHashtable $FilterHashtable -ErrorAction Stop | Sort-Object -Property TimeCreated
+    } catch {
+        return [object[]]@()
+    }
+
+    return [object[]]@(
+        foreach ($ClientEvent in $ClientEvents) {
+            $Message = $ClientEvent.FormatDescription()
+            $KbMatches = [System.Text.RegularExpressions.Regex]::Matches($Message, 'KB\d{6,8}')
+            $KbArticles = @($KbMatches | ForEach-Object { $_.Value.ToUpperInvariant() } | Select-Object -Unique)
+            $TitleMatch = [System.Text.RegularExpressions.Regex]::Match($Message, 'following update:\s*(.+)$', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            $UpdateTitleFromMessage = if ($TitleMatch.Success) { $TitleMatch.Groups[1].Value.Trim() } else { $null }
+
+            $Outcome = switch ($ClientEvent.Id) {
+                19 { 'Success' }
+                20 { 'Failure' }
+                43 { 'Success' }
+                44 { 'Failure' }
+                default { 'Unknown' }
+            }
+
+            [PSCustomObject]@{
+                Timestamp   = $ClientEvent.TimeCreated
+                EventId     = $ClientEvent.Id
+                Outcome     = $Outcome
+                KbArticles  = $KbArticles
+                UpdateTitle = $UpdateTitleFromMessage
+                Message     = $Message
+            }
+        }
+    )
+}
+
+function Get-NormalizedUpdateEvidenceTitle {
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$Title
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Title)) {
+        return $null
+    }
+
+    $Normalized = $Title.ToLowerInvariant()
+    $Normalized = $Normalized -replace 'corporation', ''
+    $Normalized = $Normalized -replace '[^a-z0-9\. ]', ' '
+    $Normalized = $Normalized -replace '\s+', ' '
+    return $Normalized.Trim()
+}
+
 function Get-LocalLockStateEvents {
     param(
         [Parameter(Mandatory = $true)]
@@ -691,6 +784,243 @@ function Get-NotificationConfidence {
     return 'Low'
 }
 
+function Get-NotificationType {
+    param(
+        [Parameter(Mandatory = $false)]
+        [string[]]$UpdateStatusValues,
+        [Parameter(Mandatory = $false)]
+        [string[]]$AttentionReasons,
+        [Parameter(Mandatory = $false)]
+        [string]$ClickSignal,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$DisplayEvent,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$NotProcessedEvent
+    )
+
+    $Statuses = @($UpdateStatusValues | Where-Object { $_ } | Select-Object -Unique)
+    $Reasons = @($AttentionReasons | Where-Object { $_ } | Select-Object -Unique)
+
+    $IsRestartPrompt = @($Statuses | Where-Object { $_ -match 'RebootRequired|Restart' }).Count -gt 0 -or
+        @($Reasons | Where-Object { $_ -eq 'UpdateAttentionRequiredReason_ReadyToReboot' }).Count -gt 0
+    if ($IsRestartPrompt) {
+        return 'RestartPrompt'
+    }
+
+    $IsInstallApprovalPrompt = @($Reasons | Where-Object { $_ -eq 'UpdateAttentionRequiredReason_NeedUserAgreementForPolicy' }).Count -gt 0 -or
+        $ClickSignal -in @('UpdateApproved', 'PerUpdateActionTaken', 'SeekerUpdateApprovedForInstall')
+    if ($IsInstallApprovalPrompt) {
+        return 'InstallApprovalPrompt'
+    }
+
+    if ($DisplayEvent) {
+        return 'PassiveNotification'
+    }
+
+    if ($NotProcessedEvent) {
+        return 'NotShown'
+    }
+
+    return 'Unknown'
+}
+
+function Get-NotificationDisplayedState {
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$DisplayEvent,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$NotProcessedEvent,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$UserClickedAt,
+        [Parameter(Mandatory = $false)]
+        [string]$NotificationType,
+        [Parameter(Mandatory = $false)]
+        [string]$NotificationNotProcessedReason
+    )
+
+    if ($UserClickedAt) {
+        return 'Yes'
+    }
+
+    if ($NotificationType -eq 'RestartPrompt') {
+        return 'Yes'
+    }
+
+    if ($DisplayEvent -and $NotProcessedEvent) {
+        if ($NotificationNotProcessedReason -match 'Initialization Not Complete|Initalization Not Complete') {
+            return 'Maybe'
+        }
+
+        return 'Maybe'
+    }
+
+    if ($DisplayEvent) {
+        return 'Yes'
+    }
+
+    if ($NotProcessedEvent) {
+        return 'No'
+    }
+
+    return 'Unknown'
+}
+
+function Get-ExclusivityInterpretation {
+    param(
+        [Parameter(Mandatory = $false)]
+        [string[]]$AttentionReasons
+    )
+
+    if (-not $AttentionReasons -or $AttentionReasons.Count -eq 0) {
+        return 'NotExclusive'
+    }
+
+    if (@($AttentionReasons | Where-Object { $_ -eq 'UpdateAttentionRequiredReason_Exclusivity' }).Count -gt 0) {
+        return 'DeferredByExclusiveInstall'
+    }
+
+    return 'NotExclusive'
+}
+
+function Get-KbArticlesFromTitle {
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$Title
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Title)) {
+        return @()
+    }
+
+    $KbMatches = [System.Text.RegularExpressions.Regex]::Matches($Title, 'KB\d{6,8}')
+    return @($KbMatches | ForEach-Object { $_.Value.ToUpperInvariant() } | Select-Object -Unique)
+}
+
+function Get-BestInstallResultMatch {
+    param(
+        [Parameter(Mandatory = $false)]
+        [string[]]$KbArticles,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [datetime]$FirstSeen,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [datetime]$LastSeen,
+        [Parameter(Mandatory = $false)]
+        [object[]]$UpdateClientEvents,
+        [int]$CorrelationWindowMinutes = 720
+    )
+
+    if (-not $UpdateClientEvents -or $UpdateClientEvents.Count -eq 0) {
+        return $null
+    }
+
+    if (-not $KbArticles -or $KbArticles.Count -eq 0) {
+        return $null
+    }
+
+    $WindowStart = if ($FirstSeen) { $FirstSeen.AddMinutes(-30) } else { $LastSeen.AddMinutes(-$CorrelationWindowMinutes) }
+    $WindowEnd = if ($LastSeen) { $LastSeen.AddMinutes($CorrelationWindowMinutes) } else { $FirstSeen.AddMinutes($CorrelationWindowMinutes) }
+
+    return @(
+        $UpdateClientEvents |
+            Where-Object {
+                $_.Timestamp -ge $WindowStart -and
+                $_.Timestamp -le $WindowEnd -and
+                (@($_.KbArticles | Where-Object { $KbArticles -contains $_ }).Count -gt 0)
+            } |
+            Sort-Object -Property Timestamp -Descending
+    ) | Select-Object -First 1
+}
+
+function Get-GlobalInstallEvidenceFromUpdateClient {
+    param(
+        [Parameter(Mandatory = $false)]
+        [string[]]$KbArticles,
+        [Parameter(Mandatory = $false)]
+        [string]$UpdateTitle,
+        [Parameter(Mandatory = $false)]
+        [object[]]$UpdateClientEvents
+    )
+
+    if (-not $UpdateClientEvents -or $UpdateClientEvents.Count -eq 0) {
+        return [PSCustomObject]@{
+            Status    = 'NoEvidence'
+            Timestamp = $null
+            EventId   = $null
+        }
+    }
+
+    $Matches = @()
+
+    if ($KbArticles -and $KbArticles.Count -gt 0) {
+        $Matches = @(
+            $UpdateClientEvents |
+                Where-Object {
+                    @($_.KbArticles | Where-Object { $KbArticles -contains $_ }).Count -gt 0
+                } |
+                Sort-Object -Property Timestamp -Descending
+        )
+    }
+
+    if ($Matches.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($UpdateTitle)) {
+        $NormalizedTargetTitle = Get-NormalizedUpdateEvidenceTitle -Title $UpdateTitle
+        if (-not [string]::IsNullOrWhiteSpace($NormalizedTargetTitle)) {
+            $Matches = @(
+                $UpdateClientEvents |
+                    Where-Object {
+                        $NormalizedEventTitle = Get-NormalizedUpdateEvidenceTitle -Title $_.UpdateTitle
+                        if ([string]::IsNullOrWhiteSpace($NormalizedEventTitle)) {
+                            return $false
+                        }
+
+                        return $NormalizedEventTitle -eq $NormalizedTargetTitle -or
+                            $NormalizedEventTitle.Contains($NormalizedTargetTitle) -or
+                            $NormalizedTargetTitle.Contains($NormalizedEventTitle)
+                    } |
+                    Sort-Object -Property Timestamp -Descending
+            )
+        }
+    }
+
+    if ($Matches.Count -eq 0) {
+        return [PSCustomObject]@{
+            Status    = 'NoKbMatch'
+            Timestamp = $null
+            EventId   = $null
+        }
+    }
+
+    $LatestSuccess = $Matches | Where-Object { $_.Outcome -eq 'Success' } | Select-Object -First 1
+    if ($LatestSuccess) {
+        return [PSCustomObject]@{
+            Status    = 'Installed'
+            Timestamp = $LatestSuccess.Timestamp
+            EventId   = $LatestSuccess.EventId
+        }
+    }
+
+    $LatestFailure = $Matches | Where-Object { $_.Outcome -eq 'Failure' } | Select-Object -First 1
+    if ($LatestFailure) {
+        return [PSCustomObject]@{
+            Status    = 'Failed'
+            Timestamp = $LatestFailure.Timestamp
+            EventId   = $LatestFailure.EventId
+        }
+    }
+
+    return [PSCustomObject]@{
+        Status    = 'Seen'
+        Timestamp = $Matches[0].Timestamp
+        EventId   = $Matches[0].EventId
+    }
+}
+
 function Get-BestSessionMatch {
     param(
         [Parameter(Mandatory = $true)]
@@ -776,13 +1106,13 @@ function Get-BestDisplayMatch {
         'CreatingNotificationThread'
     )
 
-    $Candidates = foreach ($Event in ($Events | Where-Object { $_.Role -eq 'DisplaySignal' -and $_.Task -in $PreferredTasks })) {
-        $TimeDeltaSeconds = [math]::Abs(($Event.Timestamp - $Timestamp).TotalSeconds)
+    $Candidates = foreach ($DisplayCandidate in ($Events | Where-Object { $_.Role -eq 'DisplaySignal' -and $_.Task -in $PreferredTasks })) {
+        $TimeDeltaSeconds = [math]::Abs(($DisplayCandidate.Timestamp - $Timestamp).TotalSeconds)
         if ($TimeDeltaSeconds -le $CorrelationWindowSeconds) {
             [PSCustomObject]@{
-                Event            = $Event
+                Event            = $DisplayCandidate
                 TimeDeltaSeconds = $TimeDeltaSeconds
-                TaskPriority     = $PreferredTasks.IndexOf($Event.Task)
+                TaskPriority     = $PreferredTasks.IndexOf($DisplayCandidate.Task)
             }
         }
     }
@@ -841,21 +1171,80 @@ function Resolve-OutputPath {
 function Get-UpdateEventGroups {
     param(
         [Parameter(Mandatory = $true)]
-        [object[]]$Events
+        [object[]]$Events,
+        [int]$SplitGapMinutes = 15
     )
 
     $Groups = [System.Collections.Generic.List[object]]::new()
 
     foreach ($GroupedById in ($Events | Where-Object { -not [string]::IsNullOrWhiteSpace($_.UpdateId) } | Group-Object -Property UpdateId)) {
-        $Groups.Add($GroupedById.Group)
+        $Ordered = @($GroupedById.Group | Sort-Object -Property Timestamp, Sequence)
+        $CurrentAttempt = [System.Collections.Generic.List[object]]::new()
+        $AttemptNumber = 1
+        $LastTerminalTimestamp = $null
+
+        foreach ($GroupedEvent in $Ordered) {
+            $ShouldSplit = $false
+
+            if ($CurrentAttempt.Count -gt 0) {
+                $LastAttemptEvent = $CurrentAttempt[$CurrentAttempt.Count - 1]
+                if ($LastAttemptEvent.Timestamp -and $GroupedEvent.Timestamp) {
+                    $GapMinutes = ($GroupedEvent.Timestamp - $LastAttemptEvent.Timestamp).TotalMinutes
+                    if ($GapMinutes -ge $SplitGapMinutes) {
+                        $ShouldSplit = $true
+                    }
+                }
+
+                if ($LastTerminalTimestamp -and $GroupedEvent.Timestamp -and ($GroupedEvent.Timestamp - $LastTerminalTimestamp).TotalMinutes -ge 2) {
+                    $ShouldSplit = $true
+                }
+            }
+
+            if ($ShouldSplit -and $CurrentAttempt.Count -gt 0) {
+                $Groups.Add([PSCustomObject]@{
+                    GroupName     = $GroupedById.Name
+                    AttemptNumber = $AttemptNumber
+                    Events        = @($CurrentAttempt)
+                })
+                $CurrentAttempt = [System.Collections.Generic.List[object]]::new()
+                $AttemptNumber++
+                $LastTerminalTimestamp = $null
+            }
+
+            $CurrentAttempt.Add($GroupedEvent)
+
+            if ($GroupedEvent.UpdateStatus -match 'DownloadFailed|InstallFailed|Failed|RebootRequired|Installed|Succeeded|InstallComplete') {
+                $LastTerminalTimestamp = $GroupedEvent.Timestamp
+            }
+        }
+
+        if ($CurrentAttempt.Count -gt 0) {
+            $Groups.Add([PSCustomObject]@{
+                GroupName     = $GroupedById.Name
+                AttemptNumber = $AttemptNumber
+                Events        = @($CurrentAttempt)
+            })
+        }
     }
+
+    $TitlesWithUpdateId = @(
+        $Events |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_.UpdateId) -and -not [string]::IsNullOrWhiteSpace($_.UpdateTitle) } |
+            Select-Object -ExpandProperty UpdateTitle -Unique
+    )
 
     foreach ($GroupedByTitle in (
         $Events | Where-Object {
-            [string]::IsNullOrWhiteSpace($_.UpdateId) -and -not [string]::IsNullOrWhiteSpace($_.UpdateTitle)
+            [string]::IsNullOrWhiteSpace($_.UpdateId) -and
+            -not [string]::IsNullOrWhiteSpace($_.UpdateTitle) -and
+            ($TitlesWithUpdateId -notcontains $_.UpdateTitle)
         } | Group-Object -Property UpdateTitle
     )) {
-        $Groups.Add($GroupedByTitle.Group)
+        $Groups.Add([PSCustomObject]@{
+            GroupName     = $GroupedByTitle.Name
+            AttemptNumber = 1
+            Events        = @($GroupedByTitle.Group)
+        })
     }
 
     return @($Groups)
@@ -864,22 +1253,22 @@ function Get-UpdateEventGroups {
 function New-NotificationEventRecord {
     param(
         [Parameter(Mandatory = $true)]
-        $Event,
+        $EventRecordXml,
         [Parameter(Mandatory = $true)]
         [string]$SourcePath,
         [Parameter(Mandatory = $true)]
         [int]$Sequence
     )
 
-    $Data = Get-EventDataMap -Event $Event
-    $Task = Get-XmlNodeText -Node $Event.RenderingInfo.Task
-    $ProviderName = Get-XmlNodeText -Node $Event.System.Provider.Name
-    $EventId = Get-XmlNodeText -Node $Event.System.EventID
-    $Level = Get-XmlNodeText -Node $Event.System.Level
-    $RecordId = Get-XmlNodeText -Node $Event.System.EventRecordID
-    $Channel = Get-XmlNodeText -Node $Event.System.Channel
-    $Computer = Get-XmlNodeText -Node $Event.System.Computer
-    $Timestamp = Get-EventTimestamp -Event $Event
+    $Data = Get-EventDataMap -EventRecordXml $EventRecordXml
+    $Task = Get-XmlNodeText -Node $EventRecordXml.RenderingInfo.Task
+    $ProviderName = Get-XmlNodeText -Node $EventRecordXml.System.Provider.Name
+    $EventId = Get-XmlNodeText -Node $EventRecordXml.System.EventID
+    $Level = Get-XmlNodeText -Node $EventRecordXml.System.Level
+    $RecordId = Get-XmlNodeText -Node $EventRecordXml.System.EventRecordID
+    $Channel = Get-XmlNodeText -Node $EventRecordXml.System.Channel
+    $Computer = Get-XmlNodeText -Node $EventRecordXml.System.Computer
+    $Timestamp = Get-EventTimestamp -EventRecordXml $EventRecordXml
 
     $UpdateId = $Data['UpdateId']
     $UpdateTitle = $Data['UpdateTitle']
@@ -926,7 +1315,7 @@ function New-NotificationEventRecord {
         Progress                = $Progress
         Data                    = $Data
         RestartRequired         = $RestartRequired
-        RawEvent                = if ($IncludeRawEvents) { $Event } else { $null }
+        RawEvent                = if ($IncludeRawEvents) { $EventRecordXml } else { $null }
     }
 }
 
@@ -966,6 +1355,8 @@ function Get-UpdateSummary {
     param(
         [Parameter(Mandatory = $true)]
         [object[]]$Events,
+        [string]$GroupKey,
+        [int]$AttemptNumber = 1,
         [Parameter(Mandatory = $false)]
         [object[]]$AllEvents,
         [Parameter(Mandatory = $false)]
@@ -973,13 +1364,16 @@ function Get-UpdateSummary {
         [Parameter(Mandatory = $false)]
         [object[]]$RestartEvents,
         [Parameter(Mandatory = $false)]
+        [object[]]$UpdateClientEvents,
+        [Parameter(Mandatory = $false)]
         [object[]]$LocalIdentityFallback,
         [Parameter(Mandatory = $false)]
         [object[]]$LockEvents,
         [Parameter(Mandatory = $true)]
         [int]$SessionWindowMinutes,
         [Parameter(Mandatory = $true)]
-        [int]$RestartWindowMinutes
+        [int]$RestartWindowMinutes,
+        [int]$InstallResultWindowMinutes = 720
     )
 
     $OrderedEvents = @($Events | Sort-Object -Property Timestamp, Sequence)
@@ -1019,26 +1413,56 @@ function Get-UpdateSummary {
         $FallbackIdentity = $LocalIdentityFallback | Select-Object -First 1
     }
 
+    $OrderedUpdateStatusValues = @($OrderedEvents.UpdateStatus | Where-Object { $_ } | Select-Object -Unique)
+    $OrderedAttentionReasons = @($OrderedEvents.AttentionRequiredReason | Where-Object { $_ } | Select-Object -Unique)
+
     $NotificationProcessedReason = if ($DisplayEvent -and $DisplayEvent.Data) { $DisplayEvent.Data['Notification Reason'] } else { $null }
     $NotificationNotProcessedReason = if ($NotProcessedEvent -and $NotProcessedEvent.Data) { $NotProcessedEvent.Data['Not Processed Reason'] } else { $null }
-    $NotificationDisplayedState = if ($DisplayEvent) {
+    $NotificationType = Get-NotificationType -UpdateStatusValues $OrderedUpdateStatusValues -AttentionReasons $OrderedAttentionReasons -ClickSignal $InteractionEvent.Task -DisplayEvent $DisplayEvent -NotProcessedEvent $NotProcessedEvent
+    $NotificationDisplayedState = Get-NotificationDisplayedState -DisplayEvent $DisplayEvent -NotProcessedEvent $NotProcessedEvent -UserClickedAt $InteractionEvent.Timestamp -NotificationType $NotificationType -NotificationNotProcessedReason $NotificationNotProcessedReason
+
+    $KbArticles = Get-KbArticlesFromTitle -Title $UpdateTitle
+    $InstallResultEvent = Get-BestInstallResultMatch -KbArticles $KbArticles -FirstSeen $FirstSeen -LastSeen $LastSeen -UpdateClientEvents $UpdateClientEvents -CorrelationWindowMinutes $InstallResultWindowMinutes
+    $GlobalInstallEvidence = Get-GlobalInstallEvidenceFromUpdateClient -KbArticles $KbArticles -UpdateTitle $UpdateTitle -UpdateClientEvents $UpdateClientEvents
+    $HasSuccessStatus = @($OrderedEvents.UpdateStatus | Where-Object { $_ -match 'Installed|Succeeded|InstallComplete' }).Count -gt 0
+    $HasFailureSignal = @($OrderedEvents.UpdateStatus | Where-Object { $_ -match 'Failed|DownloadFailed|InstallFailed' }).Count -gt 0 -or @($OrderedEvents.AttentionRequiredReason | Where-Object { $_ -match 'BlockedByFailure' }).Count -gt 0
+
+    $AttemptSuccessWindowMinutes = 20
+    $InstallResultIsNearAttempt = $InstallResultEvent -and $LastSeen -and (($InstallResultEvent.Timestamp - $LastSeen).TotalMinutes -ge 0) -and (($InstallResultEvent.Timestamp - $LastSeen).TotalMinutes -le $AttemptSuccessWindowMinutes)
+
+    $UpdateSuccessful = if ($HasSuccessStatus) {
         'Yes'
-    } elseif ($NotProcessedEvent) {
+    } elseif ($HasFailureSignal) {
+        if ($InstallResultEvent -and $InstallResultEvent.Outcome -eq 'Success' -and $InstallResultIsNearAttempt) {
+            'Yes'
+        } else {
+            'No'
+        }
+    } elseif ($InstallResultEvent -and $InstallResultEvent.Outcome -eq 'Success' -and $InstallResultIsNearAttempt) {
+        'Yes'
+    } elseif ($InstallResultEvent -and $InstallResultEvent.Outcome -eq 'Failure') {
         'No'
     } else {
-        'Maybe'
+        'Unknown'
     }
+
     $NotificationConfidence = Get-NotificationConfidence -NotificationDisplayed $NotificationDisplayedState -NotificationNotShownSignal $NotProcessedEvent.Task -NotificationProcessedReason $NotificationProcessedReason -NotificationNotProcessedReason $NotificationNotProcessedReason -SessionLockStateAtNotification $LockStateAtNotification -UserClickedAt $InteractionEvent.Timestamp
+    $ExclusivityInterpretation = Get-ExclusivityInterpretation -AttentionReasons $OrderedAttentionReasons
     $ResolvedUserPrincipal = if ($MatchedSession.UserPrincipal) { $MatchedSession.UserPrincipal } else { $FallbackIdentity.UserPrincipal }
     $ResolvedUserSid = if ($MatchedSession.Sid) { $MatchedSession.Sid } else { $FallbackIdentity.Sid }
     $ResolvedSamAccountName = if ($MatchedSession.UserName) { $MatchedSession.UserName } else { $FallbackIdentity.SamAccountName }
     $RelatedRestart = if ($MatchedRestartEvent) { '✅' } else { '❌' }
 
     [PSCustomObject]@{
+        GroupKey               = $GroupKey
+        AttemptNumber          = $AttemptNumber
         UpdateId                = $UpdateId
         Title                   = $UpdateTitle
+        KbArticles              = $KbArticles
         FirstSeen               = $FirstSeen
         LastSeen                = $LastSeen
+        NotificationType        = $NotificationType
+        NotificationDisplayedState = $NotificationDisplayedState
         NotificationDisplayedAt = $DisplayEvent.Timestamp
         NotificationSignal      = $DisplayEvent.Task
         NotificationProcessedReason = $NotificationProcessedReason
@@ -1047,6 +1471,13 @@ function Get-UpdateSummary {
         NotificationNotProcessedReason = $NotificationNotProcessedReason
         SessionLockStateAtNotification = $LockStateAtNotification
         NotificationConfidence  = $NotificationConfidence
+        ExclusivityInterpretation = $ExclusivityInterpretation
+        UpdateSuccessful        = $UpdateSuccessful
+        UpdateSuccessSignalAt   = $InstallResultEvent.Timestamp
+        UpdateSuccessSignalType = $InstallResultEvent.Outcome
+        InstallEvidenceFromWUClient = $GlobalInstallEvidence.Status
+        InstallEvidenceAt      = $GlobalInstallEvidence.Timestamp
+        InstallEvidenceEventId = $GlobalInstallEvidence.EventId
         UserClickedAt           = $InteractionEvent.Timestamp
         ClickSignal             = $InteractionEvent.Task
         SessionCorrelationTime  = $CorrelationTimestamp
@@ -1065,8 +1496,8 @@ function Get-UpdateSummary {
         RestartEventAt          = $MatchedRestartEvent.Timestamp
         RestartEventId          = $MatchedRestartEvent.EventId
         RestartEventType        = $MatchedRestartEvent.Classification
-        UpdateStatusValues      = @($OrderedEvents.UpdateStatus | Where-Object { $_ } | Select-Object -Unique)
-        AttentionReasons        = @($OrderedEvents.AttentionRequiredReason | Where-Object { $_ } | Select-Object -Unique)
+        UpdateStatusValues      = $OrderedUpdateStatusValues
+        AttentionReasons        = $OrderedAttentionReasons
         ProgressSamples         = @($ProgressEvents.Progress | Where-Object { $_ } | Select-Object -Unique)
         EventCount              = $OrderedEvents.Count
         Events                  = if ($IncludeRawEvents) { $OrderedEvents } else { $null }
@@ -1083,11 +1514,11 @@ $Sequence = 0
 
 foreach ($SourceFile in $SourceFiles) {
     $ImportedXml = Import-NotificationXml -Path $SourceFile.FullName
-    $Events = @($ImportedXml.Events.Event)
+    $ImportedEvents = @($ImportedXml.Events.Event)
 
-    foreach ($Event in $Events) {
+    foreach ($EventRecordXml in $ImportedEvents) {
         $Sequence++
-        $EventRecords.Add((New-NotificationEventRecord -Event $Event -SourcePath $SourceFile.FullName -Sequence $Sequence))
+        $EventRecords.Add((New-NotificationEventRecord -EventRecordXml $EventRecordXml -SourcePath $SourceFile.FullName -Sequence $Sequence))
     }
 }
 
@@ -1107,11 +1538,12 @@ $SessionQueryStart = $TimelineStart.AddDays(-1)
 $SessionQueryEnd = $TimelineEnd.AddDays(1)
 $LocalSessions = @(Get-LocalUserSessions -StartTime $SessionQueryStart -EndTime $SessionQueryEnd)
 $LocalRestartEvents = @(Get-LocalRestartEvents -StartTime $SessionQueryStart -EndTime $SessionQueryEnd)
+$LocalUpdateClientEvents = @(Get-LocalUpdateClientEvents -StartTime $SessionQueryStart -EndTime $SessionQueryEnd)
 $LocalLockEvents = @(Get-LocalLockStateEvents -StartTime $SessionQueryStart -EndTime $SessionQueryEnd)
 $LocalRegistryIdentities = @(Get-LocalRegistryUserIdentities)
 
-$Updates = foreach ($UpdateGroup in (Get-UpdateEventGroups -Events $OrderedRecords)) {
-    Get-UpdateSummary -Events $UpdateGroup -AllEvents $OrderedRecords -Sessions $LocalSessions -RestartEvents $LocalRestartEvents -LocalIdentityFallback $LocalRegistryIdentities -LockEvents $LocalLockEvents -SessionWindowMinutes $SessionCorrelationWindowMinutes -RestartWindowMinutes $RestartCorrelationWindowMinutes
+$Updates = foreach ($UpdateGroup in (Get-UpdateEventGroups -Events $OrderedRecords -SplitGapMinutes $AttemptSplitGapMinutes)) {
+    Get-UpdateSummary -Events $UpdateGroup.Events -GroupKey $UpdateGroup.GroupName -AttemptNumber $UpdateGroup.AttemptNumber -AllEvents $OrderedRecords -Sessions $LocalSessions -RestartEvents $LocalRestartEvents -UpdateClientEvents $LocalUpdateClientEvents -LocalIdentityFallback $LocalRegistryIdentities -LockEvents $LocalLockEvents -SessionWindowMinutes $SessionCorrelationWindowMinutes -RestartWindowMinutes $RestartCorrelationWindowMinutes -InstallResultWindowMinutes $InstallResultCorrelationWindowMinutes
 }
 
 if ($UpdateStatusFilter -and $UpdateStatusFilter.Count -gt 0) {
@@ -1132,12 +1564,17 @@ $Output = [PSCustomObject]@{
     EventCount    = $OrderedRecords.Count
     SessionCount  = @($LocalSessions).Count
     RestartCount  = @($LocalRestartEvents).Count
+    UpdateClientEventCount = @($LocalUpdateClientEvents).Count
     LockEventCount = @($LocalLockEvents).Count
     LocalIdentityCount = @($LocalRegistryIdentities).Count
-    Updates       = @($Updates | Sort-Object -Property NotificationDisplayedAt, FirstSeen)
+    Updates       = @($Updates | Sort-Object -Property NotificationDisplayedAt, FirstSeen -Descending)
     NonNotifiedUpdates = @(
         $Updates | Where-Object {
-            -not $_.NotificationDisplayedAt -or $_.NotificationNotShownSignal -eq 'Notification Not Processed'
+            $_.NotificationDisplayedState -eq 'No' -or (
+                [string]::IsNullOrWhiteSpace($_.NotificationDisplayedState) -and
+                -not $_.NotificationDisplayedAt -and
+                $_.NotificationNotShownSignal -eq 'Notification Not Processed'
+            )
         } | Sort-Object -Property FirstSeen
     )
     Sessions      = @($LocalSessions)
