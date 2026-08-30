@@ -197,7 +197,7 @@ function Get-SignInData {
         $Script:SignInData = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/auditLogs/signIns/?`$filter=createdDateTime ge $DateCutoff and createdDateTime le $DateCurrent and appDisplayName eq 'Windows Sign In'&?select=userDisplayName,userId,deviceDetail"
         # Show amount of pages estimated to retrieve based on '@odata.count' and amount of records per page
         $RecordsPerPage = 100 # Graph API default page size
-        $TotalRecords = $Script:SignInData.'@odata.count'
+        $TotalRecords = $Script:SignInData.value.count
         $EstimatedPages = [math]::Ceiling($TotalRecords / $RecordsPerPage)
         Write-Output "Estimated pages to retrieve: $EstimatedPages"
         if ($Script:SignInData.'@odata.nextLink') {

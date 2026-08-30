@@ -1,3 +1,10 @@
+<#
+THIS SCRIPT IS NOT DONE!
+.SYNOPSIS
+    Finds Windows Update notifications from USOShared logs.
+.DESCRIPTION
+    This script parses the USOShared logs to find Windows Update notifications and related events. It can correlate these events with user sessions, lock state, and other relevant information to provide a comprehensive view of update notifications on the system.
+#>
 [CmdletBinding()]
 param(
     [string[]]$InputPath = @('C:\ProgramData\USOShared\Logs\User'),
@@ -1007,10 +1014,10 @@ function Get-GlobalInstallEvidenceFromUpdateClient {
         }
     }
 
-    $Matches = @()
+    $MatchedKB = @()
 
     if ($KbArticles -and $KbArticles.Count -gt 0) {
-        $Matches = @(
+        $MatchedKB = @(
             $UpdateClientEvents |
                 Where-Object {
                     @($_.KbArticles | Where-Object { $KbArticles -contains $_ }).Count -gt 0
@@ -1019,10 +1026,10 @@ function Get-GlobalInstallEvidenceFromUpdateClient {
         )
     }
 
-    if ($Matches.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($UpdateTitle)) {
+    if ($MatchedKB.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($UpdateTitle)) {
         $NormalizedTargetTitle = Get-NormalizedUpdateEvidenceTitle -Title $UpdateTitle
         if (-not [string]::IsNullOrWhiteSpace($NormalizedTargetTitle)) {
-            $Matches = @(
+            $MatchedKB = @(
                 $UpdateClientEvents |
                     Where-Object {
                         $NormalizedEventTitle = Get-NormalizedUpdateEvidenceTitle -Title $_.UpdateTitle
@@ -1039,7 +1046,7 @@ function Get-GlobalInstallEvidenceFromUpdateClient {
         }
     }
 
-    if ($Matches.Count -eq 0) {
+    if ($MatchedKB.Count -eq 0) {
         return [PSCustomObject]@{
             Status    = 'NoKbMatch'
             Timestamp = $null
@@ -1047,7 +1054,7 @@ function Get-GlobalInstallEvidenceFromUpdateClient {
         }
     }
 
-    $LatestSuccess = $Matches | Where-Object { $_.Outcome -eq 'Success' } | Select-Object -First 1
+    $LatestSuccess = $MatchedKB | Where-Object { $_.Outcome -eq 'Success' } | Select-Object -First 1
     if ($LatestSuccess) {
         return [PSCustomObject]@{
             Status    = 'Installed'
@@ -1056,7 +1063,7 @@ function Get-GlobalInstallEvidenceFromUpdateClient {
         }
     }
 
-    $LatestFailure = $Matches | Where-Object { $_.Outcome -eq 'Failure' } | Select-Object -First 1
+    $LatestFailure = $MatchedKB | Where-Object { $_.Outcome -eq 'Failure' } | Select-Object -First 1
     if ($LatestFailure) {
         return [PSCustomObject]@{
             Status    = 'Failed'
@@ -1067,8 +1074,8 @@ function Get-GlobalInstallEvidenceFromUpdateClient {
 
     return [PSCustomObject]@{
         Status    = 'Seen'
-        Timestamp = $Matches[0].Timestamp
-        EventId   = $Matches[0].EventId
+        Timestamp = $MatchedKB[0].Timestamp
+        EventId   = $MatchedKB[0].EventId
     }
 }
 

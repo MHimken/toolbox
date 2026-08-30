@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local administrator inventory</title>
+  <style>
+    :root {
+      --ink: #202626;
+      --jet: #242c31;
+      --muted: #737b80;
+      --accent: #ea2c48;
+      --accent-deep: #9f2f45;
+      --paper: #ffffff;
+      --wash: #f3f4f4;
+      --line: #d9dcdd;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: var(--wash); font-family: Bahnschrift, "Trebuchet MS", sans-serif; letter-spacing: 0; }
+    button, input, select { font: inherit; letter-spacing: 0; }
+    button, select { cursor: pointer; }
+    header { color: var(--paper); background: var(--jet); border-bottom: 5px solid var(--accent); }
+    .header-inner, main { width: min(100% - 32px, 1600px); margin-inline: auto; }
+    .header-inner { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding: 26px 0 22px; }
+    h1 { margin: 0; font-family: Georgia, serif; font-size: clamp(1.7rem, 3vw, 2.7rem); font-weight: 500; letter-spacing: 0; }
+    .generated { margin: 6px 0 0; color: #d9dcdd; font-size: .84rem; }
+    .header-count { min-width: 130px; text-align: right; }
+    .header-count strong { display: block; font-family: Georgia, serif; font-size: 2rem; font-weight: 500; }
+    main { padding: 22px 0 34px; }
+    .connection { margin-bottom: 20px; padding: 18px; border-left: 5px solid var(--accent); background: var(--paper); }
+    .connection-grid { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr) auto; gap: 10px; align-items: end; }
+    .connection-grid > * { min-width: 0; }
+    .refresh-note { margin: 12px 0 0; padding: 10px 12px; color: var(--ink); background: #f7e4e8; border: 1px solid #d8a7b1; font-size: .86rem; }
+    .refresh-status { min-height: 20px; margin: 10px 0 0; color: var(--muted); font-size: .84rem; }
+    .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
+    .tab { padding: 11px 16px; border: 0; border-bottom: 3px solid transparent; color: var(--muted); background: transparent; }
+    .tab[aria-selected="true"] { color: var(--ink); border-color: var(--accent); font-weight: 700; }
+    .summary-band { display: flex; flex-wrap: wrap; gap: 28px; padding: 18px 4px; border-bottom: 1px solid var(--line); }
+    .metric { min-width: 120px; }
+    .metric span { display: block; color: var(--muted); font-size: .75rem; text-transform: uppercase; }
+    .metric strong { font-family: Georgia, serif; font-size: 1.45rem; font-weight: 500; }
+    .toolbar { display: grid; grid-template-columns: minmax(240px, 1fr) repeat(3, minmax(140px, auto)) auto; gap: 10px; align-items: end; min-width: 0; padding: 18px 0; }
+    .toolbar > * { min-width: 0; }
+    label { display: grid; gap: 5px; color: var(--muted); font-size: .75rem; font-weight: 700; text-transform: uppercase; }
+    input, select { min-height: 40px; width: 100%; border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; color: var(--ink); background: var(--paper); }
+    input:focus, select:focus, button:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 1px; }
+    .actions { display: flex; gap: 8px; }
+    .command { min-height: 40px; border: 1px solid var(--jet); border-radius: 4px; padding: 8px 13px; color: var(--paper); background: var(--jet); white-space: nowrap; }
+    .command:hover { background: var(--ink); }
+    .command.secondary { color: var(--jet); background: var(--paper); }
+    .command.secondary:hover { color: var(--paper); background: var(--jet); }
+    .back { display: none; margin: 14px 0 0; border: 0; padding: 4px 0; color: var(--accent-deep); background: transparent; font-weight: 700; }
+    .back.visible { display: inline-block; }
+    .table-frame { overflow: auto; max-width: 100%; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; }
+    table { width: 100%; min-width: 1500px; border-collapse: collapse; font-size: .86rem; }
+    th { position: sticky; top: 0; z-index: 1; padding: 0; text-align: left; color: var(--paper); background: var(--jet); white-space: nowrap; }
+    th button { width: 100%; border: 0; padding: 11px 12px; color: inherit; background: transparent; text-align: left; font-weight: 700; }
+    th button:hover { background: var(--ink); }
+    td { max-width: 340px; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+    tbody tr:nth-child(even) { background: var(--wash); }
+    tbody tr:hover { box-shadow: inset 4px 0 var(--accent); }
+    .detail-link { border: 0; padding: 0; color: var(--accent-deep); background: transparent; text-align: left; text-decoration: underline; font-weight: 700; }
+    .status { display: inline-block; min-width: 62px; border-radius: 3px; padding: 3px 7px; text-align: center; font-size: .72rem; font-weight: 700; }
+    .status.active { color: var(--paper); background: var(--jet); }
+    .status.removed { color: var(--paper); background: var(--accent-deep); }
+    .empty { padding: 52px 20px; color: var(--muted); text-align: center; }
+    .pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 14px; }
+    .page-info { color: var(--muted); font-size: .84rem; }
+    .page-controls { display: flex; gap: 6px; }
+    .page-controls button { min-width: 40px; min-height: 36px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: var(--paper); }
+    .page-controls button:disabled { cursor: default; opacity: .45; }
+    [hidden] { display: none !important; }
+    @media (max-width: 900px) {
+      .connection-grid { grid-template-columns: 1fr 1fr; }
+      .connection-grid .command { grid-column: 1 / -1; }
+      .toolbar { grid-template-columns: 1fr 1fr; }
+      .search-field, .actions { grid-column: 1 / -1; }
+      .actions { justify-content: flex-end; }
+    }
+    @media (max-width: 560px) {
+      .header-inner, main { width: min(100% - 20px, 1600px); }
+      .header-inner { align-items: start; padding-block: 20px; }
+      .header-count { display: none; }
+      .tab { flex: 1; padding-inline: 5px; font-size: .78rem; }
+      .connection-grid { grid-template-columns: 1fr; }
+      .connection-grid .command { grid-column: auto; }
+      .toolbar { grid-template-columns: 1fr; }
+      .search-field, .actions { grid-column: auto; }
+      .actions { justify-content: stretch; }
+      .actions button { flex: 1; min-width: 0; padding-inline: 8px; }
+      .summary-band { gap: 18px; }
+      .pagination { align-items: start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div>
+        <h1>Local administrator inventory</h1>
+        <p class="generated" id="generatedAt"></p>
+      </div>
+      <div class="header-count"><strong id="visibleCount">0</strong><span>matching rows</span></div>
+    </div>
+  </header>
+  <main>
+    <section class="connection" id="connectionPanel" aria-labelledby="connectionTitle" hidden>
+      <div class="connection-grid">
+        <label id="connectionTitle">Storage account name<input id="storageAccountName" type="text" placeholder="Example: storageaccount" autocomplete="off" spellcheck="false"></label>
+        <label>Read-only SAS token<input id="sasToken" type="password" placeholder="sv=..." autocomplete="off"></label>
+        <button class="command" id="refreshButton" type="button">Refresh from Azure</button>
+      </div>
+      <p class="refresh-note" id="refreshWarning" role="alert" hidden>Please do not click Refresh repeatedly. Azure Table pagination can take a while; wait patiently until this message changes.</p>
+      <p class="refresh-status" id="refreshStatus" aria-live="polite">No request has been sent. Data loads only when you click Refresh from Azure.</p>
+    </section>
+    <nav class="tabs" aria-label="Report views">
+      <button class="tab" data-view="summary" aria-selected="true">Local admins</button>
+      <button class="tab" data-view="users" aria-selected="false">User details</button>
+      <button class="tab" data-view="groups" aria-selected="false">Group details</button>
+    </nav>
+    <button class="back" id="backButton" type="button">Back to local admins</button>
+    <section class="summary-band" aria-label="Inventory totals">
+      <div class="metric"><span>Local admins</span><strong id="totalMain">0</strong></div>
+      <div class="metric"><span>Removed</span><strong id="totalRemoved">0</strong></div>
+      <div class="metric"><span>Computers</span><strong id="totalComputers">0</strong></div>
+      <div class="metric"><span>Users</span><strong id="totalUsers">0</strong></div>
+      <div class="metric"><span>Groups</span><strong id="totalGroups">0</strong></div>
+    </section>
+    <section class="toolbar" aria-label="Table controls">
+      <label class="search-field">Search all columns<input id="search" type="search" placeholder="Computer, SID, user, group..." autocomplete="off"></label>
+      <label id="joinField">Join state<select id="joinFilter"><option value="">All join states</option></select></label>
+      <label id="removedField">Status<select id="removedFilter"><option value="">All records</option><option value="0">Active</option><option value="1">Removed</option></select></label>
+      <label>Rows per page<select id="pageSize"><option>25</option><option selected>50</option><option>100</option><option>250</option></select></label>
+      <div class="actions"><button class="command secondary" id="resetButton" type="button">Reset</button><button class="command" id="exportButton" type="button">Export CSV</button></div>
+    </section>
+    <div class="table-frame">
+      <table>
+        <thead><tr id="tableHead"></tr></thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+      <div class="empty" id="emptyState" hidden>No rows match the current filters.</div>
+    </div>
+    <div class="pagination">
+      <span class="page-info" id="pageInfo"></span>
+      <div class="page-controls"><button id="firstPage" type="button" title="First page">|&lt;</button><button id="previousPage" type="button" title="Previous page">&lt;</button><button id="nextPage" type="button" title="Next page">&gt;</button><button id="lastPage" type="button" title="Last page">&gt;|</button></div>
+    </div>
+  </main>
+  <script id="reportData" type="application/json">__REPORT_DATA__</script>
+  <script>
+    const embeddedPayload = document.getElementById('reportData').textContent.trim();
+    const hasEmbeddedData = embeddedPayload !== ('__REPORT_' + 'DATA__');
+    let REPORT = hasEmbeddedData ? JSON.parse(embeddedPayload) : { generatedAt: null, summary: [], users: [], groups: [] };
+    const views = {
+      summary: {
+        rows: REPORT.summary,
+        columns: [
+          ['ComputerName', 'Computer name'], ['SID', 'SID'], ['RowKey', 'Entry'],
+          ['EntraOrHybrid', 'Join state'], ['LastReportTimeStamp', 'Last report'],
+          ['LocalAdminGroupName', 'Administrators group'], ['Removed', 'Status'],
+          ['UserName', 'User name'], ['GroupName', 'Group name'],
+          ['LocalAccountLastPasswordChange', 'Password changed'], ['Timestamp', 'Azure timestamp']
+        ]
+      },
+      users: { rows: REPORT.users, columns: [['UserID', 'User ID'], ['SamAccountName', 'SAM account name'], ['UserPrincipalName', 'User principal name'], ['LocalOrEntraOrAD', 'Source'], ['Timestamp', 'Azure timestamp']] },
+      groups: { rows: REPORT.groups, columns: [['GroupID', 'Group ID'], ['GroupName', 'Group name'], ['LocalOrEntraOrAD', 'Source'], ['Timestamp', 'Azure timestamp']] }
+    };
+    const state = { view: 'summary', query: '', join: '', removed: '', sort: 'RowKey', direction: 1, page: 1, size: 50, linked: false };
+    const elements = Object.fromEntries(['generatedAt','visibleCount','totalMain','totalRemoved','totalComputers','totalUsers','totalGroups','connectionPanel','storageAccountName','sasToken','refreshButton','refreshWarning','refreshStatus','backButton','search','joinField','joinFilter','removedField','removedFilter','pageSize','resetButton','exportButton','tableHead','tableBody','emptyState','pageInfo','firstPage','previousPage','nextPage','lastPage'].map(id => [id, document.getElementById(id)]));
+    const formatter = new Intl.NumberFormat();
+
+    function text(value) { return value === null || value === undefined ? '' : String(value); }
+    function displayValue(key, value) {
+      if (!value) return '';
+      if (key.includes('Timestamp') || key.includes('TimeStamp') || key.includes('PasswordChange')) {
+        const date = new Date(value);
+        if (!Number.isNaN(date.getTime())) return date.toLocaleString();
+      }
+      return text(value);
+    }
+    function searchable(row) { return Object.entries(row).filter(([key]) => !key.startsWith('_')).map(([, value]) => text(value).toLowerCase()).join(' '); }
+    async function getAzureTableEntities(tableName, accountUrl, token) {
+      const rows = [];
+      let nextPartitionKey = '';
+      let nextRowKey = '';
+      do {
+        const requestUrl = new URL(`${accountUrl}/${tableName}()`);
+        const sasParameters = new URLSearchParams(token.replace(/^\?/, ''));
+        sasParameters.forEach((value, key) => requestUrl.searchParams.set(key, value));
+        if (nextPartitionKey) requestUrl.searchParams.set('NextPartitionKey', nextPartitionKey);
+        if (nextRowKey) requestUrl.searchParams.set('NextRowKey', nextRowKey);
+        const response = await fetch(requestUrl, { headers: { Accept: 'application/json;odata=nometadata', 'x-ms-version': '2023-11-03' }, cache: 'no-store' });
+        if (!response.ok) throw new Error(`${tableName} returned HTTP ${response.status} ${response.statusText}.`);
+        const payload = await response.json();
+        rows.push(...(payload.value || []));
+        nextPartitionKey = response.headers.get('x-ms-continuation-NextPartitionKey') || '';
+        nextRowKey = response.headers.get('x-ms-continuation-NextRowKey') || '';
+      } while (nextPartitionKey);
+      return rows;
+    }
+    function resolveAzureData(mainEntities, userEntities, groupEntities) {
+      const usersBySid = new Map(userEntities.map(user => [text(user.PartitionKey), user]));
+      const groupsBySid = new Map(groupEntities.map(group => [text(group.PartitionKey), group]));
+      const joinStates = { '1': 'Entra joined', '2': 'Hybrid joined', '3': 'Domain joined' };
+      const summary = mainEntities.map(entity => {
+        const userSid = text(entity.UserID), groupSid = text(entity.GroupID);
+        return {
+          ComputerName: text(entity.Computername), SID: text(entity.PartitionKey), RowKey: Number(entity.RowKey),
+          EntraOrHybrid: entity.EntraOrHybrid == null ? '' : (joinStates[text(entity.EntraOrHybrid)] || `Unknown (${entity.EntraOrHybrid})`),
+          LastReportTimeStamp: entity.LastReportTimeStamp, LocalAdminGroupName: text(entity.LocalAdminGroupName), Removed: Number(entity.Removed),
+          UserName: userSid && usersBySid.has(userSid) ? text(usersBySid.get(userSid).RowKey) : userSid,
+          GroupName: groupSid && groupsBySid.has(groupSid) ? text(groupsBySid.get(groupSid).RowKey) : groupSid,
+          LocalAccountLastPasswordChange: entity.LocalAccountLastPasswordChange, Timestamp: entity.Timestamp, _UserSID: userSid, _GroupSID: groupSid
+        };
+      }).sort((left, right) => left.RowKey - right.RowKey);
+      const users = userEntities.map(user => ({ UserID: text(user.PartitionKey), SamAccountName: text(user.RowKey), UserPrincipalName: text(user.UserPrincipalName), LocalOrEntraOrAD: text(user.LocalOrEntraOrAD), Timestamp: user.Timestamp }));
+      const groups = groupEntities.map(group => ({ GroupID: text(group.PartitionKey), GroupName: text(group.RowKey), LocalOrEntraOrAD: text(group.LocalOrEntraOrAD), Timestamp: group.Timestamp }));
+      return { generatedAt: new Date().toISOString(), summary, users, groups };
+    }
+    function updateReportSummary() {
+      elements.generatedAt.textContent = REPORT.generatedAt ? `${hasEmbeddedData ? 'Snapshot generated' : 'Last refreshed'} ${new Date(REPORT.generatedAt).toLocaleString()}` : 'No Azure data loaded';
+      elements.totalMain.textContent = formatter.format(REPORT.summary.length);
+      elements.totalRemoved.textContent = formatter.format(REPORT.summary.filter(row => Number(row.Removed) === 1).length);
+      elements.totalComputers.textContent = formatter.format(new Set(REPORT.summary.map(row => row.SID)).size);
+      elements.totalUsers.textContent = formatter.format(REPORT.users.length);
+      elements.totalGroups.textContent = formatter.format(REPORT.groups.length);
+      elements.joinFilter.querySelectorAll('option:not(:first-child)').forEach(option => option.remove());
+      [...new Set(REPORT.summary.map(row => row.EntraOrHybrid).filter(Boolean))].sort().forEach(value => { const option = document.createElement('option'); option.value = value; option.textContent = value; elements.joinFilter.appendChild(option); });
+    }
+    async function refreshFromAzure() {
+      const accountName = elements.storageAccountName.value.trim().toLowerCase();
+      const token = elements.sasToken.value.trim();
+      if (!/^[a-z0-9]{3,24}$/.test(accountName) || !token) {
+        elements.refreshStatus.textContent = 'Enter a valid storage account name and a read-only SAS token. Account names contain 3 to 24 lowercase letters or numbers.';
+        return;
+      }
+      const accountUrl = `https://${accountName}.table.core.windows.net`;
+      elements.refreshButton.disabled = true;
+      elements.refreshButton.textContent = 'Refreshing...';
+      elements.refreshWarning.hidden = false;
+      elements.refreshStatus.textContent = 'Reading Azure Table pages. Please wait patiently.';
+      elements.connectionPanel.setAttribute('aria-busy', 'true');
+      try {
+        const [main, users, groups] = await Promise.all([
+          getAzureTableEntities('LocalAdminCollection', accountUrl, token),
+          getAzureTableEntities('AdminUserNames', accountUrl, token),
+          getAzureTableEntities('AdminGroups', accountUrl, token)
+        ]);
+        REPORT = resolveAzureData(main, users, groups);
+        views.summary.rows = REPORT.summary; views.users.rows = REPORT.users; views.groups.rows = REPORT.groups;
+        state.query = state.join = state.removed = ''; state.page = 1;
+        elements.search.value = elements.joinFilter.value = elements.removedFilter.value = '';
+        updateReportSummary(); activateView('summary');
+        elements.refreshWarning.textContent = 'Refresh complete. The report now shows the latest retrieved Azure Table data.';
+        elements.refreshStatus.textContent = `Loaded ${formatter.format(REPORT.summary.length)} local administrator rows, ${formatter.format(REPORT.users.length)} users, and ${formatter.format(REPORT.groups.length)} groups.`;
+      } catch (error) {
+        elements.refreshWarning.textContent = 'Refresh stopped. Review the error below before trying again.';
+        elements.refreshStatus.textContent = `${error.message} Verify the SAS permissions and Azure Storage CORS configuration.`;
+      } finally {
+        elements.refreshButton.disabled = false;
+        elements.refreshButton.textContent = 'Refresh from Azure';
+        elements.connectionPanel.removeAttribute('aria-busy');
+      }
+    }
+    function filteredRows() {
+      const query = state.query.trim().toLowerCase();
+      return views[state.view].rows.filter(row => (!query || searchable(row).includes(query)) && (state.view !== 'summary' || ((!state.join || text(row.EntraOrHybrid) === state.join) && (!state.removed || text(row.Removed) === state.removed))));
+    }
+    function sortedRows(rows) {
+      return [...rows].sort((left, right) => {
+        const a = left[state.sort], b = right[state.sort];
+        if (a === b) return 0;
+        if (a === null || a === undefined || a === '') return 1;
+        if (b === null || b === undefined || b === '') return -1;
+        if (typeof a === 'number' && typeof b === 'number') return (a - b) * state.direction;
+        return text(a).localeCompare(text(b), undefined, { numeric: true, sensitivity: 'base' }) * state.direction;
+      });
+    }
+    function captureViewState() {
+      return {
+        ...state,
+        windowScrollY: window.scrollY,
+        tableScrollLeft: document.querySelector('.table-frame').scrollLeft
+      };
+    }
+    function restoreViewState(savedState) {
+      Object.assign(state, savedState);
+      elements.search.value = state.query;
+      elements.joinFilter.value = state.join;
+      elements.removedFilter.value = state.removed;
+      elements.pageSize.value = text(state.size);
+      document.querySelectorAll('.tab').forEach(tab => tab.setAttribute('aria-selected', text(tab.dataset.view === state.view)));
+      elements.joinField.hidden = state.view !== 'summary';
+      elements.removedField.hidden = state.view !== 'summary';
+      elements.backButton.classList.toggle('visible', state.linked);
+      render();
+      requestAnimationFrame(() => {
+        document.querySelector('.table-frame').scrollLeft = savedState.tableScrollLeft || 0;
+        window.scrollTo({ top: savedState.windowScrollY || 0 });
+      });
+    }
+    function updateCurrentHistoryState() {
+      if (history.state?.localAdminReport) {
+        history.replaceState({ localAdminReport: true, viewState: captureViewState() }, '');
+      }
+    }
+    function activateView(view, linkedQuery = '') {
+      state.view = view; state.page = 1; state.linked = Boolean(linkedQuery);
+      state.query = linkedQuery; elements.search.value = linkedQuery;
+      state.sort = view === 'summary' ? 'RowKey' : views[view].columns[0][0]; state.direction = 1;
+      document.querySelectorAll('.tab').forEach(tab => tab.setAttribute('aria-selected', text(tab.dataset.view === view)));
+      elements.joinField.hidden = view !== 'summary'; elements.removedField.hidden = view !== 'summary';
+      elements.backButton.classList.toggle('visible', state.linked);
+      render();
+    }
+    function openDetail(kind, sid) {
+      history.replaceState({ localAdminReport: true, viewState: captureViewState() }, '');
+      activateView(kind === 'user' ? 'users' : 'groups', sid);
+      history.pushState({ localAdminReport: true, viewState: captureViewState() }, '', `#${kind}-details`);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    function renderCell(row, key) {
+      const cell = document.createElement('td');
+      if (state.view === 'summary' && key === 'Removed') {
+        const badge = document.createElement('span'); badge.className = `status ${Number(row.Removed) === 1 ? 'removed' : 'active'}`; badge.textContent = Number(row.Removed) === 1 ? 'Removed' : 'Active'; cell.appendChild(badge);
+      } else if (state.view === 'summary' && key === 'UserName' && row._UserSID) {
+        const button = document.createElement('button'); button.className = 'detail-link'; button.type = 'button'; button.textContent = text(row.UserName); button.title = `Open user details for ${row._UserSID}`; button.addEventListener('click', () => openDetail('user', row._UserSID)); cell.appendChild(button);
+      } else if (state.view === 'summary' && key === 'GroupName' && row._GroupSID) {
+        const button = document.createElement('button'); button.className = 'detail-link'; button.type = 'button'; button.textContent = text(row.GroupName); button.title = `Open group details for ${row._GroupSID}`; button.addEventListener('click', () => openDetail('group', row._GroupSID)); cell.appendChild(button);
+      } else { cell.textContent = displayValue(key, row[key]); }
+      return cell;
+    }
+    function render() {
+      const rows = sortedRows(filteredRows());
+      const pages = Math.max(1, Math.ceil(rows.length / state.size)); state.page = Math.min(state.page, pages);
+      const start = (state.page - 1) * state.size; const pageRows = rows.slice(start, start + state.size);
+      elements.visibleCount.textContent = formatter.format(rows.length);
+      elements.tableHead.replaceChildren();
+      views[state.view].columns.forEach(([key, label]) => {
+        const th = document.createElement('th'); const button = document.createElement('button'); button.type = 'button'; button.textContent = `${label}${state.sort === key ? (state.direction === 1 ? '  ▲' : '  ▼') : ''}`; button.addEventListener('click', () => { if (state.sort === key) state.direction *= -1; else { state.sort = key; state.direction = 1; } state.page = 1; render(); updateCurrentHistoryState(); }); th.appendChild(button); elements.tableHead.appendChild(th);
+      });
+      elements.tableBody.replaceChildren();
+      pageRows.forEach(row => { const tr = document.createElement('tr'); views[state.view].columns.forEach(([key]) => tr.appendChild(renderCell(row, key))); elements.tableBody.appendChild(tr); });
+      elements.emptyState.hidden = rows.length !== 0;
+      elements.pageInfo.textContent = rows.length ? `${formatter.format(start + 1)}-${formatter.format(Math.min(start + state.size, rows.length))} of ${formatter.format(rows.length)} | Page ${state.page} of ${pages}` : '0 rows';
+      elements.firstPage.disabled = elements.previousPage.disabled = state.page === 1; elements.nextPage.disabled = elements.lastPage.disabled = state.page === pages;
+    }
+    function exportCsv() {
+      const columns = views[state.view].columns; const quote = value => `"${text(value).replaceAll('"', '""')}"`;
+      const lines = [columns.map(([, label]) => quote(label)).join(','), ...sortedRows(filteredRows()).map(row => columns.map(([key]) => quote(key === 'Removed' ? (Number(row[key]) === 1 ? 'Removed' : 'Active') : row[key])).join(','))];
+      const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `LocalAdmin-${state.view}.csv`; link.click(); URL.revokeObjectURL(link.href);
+    }
+
+    elements.connectionPanel.hidden = hasEmbeddedData;
+    updateReportSummary();
+    history.replaceState({ localAdminReport: true, viewState: captureViewState() }, '', location.href.split('#')[0]);
+    document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => { activateView(tab.dataset.view); updateCurrentHistoryState(); }));
+    elements.search.addEventListener('input', event => { state.query = event.target.value; state.page = 1; if (state.view === 'summary') { state.linked = false; elements.backButton.classList.remove('visible'); } render(); updateCurrentHistoryState(); });
+    elements.joinFilter.addEventListener('change', event => { state.join = event.target.value; state.page = 1; render(); updateCurrentHistoryState(); });
+    elements.removedFilter.addEventListener('change', event => { state.removed = event.target.value; state.page = 1; render(); updateCurrentHistoryState(); });
+    elements.pageSize.addEventListener('change', event => { state.size = Number(event.target.value); state.page = 1; render(); updateCurrentHistoryState(); });
+    elements.resetButton.addEventListener('click', () => { state.query = state.join = state.removed = ''; state.page = 1; elements.search.value = elements.joinFilter.value = elements.removedFilter.value = ''; render(); updateCurrentHistoryState(); });
+    elements.exportButton.addEventListener('click', exportCsv); elements.backButton.addEventListener('click', () => history.back());
+    elements.refreshButton.addEventListener('click', refreshFromAzure);
+    elements.firstPage.addEventListener('click', () => { state.page = 1; render(); updateCurrentHistoryState(); }); elements.previousPage.addEventListener('click', () => { state.page--; render(); updateCurrentHistoryState(); }); elements.nextPage.addEventListener('click', () => { state.page++; render(); updateCurrentHistoryState(); }); elements.lastPage.addEventListener('click', () => { state.page = Math.max(1, Math.ceil(filteredRows().length / state.size)); render(); updateCurrentHistoryState(); });
+    window.addEventListener('popstate', event => {
+      if (event.state?.localAdminReport && event.state.viewState) restoreViewState(event.state.viewState);
+    });
+    render();
+  </script>
+</body>
+</html>

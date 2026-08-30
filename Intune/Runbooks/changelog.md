@@ -1,5 +1,13 @@
 # Changes
 
+## 2026
+
+### 30th of August
+
+* Add: Add-EntraDeviceToGroupFromWebhook.ps1 - added webhook, scheduled cleanup, and dry-run modes for Entra device group membership.
+* Add: BrokenAutopilotDeviceCleanup-Runbook.ps1 - added Azure Automation cleanup of stale Autopilot, Entra, and Intune device records.
+* Fix: Repair-PrimaryUser.ps1 - based the estimated sign-in result count on the returned Graph values.
+
 ## 2025
 
 ### 08th of December

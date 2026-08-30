@@ -1,17 +1,17 @@
 <#
 .SYNOPSIS
-This script will nuke all Windows Update related keys - made with Intune and Autopatch in mind.
+Remediates stuck Windows Update policy settings for Intune reporting.
 .DESCRIPTION
 This is to clean a computer completely of any Windows Update related keys. Very handy if you're switching to something like Autopatch.
 * Will stop relevant services such as IME and Autopatch
-* Will delete legacy GPO/local policy paths (SOFTWARE\Policies\Windows\WindowsUpdate)
+* Will delete legacy GPO/local policy paths (SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate)
 * Will delete CSPs (SOFTWARE\Microsoft\PolicyManager\current\device\Update)
 * Will delete GPCache folder to get rid of stuck policies (SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy\GPCache)
 * Will do gpupdate (if applicable) and Intune sync
 * Will do ConfigMgr machine policy and software update scan actions (if applicable)
 Should get rid of most of your problems when dealing with sticky policies.
 #################################################
-DO NOT RUN THIS ON A REGULAR BASIS. This script is a canonball, not a bullet.
+DO NOT RUN THIS ON A REGULAR BASIS. This script is a cannonball, not a bullet.
 #################################################
 .PARAMETER ResetLocalPolicies
 Enables or disables the reset of the local .pol file for machine settings as this can have unintended consequences
@@ -20,11 +20,17 @@ Enables or disables the reset of the local .pol file for machine settings as thi
 .PARAMETER GPUpdateTimeout
 Defines how long the script should wait for the gpupdate
 .PARAMETER IntuneSyncTimeout
-Defines how long the script should wait for the Intune sync to run
+Defines the maximum number of seconds allowed for each DeviceEnroller process
 .PARAMETER WorkingDirectory
 Specifies the working directory where the script will be executed. The default value is "C:\RWU\".
 .PARAMETER LogDirectory
 Specifies the directory where log files will be stored. The default value is "C:\RWU\".
+.PARAMETER ScriptTimeoutSeconds
+Specifies the base runtime in seconds before adding GPUpdateTimeout and IntuneSyncTimeout. The combined runtime is capped at 50 minutes, and new work stops five seconds early to allow cleanup.
+.PARAMETER Log
+Enables CMTrace-compatible file logging.
+.PARAMETER TimestampRegistryPath
+Specifies the registry key that stores the successful remediation timestamp. Use the same value in the detection script.
 .EXAMPLE
 This example will run the script with, create the registry key backup in C:\RWU and restart required services.
 
@@ -33,86 +39,114 @@ This example will run the script with, create the registry key backup in C:\RWU 
 If you have a slower group policy update you might want to use this as it will increase the wait time from 60 seconds to 120 seconds.
 This will also prevent the deletion of the .pol file which hold the machines policies.
 
-.\Reset-WindowsUpdateSettings.ps1 -ResetLocalPolicies:$False -GPupdateTime 120
+.\Reset-WindowsUpdateSettings.ps1 -ResetLocalPolicies:$False -GPUpdateTimeout 120
 .NOTES
-Version: 1.3
+Version: 1.6
 Author: Martin Himken
 Original script name: Reset-WindowsUpdateSettings.ps1
 Initial creation date: 10.03.25
-Last change: 24.01.26
-Changes: see changelog.md
+Last change: 30.08.26
+Exit codes: 0 = success, 1 = operation failed, 2 = timeout, 3 = restore failed, 4 = timestamp failed
+.LINK
+changelog.md
 #>
 
 param(
-    [System.IO.DirectoryInfo]$WorkingDirectory = "C:\RWU\",
-    [System.IO.DirectoryInfo]$LogDirectory = "C:\RWU\",
+    [System.IO.DirectoryInfo]$WorkingDirectory = [System.IO.DirectoryInfo]"C:\ProgramData\RWU\",
+    [System.IO.DirectoryInfo]$LogDirectory = [System.IO.DirectoryInfo]"C:\ProgramData\RWU\",
     [boolean]$ResetLocalPolicies = $true,
     [switch]$BackupDisabled,
-    [int]$GPUpdateTimeout = 60,
-    [int]$IntuneSyncTimeout = 60,
+    [ValidateRange(0, 3000)]
+    [int]$GPUpdateTimeout = 120,
+    [ValidateRange(0, 3000)]
+    [int]$IntuneSyncTimeout = 120,
+    [ValidateRange(10, 300)]
+    [int]$ScriptTimeoutSeconds = 300,
     [boolean]$Log = $false,
-    [switch]$ToConsole
+    [ValidatePattern('^HKLM:\\')]
+    [string]$TimestampRegistryPath = 'HKLM:\SOFTWARE\MHimken\Remediations\ResetWindowsUpdateSettings'
 )
-function Get-ScriptPath {
-    <#
-    .SYNOPSIS
-    Get the current script path.
-    #>
-    if ($PSScriptRoot) { 
-        # Console or VS Code debug/run button/F5 temp console
-        $ScriptRoot = $PSScriptRoot 
-    } else {
-        if ($psISE) { 
-            Split-Path -Path $psISE.CurrentFile.FullPath
-        } else {
-            if ($profile -match 'VScode') { 
-                # VS Code "Run Code Selection" button/F8 in integrated console
-                $ScriptRoot = Split-Path $psEditor.GetEditorContext().CurrentFile.Path 
-            } else { 
-                Write-Output 'unknown directory to set path variable. exiting script.'
-                exit
-            } 
-        } 
+$Script:ExitCode = 0
+$Script:DeadlineExpired = $false
+$Script:RemediationErrors = [System.Collections.Generic.List[string]]::new()
+$Script:Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$Script:MaximumRuntimeSeconds = [Math]::Min(3000, $ScriptTimeoutSeconds + $GPUpdateTimeout + $IntuneSyncTimeout)
+$Script:WorkDeadlineSeconds = [Math]::Max(1, $Script:MaximumRuntimeSeconds - 5)
+$Script:RemediationTimestampName = 'LastSuccessUtc'
+
+function Get-RemainingWorkMilliseconds {
+    $RemainingMilliseconds = ([double]$Script:WorkDeadlineSeconds * 1000) - $Script:Stopwatch.ElapsedMilliseconds
+    return [Math]::Max(0, [int][Math]::Floor($RemainingMilliseconds))
+}
+function Assert-WorkTimeRemaining {
+    param(
+        [string]$Operation
+    )
+    if ((Get-RemainingWorkMilliseconds) -le 0) {
+        $Script:DeadlineExpired = $true
+        throw [System.TimeoutException]::new("Script deadline reached before $Operation")
     }
-    $Script:PathToScript = $ScriptRoot
+}
+function Invoke-BoundedProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [Parameter(Mandatory = $true)]
+        [string[]]$ArgumentList,
+        [Parameter(Mandatory = $true)]
+        [string]$Operation,
+        [int]$MaximumSeconds = 0
+    )
+    Assert-WorkTimeRemaining -Operation $Operation
+    $RemainingMilliseconds = Get-RemainingWorkMilliseconds
+    if ($MaximumSeconds -gt 0) {
+        $RemainingMilliseconds = [Math]::Min($RemainingMilliseconds, $MaximumSeconds * 1000)
+    }
+    $Process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -PassThru -WindowStyle Hidden -ErrorAction Stop
+    if (-not($Process.WaitForExit($RemainingMilliseconds))) {
+        try { $Process.Kill() } catch { }
+        $Script:DeadlineExpired = (Get-RemainingWorkMilliseconds) -le 0
+        if ($Script:DeadlineExpired) {
+            throw [System.TimeoutException]::new("Script deadline reached while waiting for $Operation")
+        }
+        throw "$Operation exceeded its allowed runtime"
+    }
+    return $Process.ExitCode
 }
 function Initialize-Script {
     <#
         .SYNOPSIS
         Will initialize most of the required variables throughout this script.
     #>
-    if ($Script:DateTime) {
-        Clear-Variable DateTime
-    }
     $Script:DateTime = Get-Date -Format yyyyMMdd_HHmmss
-    if (-not($Script:CurrentLocation)) {
-        $Script:CurrentLocation = Get-Location
+    $Script:CurrentLocation = Get-Location
+    if (-not(Test-Path -LiteralPath $WorkingDirectory.FullName)) {
+        New-Item -Path $WorkingDirectory.FullName -ItemType Directory -Force -ErrorAction Stop | Out-Null
     }
-    if (-not(Test-Path $WorkingDirectory )) { New-Item $WorkingDirectory -ItemType Directory -Force | Out-Null } 
-    if ((Get-Location).path -ne $WorkingDirectory) {
-        Set-Location $WorkingDirectory
+    if ((Get-Location).Path -ne $WorkingDirectory.FullName) {
+        Set-Location -LiteralPath $WorkingDirectory.FullName -ErrorAction Stop
     }
-    Get-ScriptPath
     if (-not($Script:LogFile)) {
         $LogPrefix = 'RWU' #Reset Windows Update
-        $Script:LogFile = Join-Path -Path $LogDirectory -ChildPath ('{0}_{1}.log' -f $LogPrefix, $Script:DateTime)
-        if (-not(Test-Path $LogDirectory)) { New-Item $LogDirectory -ItemType Directory -Force | Out-Null }
+        $Script:LogFile = Join-Path -Path $LogDirectory.FullName -ChildPath ('{0}_{1}.log' -f $LogPrefix, $Script:DateTime)
+        if (-not(Test-Path -LiteralPath $LogDirectory.FullName)) {
+            New-Item -Path $LogDirectory.FullName -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        }
     }
     Write-Log 'Script is initialized - gathering information and initializing directories' -Component 'InitializeScript'
     if (-not($BackupDisabled)) {
         Write-Log 'Creating Backup directory' -Component 'InitializeScript'
-        $Script:BackupDirectory = $(Join-Path -Path $WorkingDirectory -ChildPath "$Script:DateTime")
-        New-Item -Path $Script:BackupDirectory -ItemType Directory -Force | Out-Null
+        $Script:BackupDirectory = Join-Path -Path $WorkingDirectory.FullName -ChildPath $Script:DateTime
+        try {
+            New-Item -Path $Script:BackupDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Log "Backup directory could not be created; continuing without backups: $($_.Exception.Message)" -Component 'InitializeScript' -Type 2
+        }
     }
+    $Script:BackupAvailable = (-not($BackupDisabled)) -and (Test-Path -LiteralPath $Script:BackupDirectory)
     $Script:IsIntuneDevice = ($null -ne (Get-Service IntuneManagementExtension -ErrorAction SilentlyContinue))
     if ($Script:IsIntuneDevice) {
         Write-Log 'Device is managed by Intune' -Component 'InitializeScript'
-        $Script:IsAutoPatchDevice = Test-Path "C:\Program Files\Windows Autopatch Client Broker\ClientBroker\ClientBroker.exe"
-        if (-not($Script:IsAutoPatchDevice)) {
-            Write-Log 'Device is not managed by Autopatch' -Component 'InitializeScript'  
-        } else {
-            Write-Log 'Device is managed by Autopatch' -Component 'InitializeScript'
-        }
     } else {
         Write-Log 'Device is not managed by Intune' -Component 'InitializeScript'
     }
@@ -125,6 +159,18 @@ function Initialize-Script {
     $Script:IsConfigMgrDevice = ($null -ne (Get-Service ccmexec -ErrorAction SilentlyContinue))
     if ($Script:IsConfigMgrDevice) {
         Write-Log 'Device is running ConfigMgr client' -Component 'InitializeScript'
+        try {
+            $CurrentWorkloadConfiguration = (Get-CimInstance -Namespace root/ccm/InvAgt -ClassName CCM_System -ErrorAction Stop).ComgmtWorkloads
+            if (-not[boolean]($CurrentWorkloadConfiguration -band 16)) {
+                $Script:UrlToRestore = Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Name 'UpdateServiceUrlAlternate' -ErrorAction SilentlyContinue
+                if (-not($Script:UrlToRestore)) {
+                    $Script:UrlToRestore = 'http://localhost:8005'
+                }
+                Write-Log "ConfigMgr UpdateServiceUrlAlternate captured as $($Script:UrlToRestore)" -Component 'InitializeScript'
+            }
+        } catch {
+            Write-Log "Could not capture ConfigMgr Windows Update state: $($_.Exception.Message)" -Component 'InitializeScript' -Type 2
+        }
     } else {
         Write-Log 'Device is not running ConfigMgr client' -Component 'InitializeScript'
     }
@@ -141,122 +187,127 @@ function Write-Log {
         $Message,
         $Component,
         # Type: 1 = Normal, 2 = Warning (yellow), 3 = Error (red)
-        [ValidateSet('1', '2', '3')][int]$Type
+        [ValidateSet('1', '2', '3')][int]$Type = 1,
+        [string]$ReportMessage
     )
+    if ($Type -eq 3) {
+        if (-not($ReportMessage)) {
+            $ReportMessage = [string]$Message
+        }
+        $ReportMessage = ($ReportMessage -replace '\s+', ' ').Trim()
+        if ($ReportMessage.Length -gt 180) {
+            $ReportMessage = $ReportMessage.Substring(0, 180)
+        }
+        $Script:RemediationErrors.Add($ReportMessage)
+    }
     if ($Log) {
         $Time = Get-Date -Format 'HH:mm:ss.ffffff'
         $Date = Get-Date -Format 'MM-dd-yyyy'
         if (-not($Component)) { $Component = 'Runner' }
-        if (-not($ToConsole)) {
-            $LogMessage = "<![LOG[$Message" + "]LOG]!><time=`"$Time`" date=`"$Date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"`" file=`"`">"
-            $LogMessage | Out-File -Append -Encoding UTF8 -FilePath $LogFile
-        } elseif ($ToConsole) {
-            switch ($type) {
-                1 { Write-Host "T:$Type C:$Component M:$Message" }
-                2 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Yellow -ForegroundColor Black }
-                3 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Red -ForegroundColor White }
-                default { Write-Host "T:$Type C:$Component M:$Message" }
-            }
-        }
+        $LogMessage = "<![LOG[$Message" + "]LOG]!><time=`"$Time`" date=`"$Date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"`" file=`"`">"
+        $LogMessage | Out-File -Append -Encoding UTF8 -FilePath $LogFile
     }
 }
 function Reset-LocalPolicies {
     $MachinePolicyFile = "C:\Windows\System32\GroupPolicy\Machine\Registry.pol"
-    if (-not(Test-Path -Path $MachinePolicyFile)) {
+    Assert-WorkTimeRemaining -Operation 'local policy reset'
+    if (-not(Test-Path -LiteralPath $MachinePolicyFile)) {
         return $false
     }
-    if (-not($BackupDisabled)) {
+    if ($Script:BackupAvailable) {
         Write-Log "Creating backup of machine registry.pol to $($Script:BackupDirectory)" -Component 'ResetLocalPolicies'
-        Copy-Item $MachinePolicyFile -Destination $Script:BackupDirectory -Force
-    }
-    if ($Script:IsConfigMgrDevice) {
-        Write-Log 'Since the device is managed by CM we might need to extract the custom port for UpdateServiceUrlAlternate and set that value again' -Component 'ResetLocalPolicies'
-        #$CurrentWorkloadConfiguration = (Get-CimInstance -Namespace root/ccm/InvAgt -ClassName CCM_System).ComgmtWorkloads
-        #$ValidWorkloadConfigurations = "2147479807","8209", "8211", "8213", "8215", "8217", "8219", "8221", "8223", "8273", "8275", "8277", "8279", "8281", "8283", "8285", "8287", "8337", "8339", "8341", "8343", "8345", "8347", "8349", "8351", "8401", "8403", "8405", "8407", "8409", "8411", "8413", "8415", "12337", "12339", "12341", "12343", "12345", "12347", "12349", "12351", "12401", "12403", "12405", "12407", "12409", "12411", "12413", "12415", "12465", "12467", "12469", "12471", "12473", "12475", "12477", "12479", "12529", "12531", "12533", "12535", "12537", "12539", "12541", "12543"
-        $CurrentWorkloadConfiguration = (Get-CimInstance -Namespace root/ccm/InvAgt -ClassName CCM_System).ComgmtWorkloads
-        if (-not[boolean]($CurrentWorkloadConfiguration -band 16)) {
-            Write-Log 'The workload for Windows Update is not moved' -Component 'ResetLocalPolicies'
-            try {
-                $UpdateServiceUrlAlternate = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Name 'UpdateServiceUrlAlternate' -ErrorAction SilentlyContinue
-            } catch {
-                Write-Log 'UpdateServiceUrlAlternate not found' -Component 'ResetLocalPolicies'
-            }
-            if ($UpdateServiceUrlAlternate) {
-                $CustomPort = ($UpdateServiceUrlAlternate).Split(':')[2]
-            } else {
-                $CustomPort = 8005
-            }
-            $UrlToRestore = "http://localhost:$CustomPort"
-        } else {
-            Write-Log 'The workload for Windows Update is moved - no need to check for custom port' -Component 'ResetLocalPolicies'
-        } 
+        try {
+            Copy-Item -LiteralPath $MachinePolicyFile -Destination $Script:BackupDirectory -Force -ErrorAction Stop
+        } catch {
+            Write-Log "Machine policy backup failed; continuing: $($_.Exception.Message)" -Component 'ResetLocalPolicies' -Type 2
+        }
     }
     Write-Log 'Removing registry.pol' -Component 'ResetLocalPolicies'
-    Remove-Item -Path $MachinePolicyFile -Force
-    if ($Script:IsActiveDirectoryDevice -and (Test-ComputerSecureChannel)) {
-        Write-Log 'Computer is domain joined and domain is reachable - forcing gpupdate with target computer' -Component 'ResetLocalPolicies'
-        $GPupdatePath = Join-Path -Path "$Env:SystemRoot" -ChildPath "\System32\gpupdate.exe"
-        $GPUpdateArguments = "/target:computer /wait:$GPUpdateTimeout /force"
-        Write-Log "Starting gpupdate with a wait time of $GPUpdateTimeout" -Component 'ResetLocalPolicies'
-        $GPUpdate = Start-Process -FilePath $GPupdatePath -ArgumentList $GPUpdateArguments -PassThru -WindowStyle Hidden -Wait
-        if ($GPUpdate.ExitCode -eq 0) {
-            Write-Log "Sync successful" -Component 'ResetLocalPolicies'
-        } else {
-            Write-Log "Sync unsuccessful - maybe the wait time was not enough." -Component 'ResetLocalPolicies' -Type 2
-        }
+    Remove-Item -LiteralPath $MachinePolicyFile -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $MachinePolicyFile) {
+        throw "Machine policy file still exists after removal: $MachinePolicyFile"
     }
-    if ($Script:IsConfigMgrDevice) {
-        Write-Log "Starting ConfigMgr client actions" -Component 'ResetLocalPolicies'
-        try {
-            Invoke-CimMethod -Namespace 'root\CCM' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{sScheduleID = '{00000000-0000-0000-0000-000000000021}' } -ErrorAction Stop 
-            Write-Log "ConfigMgr Machine Policy client action successful" -Component 'ResetLocalPolicies'
-        } catch {
-            Write-Log "ConfigMgr Machine Policy client action unsuccessful" -Component 'ResetLocalPolicies' -Type 2
-        }
-        try {
-            Invoke-CimMethod -Namespace 'root\CCM' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{sScheduleID = '{00000000-0000-0000-0000-000000000113}' } -ErrorAction Stop
-            Write-Log "ConfigMgr Software Update Scan client action successful" -Component 'ResetLocalPolicies'
-        } catch {
-            Write-Log "ConfigMgr Software Update Scan client action unsuccessful" -Component 'ResetLocalPolicies' -Type 2
-        }
-        if ($UrlToRestore) {
-            try {
-                $CurrentUpdateServiceUrlAlternate = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Name 'UpdateServiceUrlAlternate' -ErrorAction SilentlyContinue
-            } catch {
-                Write-Log "UpdateServiceUrlAlternate wasn't restored properly from CCM, setting manually" -Component 'ResetLocalPolicies' -Type 2
+    return $true
+}
+function Start-GroupPolicyRefresh {
+    if (-not($Script:IsActiveDirectoryDevice)) {
+        return
+    }
+    try {
+        Assert-WorkTimeRemaining -Operation 'group policy refresh'
+        if (Test-ComputerSecureChannel -ErrorAction Stop) {
+            $GPupdatePath = Join-Path -Path $Env:SystemRoot -ChildPath 'System32\gpupdate.exe'
+            $GPUpdateArguments = @('/target:computer', "/wait:$GPUpdateTimeout", '/force')
+            Write-Log "Starting gpupdate with a maximum wait time of $GPUpdateTimeout seconds" -Component 'StartGroupPolicyRefresh'
+            $GPUpdateExitCode = Invoke-BoundedProcess -FilePath $GPupdatePath -ArgumentList $GPUpdateArguments -Operation 'gpupdate' -MaximumSeconds $GPUpdateTimeout
+            if ($GPUpdateExitCode -ne 0) {
+                Write-Log "gpupdate returned exit code $GPUpdateExitCode" -Component 'StartGroupPolicyRefresh' -Type 2
             }
-            if (-not($CurrentUpdateServiceUrlAlternate)) {
-                New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows' -Name 'WindowsUpdate' -Force | Out-Null
-                New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Name 'UpdateServiceUrlAlternate' -Value $UrlToRestore -Force | Out-Null
-            }
-            Write-Log "Set UpdateServiceUrlAlternate to $UrlToRestore" -Component 'ResetLocalPolicies'
         }
+    } catch [System.TimeoutException] {
+        throw
+    } catch {
+        Write-Log "Group policy refresh failed; continuing: $($_.Exception.Message)" -Component 'StartGroupPolicyRefresh' -Type 2
     }
 }
-function Restart-IMEService {
-    Write-Log 'Attempting to restart the IME service' -Component 'RestartIME'
-    Get-Service IntuneManagementExtension | Restart-Service -Force
+function Start-ConfigMgrActions {
+    if (-not($Script:IsConfigMgrDevice)) {
+        return
+    }
+    Write-Log "Starting ConfigMgr client actions" -Component 'StartConfigMgrActions'
+    try {
+        Assert-WorkTimeRemaining -Operation 'ConfigMgr Machine Policy action'
+        Invoke-CimMethod -Namespace 'root\CCM' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{sScheduleID = '{00000000-0000-0000-0000-000000000021}' } -ErrorAction Stop | Out-Null
+        Write-Log "ConfigMgr Machine Policy client action successful" -Component 'StartConfigMgrActions'
+    } catch [System.TimeoutException] {
+        throw
+    } catch {
+        Write-Log "ConfigMgr Machine Policy action failed; continuing: $($_.Exception.Message)" -Component 'StartConfigMgrActions' -Type 2
+    }
+    try {
+        Assert-WorkTimeRemaining -Operation 'ConfigMgr Software Update Scan action'
+        Invoke-CimMethod -Namespace 'root\CCM' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{sScheduleID = '{00000000-0000-0000-0000-000000000113}' } -ErrorAction Stop | Out-Null
+        Write-Log "ConfigMgr Software Update Scan client action successful" -Component 'StartConfigMgrActions'
+    } catch [System.TimeoutException] {
+        throw
+    } catch {
+        Write-Log "ConfigMgr Software Update Scan action failed; continuing: $($_.Exception.Message)" -Component 'StartConfigMgrActions' -Type 2
+    }
+}
+function Restore-ConfigMgrUpdateUrl {
+    if (-not($Script:UrlToRestore)) {
+        return
+    }
+    $CurrentUpdateServiceUrlAlternate = Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Name 'UpdateServiceUrlAlternate' -ErrorAction SilentlyContinue
+    if (-not($CurrentUpdateServiceUrlAlternate)) {
+        New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows' -Name 'WindowsUpdate' -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Name 'UpdateServiceUrlAlternate' -Value $Script:UrlToRestore -Force -ErrorAction Stop | Out-Null
+        Write-Log "Restored UpdateServiceUrlAlternate to $($Script:UrlToRestore)" -Component 'RestoreConfigMgrUpdateUrl'
+    }
 }
 function Start-IMESync {
-    Write-Log "Starting IME sync and waiting $IntuneSyncTimeout seconds" -Component 'StartSync'
+    Assert-WorkTimeRemaining -Operation 'Intune sync'
+    Write-Log 'Starting IME sync' -Component 'StartSync'
     $Shell = New-Object -ComObject Shell.Application
-    # Trigger IME sync
-    $Shell.open("intunemanagementextension://syncapp")
-    # Force DeviceEnroller to re-apply CSPs - for some reason this only works with the MMPC enrollment GUID, not the Intune Enrollment GUID
-    $GUIDs = (Get-ChildItem HKLM:\SOFTWARE\Microsoft\Provisioning\OMADM\Accounts\ -Depth 0).PSChildName
+    $Shell.open("intunemanagementextension://syncapp") | Out-Null
+    $GUIDs = (Get-ChildItem -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Provisioning\OMADM\Accounts' -ErrorAction SilentlyContinue).PSChildName
     foreach ($GUID in $GUIDs) {
-        $IsIntuneGUID = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Enrollments\$GUID" -Name AADResourceID) -eq "https://checkin.dm.microsoft.com"
+        Assert-WorkTimeRemaining -Operation 'DeviceEnroller refresh'
+        $IsIntuneGUID = (Get-ItemPropertyValue -LiteralPath "HKLM:\SOFTWARE\Microsoft\Enrollments\$GUID" -Name AADResourceID -ErrorAction SilentlyContinue) -eq "https://checkin.dm.microsoft.com"
         if ($IsIntuneGUID) {
-            $DeviceEnrollerPath = "C:\Windows\System32\DeviceEnroller.exe"
-            $DeviceEnrollerArgs = "/o $GUID /c /b"
-            Write-Log 'Running devicecontroller to enforce the CSPs from Intune' -Component 'StartSync'
-            $DeviceEnroller = Start-Process -FilePath $DeviceEnrollerPath -ArgumentList $DeviceEnrollerArgs -PassThru -WindowStyle Hidden -Wait
-            if ($DeviceEnroller.ExitCode -ne 0) {
-                Write-Log 'You managed to make the Deviceenroller return with a non-zero return code somehow...' -Component 'StartSync' -Type 3
+            $DeviceEnrollerPath = Join-Path -Path $Env:SystemRoot -ChildPath 'System32\DeviceEnroller.exe'
+            try {
+                $DeviceEnrollerExitCode = Invoke-BoundedProcess -FilePath $DeviceEnrollerPath -ArgumentList @('/o', $GUID, '/c', '/b') -Operation 'DeviceEnroller' -MaximumSeconds $IntuneSyncTimeout
+                if ($DeviceEnrollerExitCode -ne 0) {
+                    Write-Log "DeviceEnroller returned exit code $DeviceEnrollerExitCode" -Component 'StartSync' -Type 2
+                }
+            } catch [System.TimeoutException] {
+                throw
+            } catch {
+                Write-Log "DeviceEnroller failed; continuing: $($_.Exception.Message)" -Component 'StartSync' -Type 2
             }
         }
     }
-    Start-Sleep -Seconds $IntuneSyncTimeout
 }
 function Backup-RegistryToReg {
     param(
@@ -265,106 +316,208 @@ function Backup-RegistryToReg {
         $Root,
         $RegName
     )
-    $BackupTarget = $(Join-Path -Path $Script:BackupDirectory -ChildPath $RegName)
-    $FullRegistryPath = $(Join-Path -Path $Root -ChildPath $Path)
-    $RegPath = Join-Path -Path "$Env:SystemRoot" -ChildPath "\System32\reg.exe"
-    $RegArguments = "export $FullRegistryPath $BackupTarget /y"
-    $Reg = Start-Process -FilePath $RegPath -ArgumentList $RegArguments -PassThru -WindowStyle Hidden -Wait
-    if ($Reg.ExitCode -eq 0) {
-        Write-Log "Backup of $FullRegistryPath to $BackupTarget successfull" -Component 'BackupRegistry'
-    } else {
-        Write-Log 'Backup failed!' -Component 'BackupRegistry' -Type 3
+    $BackupTarget = Join-Path -Path $Script:BackupDirectory -ChildPath $RegName
+    $FullRegistryPath = Join-Path -Path $Root -ChildPath $Path
+    $RegPath = Join-Path -Path $Env:SystemRoot -ChildPath 'System32\reg.exe'
+    try {
+        $RegArguments = @('export', "`"$FullRegistryPath`"", "`"$BackupTarget`"", '/y')
+        $RegExitCode = Invoke-BoundedProcess -FilePath $RegPath -ArgumentList $RegArguments -Operation "backup of $FullRegistryPath"
+        if ($RegExitCode -eq 0) {
+            Write-Log "Backup of $FullRegistryPath to $BackupTarget successful" -Component 'BackupRegistry'
+            return $true
+        }
+        Write-Log "Backup of $FullRegistryPath failed with exit code $RegExitCode; continuing" -Component 'BackupRegistry' -Type 2
+    } catch [System.TimeoutException] {
         throw
+    } catch {
+        Write-Log "Backup of $FullRegistryPath failed; continuing: $($_.Exception.Message)" -Component 'BackupRegistry' -Type 2
     }
+    return $false
 }
-function Reset-KnowRWURegistryPaths {
+function Reset-KnownRWURegistryPaths {
     param(
         $path
     )
-    $CurrentRegPathPSDrive = $(Join-Path -Path "HKLM:\" -ChildPath $path)
-    $CurrentRegPathExists = Test-Path $CurrentRegPathPSDrive
+    Assert-WorkTimeRemaining -Operation "removal of $path"
+    $CurrentRegPathPSDrive = Join-Path -Path 'HKLM:\' -ChildPath $path
+    $CurrentRegPathExists = Test-Path -LiteralPath $CurrentRegPathPSDrive
     if (-not($CurrentRegPathExists)) {
         Write-Log 'This registry path already seems to be removed - continue' -Component 'ResetKnownRegistryPaths'
         return $false
     }
-    if (-not($BackupDisabled)) {
+    if ($Script:BackupAvailable) {
         Write-Log "Creating backup of registry path related to windows update to $($Script:BackupDirectory)" -Component 'ResetKnownRegistryPaths'
-        Backup-RegistryToReg -Path $path -Root HKEY_LOCAL_MACHINE -RegName "$((Get-Item $CurrentRegPathPSDrive).PSChildName).reg" 
+        Backup-RegistryToReg -Path $path -Root HKEY_LOCAL_MACHINE -RegName "$((Get-Item -LiteralPath $CurrentRegPathPSDrive).PSChildName).reg" | Out-Null
     }
     Write-Log "Removing $CurrentRegPathPSDrive registry paths" -Component 'ResetKnownRegistryPaths'
-    Remove-Item -Path $CurrentRegPathPSDrive -Force -Recurse
+    Remove-Item -LiteralPath $CurrentRegPathPSDrive -Force -Recurse -ErrorAction Stop
+    if (Test-Path -LiteralPath $CurrentRegPathPSDrive) {
+        throw "Registry path still exists after removal: $CurrentRegPathPSDrive"
+    }
     return $true
 }
 function Stop-UpdateServices {
-    if ($Script:IsAutoPatchDevice) {
-        Write-Log 'Attempting to stop the Autopatch service' -Component 'StopUpdateServices'
-        if (Get-Service ClientBrokerUpgrader -ErrorAction SilentlyContinue) {
-            Get-Service ClientBrokerUpgrader | Stop-Service -Force
-        } else {
-            Write-Log 'ClientBrokerUpgrader service not found, skipping stop' -Component 'StopUpdateServices'
-            Write-Log 'The ClientBrokerUpgrader service has been removed in Q4 of 2025 so this is expected' -Component 'StopUpdateServices'
-            Get-ScheduledTask -TaskName "Autopatch*" | ForEach-Object {
-                if ($_.state -ne 'Ready') {
-                    Write-Log 'Waiting for Autopatch scheduled tasks to be ready' -Component 'StartUpdateServices'
-                    Start-Sleep -Seconds 10
-                    if ((Get-ScheduledTask -TaskName $_.taskname).state -eq 'Ready') {
-                        Write-Log "Autopatch scheduled task $($_.taskname) is now ready" -Component 'StartUpdateServices'
-                    }
+    Assert-WorkTimeRemaining -Operation 'service stop'
+    $WindowsUpdateService = Get-Service wuauserv -ErrorAction SilentlyContinue
+    $Script:WindowsUpdateNeedsRestart = $null -ne $WindowsUpdateService -and $WindowsUpdateService.Status -ne 'Stopped'
+    $ClientBrokerService = Get-Service ClientBrokerUpgrader -ErrorAction SilentlyContinue
+    $Script:HasLegacyClientBroker = $null -ne $ClientBrokerService
+    $Script:ClientBrokerWasRunning = $null -ne $ClientBrokerService -and $ClientBrokerService.Status -eq 'Running'
+    if ($Script:ClientBrokerWasRunning) {
+        Write-Log 'Stopping the legacy Autopatch ClientBrokerUpgrader service' -Component 'StopUpdateServices'
+        $ClientBrokerService | Stop-Service -Force -ErrorAction Stop
+    }
+    if ($null -eq $WindowsUpdateService) {
+        Write-Log 'Windows Update service was not found; continuing' -Component 'StopUpdateServices' -Type 2
+        return
+    }
+    if ($Script:WindowsUpdateNeedsRestart) {
+        $MaximumAttempts = 3
+        for ($Attempt = 1; $Attempt -le $MaximumAttempts; $Attempt++) {
+            try {
+                Assert-WorkTimeRemaining -Operation "Windows Update service stop attempt $Attempt"
+                Write-Log "Stopping the Windows Update service (attempt $Attempt of $MaximumAttempts)" -Component 'StopUpdateServices'
+                Stop-Service -Name wuauserv -Force -ErrorAction Stop
+                if ((Get-Service wuauserv -ErrorAction Stop).Status -eq 'Stopped') {
+                    return
+                }
+                throw 'Windows Update service still reports a non-stopped state'
+            } catch [System.TimeoutException] {
+                throw
+            } catch {
+                if ($Attempt -eq $MaximumAttempts) {
+                    Write-Log "Windows Update service could not be stopped after $MaximumAttempts attempts; continuing: $($_.Exception.Message)" -Component 'StopUpdateServices' -Type 2
+                } else {
+                    Write-Log "Windows Update service stop attempt $Attempt failed; retrying: $($_.Exception.Message)" -Component 'StopUpdateServices' -Type 2
+                    Start-Sleep -Seconds 2
                 }
             }
         }
     }
-    Write-Log 'Attempting to stop the Windows Update service' -Component 'StopUpdateServices'
-    Get-Service wuauserv | Stop-Service -Force
 }
 function Start-UpdateServices {
-    Write-Log 'Attempting to start the Windows Update service' -Component 'StartUpdateServices'
-    Get-Service wuauserv | Start-Service -ErrorAction Continue
-    Start-Sleep -Seconds 10
-    if ($IsAutoPatchDevice) {
-        Write-Log 'Attempting to start the Autopatch service' -Component 'StartUpdateServices'
-        if (Get-Service ClientBrokerUpgrader -ErrorAction SilentlyContinue) {
-            Get-Service ClientBrokerUpgrader | Start-Service -ErrorAction Continue
-        } else {
-            Write-Log 'ClientBrokerUpgrader service not found, skipping start' -Component 'StartUpdateServices'
-            Write-Log 'The ClientBrokerUpgrader service has been removed in Q4 of 2025 so this is expected' -Component 'StartUpdateServices'
-            Get-ScheduledTask -TaskName "Autopatch*" | ForEach-Object {
-                if ($_.state -eq 'Running') {
-                    Write-Log "Autopatch scheduled task $($_.taskname) is already running" -Component 'StartUpdateServices'
-                    Start-Sleep -Seconds 10
-                    if ((Get-ScheduledTask -TaskName $_.taskname).state -eq 'Ready') {
-                        Write-Log "Autopatch scheduled task $($_.taskname) is now ready" -Component 'StartUpdateServices'
-                    }
-                } else {
-                    Start-ScheduledTask -TaskPath $_.TaskPath -TaskName $_.TaskName
-                }
-            }
+    if ($Script:WindowsUpdateNeedsRestart) {
+        Write-Log 'Starting the Windows Update service without waiting for it' -Component 'StartUpdateServices'
+        Get-Service wuauserv -ErrorAction Stop | Start-Service -ErrorAction Stop
+    }
+    if ($Script:ClientBrokerWasRunning) {
+        Write-Log 'Starting the legacy Autopatch service without waiting for it' -Component 'StartUpdateServices'
+        Get-Service ClientBrokerUpgrader -ErrorAction Stop | Start-Service -ErrorAction Stop
+    }
+}
+function Start-AutopatchTasks {
+    if (-not($Script:IsIntuneDevice) -or $Script:HasLegacyClientBroker) {
+        return
+    }
+    Assert-WorkTimeRemaining -Operation 'Autopatch task query'
+    $AutopatchTasks = @(Get-ScheduledTask -TaskName 'Autopatch*' -ErrorAction SilentlyContinue)
+    if ($AutopatchTasks.Count -eq 0) {
+        Write-Log 'No Autopatch scheduled tasks were found' -Component 'StartAutopatchTasks'
+        return
+    }
+    $OrderedTasks = $AutopatchTasks | Sort-Object @{ Expression = {
+            if ($_.TaskName -match 'Sync') { 0 }
+            elseif ($_.TaskName -match 'Poll') { 1 }
+            else { 2 }
+        } }, TaskName
+    foreach ($Task in $OrderedTasks) {
+        Assert-WorkTimeRemaining -Operation "Autopatch task $($Task.TaskName)"
+        try {
+            Start-ScheduledTask -TaskPath $Task.TaskPath -TaskName $Task.TaskName -ErrorAction Stop | Out-Null
+            Write-Log "Triggered Autopatch task $($Task.TaskPath)$($Task.TaskName)" -Component 'StartAutopatchTasks'
+        } catch {
+            Write-Log "Could not trigger Autopatch task $($Task.TaskName); continuing: $($_.Exception.Message)" -Component 'StartAutopatchTasks' -Type 2
         }
     }
 }
-
-#Start Coding!
-Initialize-Script
-try {
-    Stop-UpdateServices
-    Reset-KnowRWURegistryPaths -path "SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" | Out-Null
-    Reset-KnowRWURegistryPaths -path "SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy\GPCache" | Out-Null
-    $CSPUpdatePath = Reset-KnowRWURegistryPaths -path "SOFTWARE\Microsoft\PolicyManager\current\device\Update"
-    if ($Script:IsIntuneDevice -and $CSPUpdatePath) {
-        Write-Log 'Since we removed the current CSP configuration we should try to trigger a resync' -Component 'RSUMain'
-        Restart-IMEService
-        Start-IMESync
+function Set-RemediationTimestamp {
+    if (-not(Test-Path -LiteralPath $TimestampRegistryPath)) {
+        New-Item -Path $TimestampRegistryPath -Force -ErrorAction Stop | Out-Null
     }
+    $Timestamp = Get-Date -Format o
+    New-ItemProperty -LiteralPath $TimestampRegistryPath -Name $Script:RemediationTimestampName -Value $Timestamp -PropertyType String -Force -ErrorAction Stop | Out-Null
+}
+function Start-DelayedIMERestart {
+    if (-not($Script:IsIntuneDevice)) {
+        return
+    }
+    $RestartCommand = "`"& { Start-Sleep -Seconds 30; Restart-Service -Name 'IntuneManagementExtension' -Force -ErrorAction SilentlyContinue } *> `$null`""
+    $PowerShellPath = (Get-Process -Id $PID -ErrorAction Stop).Path
+    Start-Process -FilePath $PowerShellPath -ArgumentList @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', $RestartCommand) -WindowStyle Hidden -ErrorAction Stop | Out-Null
+}
+
+# START CODING
+$Script:CurrentLocation = Get-Location
+try {
+    Initialize-Script
+    Stop-UpdateServices
+    Reset-KnownRWURegistryPaths -path "SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" | Out-Null
+    Reset-KnownRWURegistryPaths -path "SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy\GPCache" | Out-Null
+    $CSPUpdatePath = Reset-KnownRWURegistryPaths -path "SOFTWARE\Microsoft\PolicyManager\current\device\Update"
     if ($ResetLocalPolicies) {
         if (-not(Reset-LocalPolicies)) {
             Write-Log 'No local .pol file' -Component 'RSUMain'
         }
     }
-    Start-UpdateServices
+    Start-AutopatchTasks
+    if ($Script:IsIntuneDevice -and $CSPUpdatePath) {
+        Write-Log 'Since we removed the current CSP configuration we should try to trigger a resync' -Component 'RSUMain'
+        try {
+            Start-IMESync
+        } catch [System.TimeoutException] {
+            throw
+        } catch {
+            Write-Log "Intune refresh failed; continuing: $($_.Exception.Message)" -Component 'RSUMain' -Type 2
+        }
+    }
+    Start-ConfigMgrActions
+    Start-GroupPolicyRefresh
+} catch [System.TimeoutException] {
+    $Script:DeadlineExpired = $true
+    $Script:ExitCode = 2
+    Write-Log $_.Exception.Message -Component 'ErrorHandling' -Type 3 -ReportMessage 'Timeout'
 } catch {
-    Write-Log 'Something went wrong! Please consult the log' -Component 'Errorhandling'
-    Write-Log "$($Error[0].Exception.Message)" -Component 'Errorhandling'
-    Exit 1
+    $Script:ExitCode = 1
+    Write-Log "Something went wrong: $($_.Exception.Message)" -Component 'ErrorHandling' -Type 3 -ReportMessage "Failed: $($_.Exception.Message)"
+} finally {
+    try {
+        Restore-ConfigMgrUpdateUrl
+    } catch {
+        Write-Log "ConfigMgr URL restoration failed: $($_.Exception.Message)" -Component 'ErrorHandling' -Type 3 -ReportMessage "URL restore: $($_.Exception.Message)"
+        if (-not($Script:DeadlineExpired)) { $Script:ExitCode = 3 }
+    }
+    try {
+        Start-UpdateServices
+    } catch {
+        Write-Log "Service restoration failed: $($_.Exception.Message)" -Component 'ErrorHandling' -Type 3 -ReportMessage "Service restore: $($_.Exception.Message)"
+        if (-not($Script:DeadlineExpired)) { $Script:ExitCode = 3 }
+    }
+    try {
+        Set-Location -LiteralPath $Script:CurrentLocation.Path -ErrorAction Stop
+    } catch {
+        Write-Log "Could not restore the original location: $($_.Exception.Message)" -Component 'ErrorHandling' -Type 3 -ReportMessage "Path restore: $($_.Exception.Message)"
+        if (-not($Script:DeadlineExpired)) { $Script:ExitCode = 0 }
+    }
 }
-Set-Location $Script:CurrentLocation
-Exit 0
+if ($Script:ExitCode -eq 0) {
+    try {
+        Set-RemediationTimestamp
+        try {
+            Start-DelayedIMERestart
+        } catch {
+            Write-Log "Delayed IME restart could not be queued: $($_.Exception.Message)" -Component 'ErrorHandling' -Type 2
+        }
+        Write-Output 'Success: Reset complete'
+    } catch {
+        $Script:ExitCode = 4
+        Write-Log "Timestamp write failed: $($_.Exception.Message)" -Component 'ErrorHandling' -Type 3 -ReportMessage "Timestamp: $($_.Exception.Message)"
+    }
+}
+if ($Script:ExitCode -ne 0) {
+    $ErrorSummary = ($Script:RemediationErrors | Select-Object -Unique) -join ' | '
+    if (-not($ErrorSummary)) {
+        $ErrorSummary = "Failed: Exit $($Script:ExitCode)"
+    }
+    Write-Error $ErrorSummary
+}
+Exit $Script:ExitCode

@@ -2,17 +2,18 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Removes Autopilot objects or/and their linked Entra or Intune device objects based on their last sign-in date and last sync date.
+    Reviews and optionally removes stale Autopilot, Entra, and Intune device objects based on inactivity thresholds.
 .DESCRIPTION
-    Script heavily focuses on Autopilot objects and their linked Entra and Intune objects.    
-    This script will remove Autopilot (if CSV provided), Entra, Intune and device objects based on their last sign-in date and last sync date.
-    Actions can be customized based on the age of the devices.
+    This script analyzes Autopilot device records and their linked Entra and Intune objects to determine whether they should be retained, disabled, or removed.
+    The script is designed for broken or stale Autopilot device cleanup scenarios where a device may exist in multiple identity systems but no longer be in a healthy state.
+    It can run in analysis-only mode, direct cleanup mode, or dry-run mode before destructive changes are submitted to Microsoft Graph.
+    If a CSV file is supplied, matching Autopilot serial numbers are treated as explicit cleanup candidates.
 .PARAMETER CSV
-    Path to a CSV file containing a list of Autopilot object serial numbers to be deleted.
+    Path to a CSV file containing Autopilot serial numbers that should be treated as cleanup candidates.
 .PARAMETER NumberOfDaysBeforeDeletion
-    Number of days before a device is considered for deletion. Default is -180 days.
+    Number of days before a device is considered for deletion. Negative values are interpreted as days in the past. Default is -180.
 .PARAMETER NumberOfDaysBeforeDisable
-    Number of days before a device is considered for disabling. Default is -90 days.
+    Number of days before a device is considered for disabling. Negative values are interpreted as days in the past. Default is -90.
 .PARAMETER EntraDeviceDisableAction
     Action to take for Entra devices that are older than NumberOfDaysBeforeDisable but younger than NumberOfDaysBeforeDeletion. Default is "Disable".
 .PARAMETER EntraDeviceDeleteAction
@@ -22,43 +23,47 @@
 .PARAMETER IntuneDeviceDeleteAction
     Action to take for Intune devices that are older than NumberOfDaysBeforeDeletion. Default is "Remove".
 .PARAMETER WorkingDirectory
-    Path to the working directory where logs and other files will be stored. Default is "C:\EDC\RemoveAutopilotDevices".
+    Path to the working directory where logs and other files will be stored. Default is "C:\BAD-C\".
 .PARAMETER LogDirectory
-    Path to the log directory where log files will be stored. Default is "C:\EDC\RemoveAutopilotDevices\Logs".
+    Path to the log directory where log files will be stored. Default is "C:\BAD-C\Logs".
 .PARAMETER CertificateThumbprint
-    Thumbprint of the certificate used for authentication.
+    Thumbprint of the certificate used for Microsoft Graph authentication.
 .PARAMETER ClientID
-    Client ID of the application used for authentication.
+    Client ID of the application used for Microsoft Graph authentication.
 .PARAMETER TenantId
     Tenant ID of the Entra tenant.
 .PARAMETER TenantAPIToUse
-    API version to use for Entra Graph API calls. Default is "beta".
+    API version used for Microsoft Graph calls. Default is "beta".
 .PARAMETER LogPrefix
-    Prefix to use for log files. Default is "BAD-C" (Broken Autopilot Device Cleanup).
+    Prefix used for log files. Default is "BAD-C" (Broken Autopilot Device Cleanup).
 .PARAMETER EnableCleanup
-    If set, the script will perform the cleanup actions. If not set, it will only analyze and show what would be done.
+    If set, the script will perform the cleanup actions. If not set, the script only analyzes and reports the current state.
+.PARAMETER DryRun
+    If set, the script analyzes and logs the planned actions without making any Graph changes.
 .PARAMETER ShowResults
-    If set, the script will show the results in a grid view.
+    If set, the script will display the collected results in a grid view.
 .PARAMETER OutputCSV
-    If set, the script will output the results to a CSV file.
+    If set, the script will output the analysis results to a CSV file.
 .PARAMETER NoLog
     If set, the script will not create a log file.
+.PARAMETER ToConsole
+    If set, the script will send log output to the console as well as the log file.
 .PARAMETER ThrottleLimit
-    The maximum number of concurrent requests. Default is 10. DO NOT CHANGE THIS UNLESS YOU KNOW WHAT YOU'RE DOING.
+    The maximum number of concurrent requests. Default is 10. Use caution when changing this value.
 .NOTES
-    Version: 1.0
-    Versionname: EntraDeviceCleanup.ps1
-    Initial creation date: 05.09.2025
-    Last change date: 01.12.2025
-    Latest changes: Initial Version
-    Author: Martin Himken
-    To do:
-        - Add LAPS and BitLocker key retrieval and storage
-        - Add error handling for Graph API calls
-        - Add more logging messages
+Version: 2.0
+Author: Martin Himken
+Original script name: BrokenAutopilotDeviceCleanup.ps1
+Initial creation date: 2025-09-05
+Last change: 2026-08-17
+Changes: Updated to follow repository standards with CmdletBinding, LogPath/LogFile parameters, and Write-Log function.
 #>
+
+[CmdletBinding()]
 param (
-    [System.IO.DirectoryInfo]$CSV,
+    [string]$LogPath = (Get-Location).Path,
+    [string]$LogFile = $null,
+    [System.IO.FileInfo]$CSV,
     [int]$NumberOfDaysBeforeDeletion = -180,
     [int]$NumberOfDaysBeforeDisable = -90,
     # Make these options limited to the allowed values
@@ -67,7 +72,7 @@ param (
     [ValidateSet("Retain", "Disable", "Remove")]
     [String]$EntraDeviceDeleteAction = "Remove",
     [ValidateSet("Retain", "Retire", "Wipe", "Remove")]
-    [String]$IntuneDeviceDisableAction = "Retain",
+    [String]$IntuneDeviceDisableAction = "Retire",
     [ValidateSet("Retain", "Retire", "Wipe", "Remove")]
     [String]$IntuneDeviceDeleteAction = "Remove",
     [String]$WorkingDirectory,
@@ -78,15 +83,73 @@ param (
     [String]$TenantAPIToUse = "beta", # Change to "v1.0" if you want to use the stable API version
     [String]$LogPrefix,
     [Switch]$EnableCleanup,
+    [Boolean]$DryRun = $true,
     [Switch]$ShowResults,
     [Switch]$OutputCSV,
     [Switch]$NoLog,
     [Switch]$ToConsole,
     [int]$ThrottleLimit = 10 
 )
+
+# Verify PowerShell 7 is installed and running
+$Pwsh7Path = Get-Command pwsh -ErrorAction SilentlyContinue
+if (-not $Pwsh7Path) {
+    Write-Error 'PowerShell 7 is required. Install PowerShell 7 and run the script again.'
+    exit 1
+}
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    Write-Error 'This script must run in PowerShell 7. Start the script with pwsh.exe.'
+    exit 1
+}
+
+function Write-Log {
+    Param (
+        [Parameter(Mandatory = $false)]
+        $Message,
+        $Component,
+        # Type: 1 = Normal, 2 = Warning (yellow), 3 = Error (red)
+        [ValidateSet('1', '2', '3')]
+        [int]$Type
+    )
+    if ($Script:LogFile) {
+        $Time = Get-Date -Format 'HH:mm:ss.ffffff'
+        $Date = Get-Date -Format 'MM-dd-yyyy'
+        if (-not($Component)) { $Component = 'Runner' }
+        if (-not($Script:ToConsole)) {
+            $LogMessage = "<![LOG[$Message" + "]LOG]!><time=`"$Time`" date=`"$Date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"`" file=`"`">"
+            $LogMessage | Out-File -Append -Encoding UTF8 -FilePath $Script:LogFile
+        } elseif ($Script:ToConsole) {
+            switch ($Type) {
+                1 { Write-Host "T:$Type C:$Component M:$Message" }
+                2 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Yellow -ForegroundColor Black }
+                3 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Red -ForegroundColor White }
+                default { Write-Host "T:$Type C:$Component M:$Message" }
+            }
+        }
+    }
+}
+
+function Initialize-Script {
+    # Set a default log file name using ISO 8601 date-time with 24-hour timestamp.
+    # Use a file-system-safe variant for Windows file names.
+    $Script:DateTime = Get-Date -Format 'yyyy-MM-ddTHH-mm-ss'
+    $DefinedScriptName = 'BrokenAutopilotDeviceCleanup'
+    $SanitizedScriptName = $DefinedScriptName -replace '\s+', ''
+    if (-not($LogFile)) {
+        $LogFile = "$($SanitizedScriptName)_$($Script:DateTime).log"
+    }
+    $Script:LogFile = Join-Path -Path $LogPath -ChildPath $LogFile
+}
+
+# Initialize script at startup
+Initialize-Script
+
+if ($DryRun) {
+    $OutputCSV = $true
+}
 if (-not(Get-MgContext)) {
     Write-Output "No existing Microsoft Graph context found. Connecting to Microsoft Graph..."
-    if(-not($CertificateThumbprint) -or -not($ClientID) -or -not($TenantId)) {
+    if (-not($CertificateThumbprint) -or -not($ClientID) -or -not($TenantId)) {
         Write-Output "CertificateThumbprint, ClientID, and TenantId parameters are required for authentication. Or pre-connect to Microsoft Graph before running the script."
         exit
     }
@@ -121,9 +184,9 @@ function Get-ScriptPath {
 function Write-Log {
     <#
     .SYNOPSIS
-        Writes a log message to the log file and optionally to the console.
+        Writes a log message in CMTrace format and optionally to the console.
     .DESCRIPTION
-        This is a heavily modified version of the script by Ryan Ephgrave.
+        Edited version of the script by Ryan Ephgrave. This function writes log messages in a format compatible with CMTrace and optionally outputs them to the console. It respects the NoLog and ToConsole switches.
     .LINK
         https://www.ephingadmin.com/powershell-cmtrace-log-function/
     #>
@@ -132,36 +195,32 @@ function Write-Log {
         $Message,
         $Component,
         # Type: 1 = Normal, 2 = Warning (yellow), 3 = Error (red)
-        [ValidateSet('1', '2', '3')][int]$Type,
+        [ValidateSet('1', '2', '3')][int]$Type = 1,
         [Switch]$Finish,
         [Switch]$ToConsole
     )
-    if ($null -eq $Script:LogMessageBuffer) {
-        $Script:LogMessageBuffer = [System.Collections.ArrayList]::new()
+
+    if ($NoLog -or -not $Script:LogFile) {
+        return
     }
-    if (-not($NoLog)) {
-        $Time = Get-Date -Format 'HH:mm:ss.ffffff'
-        $Date = Get-Date -Format 'MM-dd-yyyy'
-        if (-not($Component)) { $Component = 'Runner' }
-        if (-not($ToConsole)) {
-            if ($Message) {
-                $LogMessage = "<![LOG[$Message" + "]LOG]!><time=`"$Time`" date=`"$Date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"`" file=`"`">"
-                $Script:LogMessageBuffer.Add($LogMessage) | Out-Null
-            }
-            #if ($Script:LogMessageBuffer.count -ge 10 -or $Finish) {
-            
-                $Script:LogMessageBuffer | Out-File -Append -Encoding UTF8 -FilePath $Script:LogFile
-                $Script:LogMessageBuffer.Clear() | Out-Null
-            #}
-        } elseif ($ToConsole) {
-            switch ($type) {
-                1 { Write-Host "T:$Type C:$Component M:$Message" }
-                2 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Yellow -ForegroundColor Black }
-                3 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Red -ForegroundColor White }
-                default { Write-Host "T:$Type C:$Component M:$Message" }
-            }
+
+    $Time = Get-Date -Format 'HH:mm:ss.ffffff'
+    $Date = Get-Date -Format 'MM-dd-yyyy'
+    if (-not($Component)) { $Component = 'Unspecified' }
+
+    if ($ToConsole -or $Script:ToConsole) {
+        switch ($Type) {
+            1 { Write-Host "T:$Type C:$Component M:$Message" }
+            2 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Yellow -ForegroundColor Black }
+            3 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Red -ForegroundColor White }
+            default { Write-Host "T:$Type C:$Component M:$Message" }
         }
+
+        return
     }
+
+    $LogMessage = "<![LOG[$Message]LOG]!><time=`"$Time`" date=`"$Date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"`" file=`"`">"
+    $LogMessage | Out-File -Append -Encoding UTF8 -FilePath $Script:LogFile
 }
 function Initialize-Script {
     <#
@@ -173,6 +232,7 @@ function Initialize-Script {
     } else {
         $Script:LogPrefix = $LogPrefix
     }
+    $Script:ToConsole = [bool]$ToConsole
     if (-not($WorkingDirectory) ) {
         $WorkingDirectory = "C:\$($Script:LogPrefix)\"
     }
@@ -190,10 +250,8 @@ function Initialize-Script {
         Set-Location $WorkingDirectory
     }
     Get-ScriptPath
-    if (-not($Script:LogFile)) {
-        $Script:LogFile = Join-Path -Path $Script:LogDirectory -ChildPath ('{0}_{1}.log' -f $Script:LogPrefix, $Script:DateTime)
-        if (-not(Test-Path $Script:LogDirectory)) { New-Item $Script:LogDirectory -ItemType Directory -Force | Out-Null }
-    }
+    $Script:LogFile = Join-Path -Path $Script:LogDirectory -ChildPath ('{0}_{1}.log' -f $Script:LogPrefix, $Script:DateTime)
+    if (-not(Test-Path $Script:LogDirectory)) { New-Item $Script:LogDirectory -ItemType Directory -Force | Out-Null }
     #Define some variables that will be used throughout the script
     $Script:BatchRequests = [System.Collections.ArrayList]::new()
     $Script:BatchRequestsQueue = [System.Collections.ArrayList]::new()
@@ -211,50 +269,6 @@ function Initialize-Script {
     Get-IntuneDevices
     Get-Users
 
-}
-function Write-Log {
-    <#
-    .SYNOPSIS
-        Writes a log message to the log file and optionally to the console.
-    .DESCRIPTION
-        This is a heavily modified version of the script by Ryan Ephgrave.
-    .LINK
-        https://www.ephingadmin.com/powershell-cmtrace-log-function/
-    #>
-    Param (
-        [Parameter(Mandatory = $false)]
-        $Message,
-        $Component,
-        # Type: 1 = Normal, 2 = Warning (yellow), 3 = Error (red)
-        [ValidateSet('1', '2', '3')][int]$Type,
-        [Switch]$Finish,
-        [Switch]$ToConsole
-    )
-    if ($null -eq $Script:LogMessageBuffer) {
-        $Script:LogMessageBuffer = [System.Collections.ArrayList]::new()
-    }
-    if (-not($NoLog)) {
-        $Time = Get-Date -Format 'HH:mm:ss.ffffff'
-        $Date = Get-Date -Format 'MM-dd-yyyy'
-        if (-not($Component)) { $Component = 'Runner' }
-        if (-not($ToConsole)) {
-            if ($Message) {
-                $LogMessage = "<![LOG[$Message" + "]LOG]!><time=`"$Time`" date=`"$Date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"`" file=`"`">"
-                $Script:LogMessageBuffer.Add($LogMessage) | Out-Null
-            }
-            if ($Script:LogMessageBuffer.count -ge 10 -or $Finish) {
-                $Script:LogMessageBuffer | Out-File -Append -Encoding UTF8 -FilePath $Script:LogFile
-                $Script:LogMessageBuffer.Clear() | Out-Null
-            }
-        } elseif ($ToConsole) {
-            switch ($type) {
-                1 { Write-Host "T:$Type C:$Component M:$Message" }
-                2 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Yellow -ForegroundColor Black }
-                3 { Write-Host "T:$Type C:$Component M:$Message" -BackgroundColor Red -ForegroundColor White }
-                default { Write-Host "T:$Type C:$Component M:$Message" }
-            }
-        }
-    }
 }
 function Get-nextLinkData {
     param(
@@ -347,9 +361,86 @@ function Get-Users {
         $Script:AllUsersHashTable[$User.id] = $User
     }
 }
+
+function Get-IntuneCleanupAction {
+    param(
+        [object]$IntuneDevice
+    )
+
+    if (-not $IntuneDevice) {
+        return 'Not Found'
+    }
+
+    $LastSyncDate = $null
+    if ($IntuneDevice.lastSyncDateTime) {
+        try {
+            $LastSyncDate = [datetime]$IntuneDevice.lastSyncDateTime
+        } catch {
+            $LastSyncDate = $null
+        }
+    }
+
+    if ($null -eq $LastSyncDate) {
+        return 'Retain'
+    }
+
+    if ($LastSyncDate -le $Script:DateBeforeDeletion) {
+        return $IntuneDeviceDeleteAction
+    }
+
+    if ($LastSyncDate -le $Script:DateBeforeDisable) {
+        return $IntuneDeviceDisableAction
+    }
+
+    return 'Retain'
+}
+
+function Get-EntraCleanupAction {
+    param(
+        [object]$EntraDevice
+    )
+
+    if (-not $EntraDevice) {
+        return 'Not Found'
+    }
+
+    $LastSignInDate = $null
+    if ($EntraDevice.approximateLastSignInDateTime) {
+        try {
+            $LastSignInDate = [datetime]$EntraDevice.approximateLastSignInDateTime
+        } catch {
+            $LastSignInDate = $null
+        }
+    }
+
+    if ($null -eq $LastSignInDate) {
+        if ($EntraDevice.accountEnabled -eq $false) {
+            return 'Disabled'
+        }
+        return 'Retain'
+    }
+
+    if ($LastSignInDate -le $Script:DateBeforeDeletion) {
+        return $EntraDeviceDeleteAction
+    }
+
+    if ($LastSignInDate -le $Script:DateBeforeDisable) {
+        if ($EntraDevice.accountEnabled -eq $false) {
+            return 'Disabled'
+        }
+
+        return $EntraDeviceDisableAction
+    }
+
+    if ($EntraDevice.accountEnabled -eq $false) {
+        return 'Disabled'
+    }
+    return 'Retain'
+}
+
 function Save-CurrentDeviceStates {
     foreach ($AutopilotDevice in $Script:AllAutopilotDevices.value) {
-        Clear-Variable -Name IntuneDevice, EntraDeviceFromAutopilot, EntraDeviceFromIntune, DetectDeleteAutpilotDeviceFromCSV, AutopilotWhatIf, IntuneEIDMismatch, EIDAutopilotWhatIf, EIDIntuneWhatIf -ErrorAction SilentlyContinue
+        Clear-Variable -Name IntuneDevice, EntraDeviceFromAutopilot, EntraDeviceFromIntune, DetectDeleteAutpilotDeviceFromCSV, AutopilotWhatIf, IntuneEIDMismatch, EIDAutopilotWhatIf, EIDIntuneWhatIf, AutopilotEntraWhatIf, IntuneEntraWhatIf, IntuneWhatIf -ErrorAction SilentlyContinue
         #Trim the serial number to avoid issues with leading/trailing spaces
         $AutopilotDeviceSerial = $AutopilotDevice.serialNumber.trim()
         $AutopilotWhatIf = "Retain"
@@ -360,40 +451,29 @@ function Save-CurrentDeviceStates {
         }
         $IntuneDevice = $Script:AllIntuneDevicesHashTableBySerialNumber[$AutopilotDeviceSerial]
         $EntraDeviceFromAutopilot = $Script:AllEntraDevicesHashTable[$AutopilotDevice.azureAdDeviceId]
+        $AutopilotEntraWhatIf = Get-EntraCleanupAction -EntraDevice $EntraDeviceFromAutopilot
+        $EIDAutopilotWhatIf = $AutopilotEntraWhatIf
         $IntuneEIDisAutpilotEID = $null
-        if ($EntraDeviceFromAutopilot.accountEnabled -eq $true) {
-            $EIDAutopilotWhatIf = $EntraDeviceDisableAction
-        } else {
-            $EIDAutopilotWhatIf = "Disabled"
+        if (-not $EntraDeviceFromAutopilot) {
+            Write-Log -Message "No Entra device found for Autopilot serial number $AutopilotDeviceSerial." -Component 'SaveCurrentDeviceStates' -Type 2
         }
         if ($IntuneDevice) {
-            #Default is to retain the EID device from Intune and Autopilot
-            $EIDIntuneWhatIf = "Retain"
-            $IntuneWhatIf = "Retain"
+            $IntuneWhatIf = Get-IntuneCleanupAction -IntuneDevice $IntuneDevice
             $EntraDeviceFromIntune = $Script:AllEntraDevicesHashTable[$IntuneDevice.azureADDeviceId]
-            #If the device IDs are different, log a message and set the IntuneEIDisAutpilotEID flag to false
-            if ($EntraDeviceFromIntune.deviceId -ne $EntraDeviceFromAutopilot.deviceId) {
-                Write-Log -Message "Entra device from Intune and Autopilot have different device IDs for serial number $AutopilotDeviceSerial." -Component 'SaveCurrentDeviceStates' -Type 2
-                $IntuneEIDisAutpilotEID = $false
-            } else {
+            $IntuneEntraWhatIf = Get-EntraCleanupAction -EntraDevice $EntraDeviceFromIntune
+            if ($EntraDeviceFromAutopilot -and $EntraDeviceFromIntune -and $EntraDeviceFromIntune.deviceId -eq $EntraDeviceFromAutopilot.deviceId) {
                 $IntuneEIDisAutpilotEID = $true
-            }
-            if ($IntuneDevice.lastSyncDateTime -le $Script:DateBeforeDisable -and $IntuneDevice.lastSyncDateTime -gt $Script:DateBeforeDeletion) {
-                $IntuneWhatIf = $IntuneDeviceDisableAction
-                if ($IntuneEIDisAutpilotEID -eq $false) {
-                    $EIDIntuneWhatIf = $EntraDeviceDisableAction
-                }
-            } elseif ($IntuneDevice.lastSyncDateTime -le $Script:DateBeforeDeletion) {
-                $IntuneWhatIf = $IntuneDeviceDeleteAction
-                # If EntraDeviceDeleteAction action is remove, the device will be recreated later by the Autopilot object
-                $EIDAutopilotWhatIf = $EntraDeviceDeleteAction
-                if ($IntuneEIDisAutpilotEID -eq $false) {
-                    $EIDIntuneWhatIf = $EntraDeviceDeleteAction
-                }
+                $EIDIntuneWhatIf = $AutopilotEntraWhatIf
+            } elseif ($EntraDeviceFromIntune) {
+                $IntuneEIDisAutpilotEID = $false
+                $EIDIntuneWhatIf = $IntuneEntraWhatIf
             } else {
-                if ($IntuneEIDisAutpilotEID -eq $true) {
-                    $EIDAutopilotWhatIf = "Retain"
-                }
+                $IntuneEIDisAutpilotEID = $null
+                $EIDIntuneWhatIf = "Not Applicable"
+            }
+
+            if ($IntuneEIDisAutpilotEID -eq $false) {
+                Write-Log -Message "Entra device from Intune and Autopilot have different device IDs for serial number $AutopilotDeviceSerial." -Component 'SaveCurrentDeviceStates' -Type 2
             }
         } else {
             $IntuneEIDisAutpilotEID = $null
@@ -405,17 +485,17 @@ function Save-CurrentDeviceStates {
             AutopilotDeviceName                          = $AutopilotDevice.displayName
             AutopilotDeviceID                            = $AutopilotDevice.id
             SerialShouldBeDeletedFromCSV                 = $DetectDeleteAutpilotDeviceFromCSV
-            EIDFromAutopilotEnabled                      = $EntraDeviceFromAutopilot.accountEnabled
-            EIDFromAutopilotID                           = $EntraDeviceFromAutopilot.deviceId
-            EIDFromAutopilotDisplayName                  = $EntraDeviceFromAutopilot.displayName
-            EIDFromAutopilotLastSignInDateTime           = $EntraDeviceFromAutopilot.approximateLastSignInDateTime
+            EIDFromAutopilotEnabled                      = if ($EntraDeviceFromAutopilot) { $EntraDeviceFromAutopilot.accountEnabled } else { $null }
+            EIDFromAutopilotID                           = if ($EntraDeviceFromAutopilot) { $EntraDeviceFromAutopilot.deviceId } else { $null }
+            EIDFromAutopilotDisplayName                  = if ($EntraDeviceFromAutopilot) { $EntraDeviceFromAutopilot.displayName } else { $null }
+            EIDFromAutopilotLastSignInDateTime           = if ($EntraDeviceFromAutopilot) { $EntraDeviceFromAutopilot.approximateLastSignInDateTime } else { $null }
             EIDFromIntuneID                              = if ($EntraDeviceFromIntune) { $EntraDeviceFromIntune.deviceId } else { $null }
             EIDFromIntuneDisplayName                     = if ($EntraDeviceFromIntune) { $EntraDeviceFromIntune.displayName } else { $null }
             EIDFromIntuneLastSignInDateTime              = if ($EntraDeviceFromIntune) { $EntraDeviceFromIntune.approximateLastSignInDateTime } else { $null }
             IntuneDeviceID                               = if ($IntuneDevice) { $IntuneDevice.id } else { $null }
             IntuneDeviceName                             = if ($IntuneDevice) { $IntuneDevice.deviceName } else { $null }
             IntuneDeviceManufacturer                     = if ($IntuneDevice) { $IntuneDevice.manufacturer } else { $null }
-            IntuneDeviceModel                            = if ($IntuneDevice) { $IntuneDevice.deviceModel } else { $null }
+            IntuneDeviceModel                            = if ($IntuneDevice) { $IntuneDevice.model } else { $null }
             IntuneLastSignInDate                         = if ($IntuneDevice) { $IntuneDevice.lastSyncDateTime } else { $null }
             IntunePrimaryUser                            = if ($IntuneDevice) { $AllUsersHashTable[$IntuneDevice.userId].DisplayName } else { $null }
             IntunePrimaryUserUPN                         = if ($IntuneDevice) { $AllUsersHashTable[$IntuneDevice.userId].UserPrincipalName } else { $null }
@@ -490,7 +570,7 @@ function Submit-BatchRequests {
             $TenantAPIToUse = if ($TenantAPIToUse) { $TenantAPIToUse } else { 'beta' }
             $URI = "https://graph.microsoft.com/$TenantAPIToUse/`$batch"
             Invoke-MgGraphRequest -Method POST -Uri $URI -Body $ArgumentToProvide -ContentType 'application/json' -ErrorAction Stop
-        } -ArgumentList @($BatchRequest.ArgumentToProvide,$TenantAPIToUse)
+        } -ArgumentList @($BatchRequest.ArgumentToProvide, $TenantAPIToUse)
         Start-Sleep -Milliseconds (Get-Random -Minimum 1000 -Maximum 5000) # Random delay to avoid throttling
     }
     Write-Log -Message "Batch requests submitted." -Component 'SubmitBatch'
@@ -547,7 +627,7 @@ function Disable-IntuneDevice {
     param (
         [string]$DeviceId
     )
-    $Method = 'PATCH'
+    $Method = 'POST'
     $URL = "/deviceManagement/managedDevices/$DeviceId/retire"
     $Headers = @{
         'Content-Type' = 'application/json'
@@ -575,10 +655,10 @@ function Remove-IntuneDeviceWipe {
         'Content-Type' = 'application/json'
     }
     $Body = @{
-        "keepEnrollmentData" = $false
-        "keepUserData"       = $false
-        "macOsUnlockCode"    = $null
-        "persistEsimDataPlan"= $false
+        "keepEnrollmentData"  = $false
+        "keepUserData"        = $false
+        "macOsUnlockCode"     = $null
+        "persistEsimDataPlan" = $false
     }
     Invoke-BatchRequest -Method $Method -URL $URL -Headers $Headers -Body $Body
 }
@@ -643,7 +723,56 @@ function Get-BitLockerKeys {
     }
     Invoke-MGGraphRequest -Method $Method -Uri $URL -Headers $Headers
 }
+function Export-DeviceResultsToCsv {
+    param(
+        [string]$OutputDirectory = $WorkingDirectory
+    )
+
+    if (-not $OutputDirectory) {
+        $OutputDirectory = Get-Location
+    }
+
+    if (-not (Test-Path $OutputDirectory)) {
+        New-Item -Path $OutputDirectory -ItemType Directory -Force | Out-Null
+    }
+
+    $CsvPath = Join-Path -Path $OutputDirectory -ChildPath "RemovedAutopilotDevicesResults_$($Script:DateTime).csv"
+    $Script:DocumentResults | Export-Csv -Path $CsvPath -Encoding utf8 -Delimiter ';' -NoTypeInformation -Force
+    Write-Log -Message "Exported results to CSV file: $CsvPath" -Component 'Main'
+}
 function Initialize-Cleanup {
+    if ($DryRun) {
+        Write-Log -Message "Dry-run mode active. No Microsoft Graph changes will be submitted." -Component 'Initialize-Cleanup' -Type 2
+        foreach ($Object in $Script:DocumentResults) {
+            if ($Object.IntuneWhatIf -eq "Retire" -and $Object.IntuneDeviceID) {
+                Write-Log -Message "DRY RUN: would retire Intune device $($Object.IntuneDeviceName) with ID $($Object.IntuneDeviceID) for serial number $($Object.SerialNumber)." -Component 'Initialize-Cleanup' -Type 2
+            }
+            if ($Object.IntuneWhatIf -eq "Remove" -and $Object.IntuneDeviceID) {
+                Write-Log -Message "DRY RUN: would remove Intune device $($Object.IntuneDeviceName) with ID $($Object.IntuneDeviceID) for serial number $($Object.SerialNumber)." -Component 'Initialize-Cleanup' -Type 2
+            }
+            if ($Object.IntuneWhatIf -eq "Wipe" -and $Object.IntuneDeviceID) {
+                Write-Log -Message "DRY RUN: would wipe Intune device $($Object.IntuneDeviceName) with ID $($Object.IntuneDeviceID) for serial number $($Object.SerialNumber)." -Component 'Initialize-Cleanup' -Type 2
+            }
+            if ($Object.EIDFromAutopilotWhatIf -eq "Disable" -and $Object.EIDFromAutopilotID) {
+                Write-Log -Message "DRY RUN: would disable Entra device $($Object.EIDFromAutopilotDisplayName) with ID $($Object.EIDFromAutopilotID) for serial number $($Object.SerialNumber)." -Component 'Initialize-Cleanup' -Type 2
+            }
+            if ($Object.EIDFromAutopilotWhatIf -eq "Remove" -and $Object.EIDFromAutopilotID) {
+                Write-Log -Message "DRY RUN: would remove Entra device $($Object.EIDFromAutopilotDisplayName) with ID $($Object.EIDFromAutopilotID) for serial number $($Object.SerialNumber)." -Component 'Initialize-Cleanup' -Type 2
+            }
+            if ($Object.EIDFromIntuneWhatIf -eq "Disable" -and $Object.EIDFromIntuneID) {
+                Write-Log -Message "DRY RUN: would disable Entra device $($Object.EIDFromIntuneDisplayName) with ID $($Object.EIDFromIntuneID) for serial number $($Object.SerialNumber)." -Component 'Initialize-Cleanup' -Type 2
+            }
+            if ($Object.EIDFromIntuneWhatIf -eq "Remove" -and $Object.EIDFromIntuneID) {
+                Write-Log -Message "DRY RUN: would remove Entra device $($Object.EIDFromIntuneDisplayName) with ID $($Object.EIDFromIntuneID) for serial number $($Object.SerialNumber)." -Component 'Initialize-Cleanup' -Type 2
+            }
+            if ($Object.AutopilotWhatIf -eq "Remove" -and $Object.AutopilotDeviceID) {
+                Write-Log -Message "DRY RUN: would remove Autopilot device with ID $($Object.AutopilotDeviceName) for serial number $($Object.SerialNumber)." -Component 'Initialize-Cleanup' -Type 2
+            }
+        }
+        Export-DeviceResultsToCsv
+        return
+    }
+
     foreach ($Object in $Script:DocumentResults) {
         #ToDo: Add LAPS and BitLocker key export if available
         if ($Object.IntuneWhatIf -eq "Retire" -and $Object.IntuneDeviceID) {
@@ -676,7 +805,7 @@ function Initialize-Cleanup {
         }
         if ($Object.AutopilotWhatIf -eq "Remove" -and $Object.AutopilotDeviceID) {
             Write-Log -Message "Removing Autopilot device with ID $($Object.AutopilotDeviceName) for serial number $($Object.SerialNumber)." -Component 'Initialize-Cleanup' -Type 1
-            Remove-AutopilotDevice -ID $Object.AutopilotDeviceID
+            Remove-AutopilotDevice -DeviceId $Object.AutopilotDeviceID
         }
     }
     if ($Script:BatchRequests.count -gt 0) {
@@ -688,13 +817,18 @@ function Initialize-Cleanup {
 Initialize-Script
 # Analyze and save the current device states into the $Script:DocumentResults variable
 Save-CurrentDeviceStates
+# If dry-run is enabled, always run the cleanup analysis path so results are exported.
+if ($DryRun) {
+    Write-Log -Message "Dry-run mode requested. Cleanup actions will be logged but not submitted." -Component 'Main' -Type 2
+    Initialize-Cleanup
+}
 # If cleanup is enabled, perform the cleanup actions
-If ($EnableCleanup) {
+elseif ($EnableCleanup) {
     Initialize-Cleanup
     # Get user confirmation before submitting batch requests
     $UserInput = Read-Host "Do you want to submit the batch requests now? (Y/N)"
     if ($UserInput -eq "y") {
-        Submit-BatchRequests
+        #Submit-BatchRequests
         # Confirm the batch requests and process the results
         Confirm-BatchRequests
         # If there were throttled requests, wait and retry them
@@ -702,18 +836,20 @@ If ($EnableCleanup) {
             Write-Log -Message "Waiting $($Script:MinimumWaitTimeFromBatchRequests) seconds before retrying throttled requests." -Component 'Main'
             Start-Sleep -Seconds $Script:MinimumWaitTimeFromBatchRequests
             #Submit the retry batch requests
-            Submit-BatchRequests
+            #Submit-BatchRequests
             #Confirm the retry batch requests
             Confirm-BatchRequests
         }
     } else {
         Write-Log -Message "User chose not to submit the batch requests. Exiting cleanup process." -Component 'Main' -Type 2
     }
+} else {
+    Write-Log -Message "Cleanup not enabled. Script completed in analysis-only mode." -Component 'Main'
 }
 #Export the results to a CSV file if required
 if ($OutputCSV) {
     Write-Log -Message "Exporting results to CSV file." -Component 'Main'
-    $Script:DocumentResults | Export-Csv -Path (Join-Path -Path (Get-Location).path -ChildPath "RemovedAutopilotDevicesResults_$($Script:DateTime).csv") -Encoding utf8 -Delimiter ";" -NoTypeInformation -Force
+    Export-DeviceResultsToCsv -OutputDirectory (Get-Location).Path
 }
 # Show or export the results if required
 if ($ShowResults) {
