@@ -35,6 +35,8 @@ Open `HTML\LocalAdminResolvedLive.html` to query Azure Table Storage directly fr
 
 The live report provides the resolved summary, user and group detail links, search, filters, sorting, pagination, and CSV export. After opening user or group details, either the browser Back function or **Back to local admins** restores the previous search, filters, sort order, page, page size, and scroll position.
 
+**Group by computer** is enabled by default in the Local Admins table. Each computer starts collapsed; select its header to show or hide its administrator entries. In grouped mode, the page-size control and pagination count computers rather than administrator entries. Search, filters, and CSV export continue to operate on the matching administrator entries. Grouped results are ordered by computer name; ungrouped results default to computer name and then entry number.
+
 ### Read-only SAS for the live report
 
 In the storage account's **Shared access signature** page, generate an **account SAS** with only these options selected:
@@ -89,7 +91,7 @@ pwsh.exe -NoProfile -File .\HTML\Export-LocalAdminResolvedHtml.ps1 -StorageAccou
 
 The generated report embeds inventory data but not the SAS token, hides the live connection controls, and requires regeneration to obtain newer data. Protect the HTML according to the sensitivity of the reported device and account information.
 
-`HTML\LocalAdminResolvedDemo.html` is a publishable snapshot generated from 20,000 deterministic synthetic main rows. It contains no SAS token or real inventory data and can be opened directly without an Azure connection.
+The hosted [Local administrator inventory demo](https://intune.best/LocalAdminResolvedDemo.html) is a publishable snapshot generated from 20,000 deterministic synthetic main rows. It contains no SAS token or real inventory data and can be opened without an Azure connection. The generated `HTML\LocalAdminResolvedDemo.html` file can be uploaded to replace the hosted version.
 
 Regenerate the demo after loading the synthetic stress-test data:
 

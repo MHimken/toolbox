@@ -39,10 +39,12 @@
     .metric { min-width: 120px; }
     .metric span { display: block; color: var(--muted); font-size: .75rem; text-transform: uppercase; }
     .metric strong { font-family: Georgia, serif; font-size: 1.45rem; font-weight: 500; }
-    .toolbar { display: grid; grid-template-columns: minmax(240px, 1fr) repeat(3, minmax(140px, auto)) auto; gap: 10px; align-items: end; min-width: 0; padding: 18px 0; }
+    .toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) repeat(4, minmax(130px, auto)) auto; gap: 10px; align-items: end; min-width: 0; padding: 18px 0; }
     .toolbar > * { min-width: 0; }
     label { display: grid; gap: 5px; color: var(--muted); font-size: .75rem; font-weight: 700; text-transform: uppercase; }
     input, select { min-height: 40px; width: 100%; border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; color: var(--ink); background: var(--paper); }
+    .toggle-control { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: var(--paper); font-size: .82rem; font-weight: 400; text-transform: none; white-space: nowrap; }
+    .toggle-control input { min-height: 18px; width: 18px; margin: 0; padding: 0; accent-color: var(--accent); }
     input:focus, select:focus, button:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 1px; }
     .actions { display: flex; gap: 8px; }
     .command { min-height: 40px; border: 1px solid var(--jet); border-radius: 4px; padding: 8px 13px; color: var(--paper); background: var(--jet); white-space: nowrap; }
@@ -59,6 +61,13 @@
     td { max-width: 340px; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
     tbody tr:nth-child(even) { background: var(--wash); }
     tbody tr:hover { box-shadow: inset 4px 0 var(--accent); }
+    .computer-group td { max-width: none; padding: 0; color: var(--paper); background: var(--accent-deep); border-bottom-color: var(--accent-deep); font-weight: 700; }
+    .computer-group:hover { box-shadow: none; }
+    .computer-group-button { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; padding: 10px 12px; color: inherit; background: transparent; text-align: left; }
+    .computer-group-button:hover { background: color-mix(in srgb, var(--accent-deep) 82%, var(--jet)); }
+    .computer-group-indicator { width: 1em; font-size: .78rem; text-align: center; }
+    .computer-group-meta { margin-left: 8px; font-size: .78rem; font-weight: 400; opacity: .85; }
+    .computer-group-count { margin-left: auto; font-size: .78rem; font-weight: 400; opacity: .85; }
     .detail-link { border: 0; padding: 0; color: var(--accent-deep); background: transparent; text-align: left; text-decoration: underline; font-weight: 700; }
     .status { display: inline-block; min-width: 62px; border-radius: 3px; padding: 3px 7px; text-align: center; font-size: .72rem; font-weight: 700; }
     .status.active { color: var(--paper); background: var(--jet); }
@@ -130,6 +139,7 @@
       <label class="search-field">Search all columns<input id="search" type="search" placeholder="Computer, SID, user, group..." autocomplete="off"></label>
       <label id="joinField">Join state<select id="joinFilter"><option value="">All join states</option></select></label>
       <label id="removedField">Status<select id="removedFilter"><option value="">All records</option><option value="0">Active</option><option value="1">Removed</option></select></label>
+      <label id="groupField">Computer layout<span class="toggle-control"><input id="groupToggle" type="checkbox" checked>Group by computer</span></label>
       <label>Rows per page<select id="pageSize"><option>25</option><option selected>50</option><option>100</option><option>250</option></select></label>
       <div class="actions"><button class="command secondary" id="resetButton" type="button">Reset</button><button class="command" id="exportButton" type="button">Export CSV</button></div>
     </section>
@@ -164,8 +174,8 @@
       users: { rows: REPORT.users, columns: [['UserID', 'User ID'], ['SamAccountName', 'SAM account name'], ['UserPrincipalName', 'User principal name'], ['LocalOrEntraOrAD', 'Source'], ['Timestamp', 'Azure timestamp']] },
       groups: { rows: REPORT.groups, columns: [['GroupID', 'Group ID'], ['GroupName', 'Group name'], ['LocalOrEntraOrAD', 'Source'], ['Timestamp', 'Azure timestamp']] }
     };
-    const state = { view: 'summary', query: '', join: '', removed: '', sort: 'RowKey', direction: 1, page: 1, size: 50, linked: false };
-    const elements = Object.fromEntries(['generatedAt','visibleCount','totalMain','totalRemoved','totalComputers','totalUsers','totalGroups','connectionPanel','storageAccountName','sasToken','refreshButton','refreshWarning','refreshStatus','backButton','search','joinField','joinFilter','removedField','removedFilter','pageSize','resetButton','exportButton','tableHead','tableBody','emptyState','pageInfo','firstPage','previousPage','nextPage','lastPage'].map(id => [id, document.getElementById(id)]));
+    const state = { view: 'summary', query: '', join: '', removed: '', grouped: true, expandedComputers: [], sort: 'ComputerName', direction: 1, page: 1, size: 50, linked: false };
+    const elements = Object.fromEntries(['generatedAt','visibleCount','totalMain','totalRemoved','totalComputers','totalUsers','totalGroups','connectionPanel','storageAccountName','sasToken','refreshButton','refreshWarning','refreshStatus','backButton','search','joinField','joinFilter','removedField','removedFilter','groupField','groupToggle','pageSize','resetButton','exportButton','tableHead','tableBody','emptyState','pageInfo','firstPage','previousPage','nextPage','lastPage'].map(id => [id, document.getElementById(id)]));
     const formatter = new Intl.NumberFormat();
 
     function text(value) { return value === null || value === undefined ? '' : String(value); }
@@ -247,7 +257,7 @@
         ]);
         REPORT = resolveAzureData(main, users, groups);
         views.summary.rows = REPORT.summary; views.users.rows = REPORT.users; views.groups.rows = REPORT.groups;
-        state.query = state.join = state.removed = ''; state.page = 1;
+        state.query = state.join = state.removed = ''; state.expandedComputers = []; state.page = 1;
         elements.search.value = elements.joinFilter.value = elements.removedFilter.value = '';
         updateReportSummary(); activateView('summary');
         elements.refreshWarning.textContent = 'Refresh complete. The report now shows the latest retrieved Azure Table data.';
@@ -265,15 +275,45 @@
       const query = state.query.trim().toLowerCase();
       return views[state.view].rows.filter(row => (!query || searchable(row).includes(query)) && (state.view !== 'summary' || ((!state.join || text(row.EntraOrHybrid) === state.join) && (!state.removed || text(row.Removed) === state.removed))));
     }
+    function compareValues(left, right, direction = 1) {
+      if (left === right) return 0;
+      if (left === null || left === undefined || left === '') return 1;
+      if (right === null || right === undefined || right === '') return -1;
+      if (typeof left === 'number' && typeof right === 'number') return (left - right) * direction;
+      return text(left).localeCompare(text(right), undefined, { numeric: true, sensitivity: 'base' }) * direction;
+    }
     function sortedRows(rows) {
       return [...rows].sort((left, right) => {
-        const a = left[state.sort], b = right[state.sort];
-        if (a === b) return 0;
-        if (a === null || a === undefined || a === '') return 1;
-        if (b === null || b === undefined || b === '') return -1;
-        if (typeof a === 'number' && typeof b === 'number') return (a - b) * state.direction;
-        return text(a).localeCompare(text(b), undefined, { numeric: true, sensitivity: 'base' }) * state.direction;
+        if (state.view === 'summary' && state.grouped) {
+          const computerOrder = compareValues(left.ComputerName, right.ComputerName);
+          if (computerOrder) return computerOrder;
+          const sidOrder = compareValues(left.SID, right.SID);
+          if (sidOrder) return sidOrder;
+          if (state.sort !== 'ComputerName' && state.sort !== 'SID') {
+            const selectedOrder = compareValues(left[state.sort], right[state.sort], state.direction);
+            if (selectedOrder) return selectedOrder;
+          }
+          return compareValues(left.RowKey, right.RowKey);
+        }
+        const selectedOrder = compareValues(left[state.sort], right[state.sort], state.direction);
+        if (selectedOrder) return selectedOrder;
+        if (state.view === 'summary' && state.sort === 'ComputerName') return compareValues(left.RowKey, right.RowKey);
+        return 0;
       });
+    }
+    function groupComputerRows(rows) {
+      const groups = [];
+      rows.forEach(row => {
+        const key = `${text(row.ComputerName)}|${text(row.SID)}`;
+        const currentGroup = groups[groups.length - 1];
+        if (!currentGroup || currentGroup.key !== key) groups.push({ key, rows: [row] });
+        else currentGroup.rows.push(row);
+      });
+      return groups;
+    }
+    function paginationItemCount() {
+      const rows = sortedRows(filteredRows());
+      return state.view === 'summary' && state.grouped ? groupComputerRows(rows).length : rows.length;
     }
     function captureViewState() {
       return {
@@ -287,10 +327,13 @@
       elements.search.value = state.query;
       elements.joinFilter.value = state.join;
       elements.removedFilter.value = state.removed;
+      elements.groupToggle.checked = Boolean(state.grouped);
+      state.expandedComputers = Array.isArray(state.expandedComputers) ? state.expandedComputers : [];
       elements.pageSize.value = text(state.size);
       document.querySelectorAll('.tab').forEach(tab => tab.setAttribute('aria-selected', text(tab.dataset.view === state.view)));
       elements.joinField.hidden = state.view !== 'summary';
       elements.removedField.hidden = state.view !== 'summary';
+      elements.groupField.hidden = state.view !== 'summary';
       elements.backButton.classList.toggle('visible', state.linked);
       render();
       requestAnimationFrame(() => {
@@ -306,9 +349,9 @@
     function activateView(view, linkedQuery = '') {
       state.view = view; state.page = 1; state.linked = Boolean(linkedQuery);
       state.query = linkedQuery; elements.search.value = linkedQuery;
-      state.sort = view === 'summary' ? 'RowKey' : views[view].columns[0][0]; state.direction = 1;
+      state.sort = view === 'summary' ? 'ComputerName' : views[view].columns[0][0]; state.direction = 1;
       document.querySelectorAll('.tab').forEach(tab => tab.setAttribute('aria-selected', text(tab.dataset.view === view)));
-      elements.joinField.hidden = view !== 'summary'; elements.removedField.hidden = view !== 'summary';
+      elements.joinField.hidden = view !== 'summary'; elements.removedField.hidden = view !== 'summary'; elements.groupField.hidden = view !== 'summary';
       elements.backButton.classList.toggle('visible', state.linked);
       render();
     }
@@ -331,17 +374,44 @@
     }
     function render() {
       const rows = sortedRows(filteredRows());
-      const pages = Math.max(1, Math.ceil(rows.length / state.size)); state.page = Math.min(state.page, pages);
-      const start = (state.page - 1) * state.size; const pageRows = rows.slice(start, start + state.size);
+      const groupedSummary = state.view === 'summary' && state.grouped;
+      const computerGroups = groupedSummary ? groupComputerRows(rows) : [];
+      const itemCount = groupedSummary ? computerGroups.length : rows.length;
+      const pages = Math.max(1, Math.ceil(itemCount / state.size)); state.page = Math.min(state.page, pages);
+      const start = (state.page - 1) * state.size;
+      const pageRows = groupedSummary ? computerGroups.slice(start, start + state.size).flatMap(group => group.rows) : rows.slice(start, start + state.size);
+      const computerCounts = new Map();
+      if (groupedSummary) computerGroups.forEach(group => computerCounts.set(group.key, group.rows.length));
       elements.visibleCount.textContent = formatter.format(rows.length);
       elements.tableHead.replaceChildren();
       views[state.view].columns.forEach(([key, label]) => {
         const th = document.createElement('th'); const button = document.createElement('button'); button.type = 'button'; button.textContent = `${label}${state.sort === key ? (state.direction === 1 ? '  ▲' : '  ▼') : ''}`; button.addEventListener('click', () => { if (state.sort === key) state.direction *= -1; else { state.sort = key; state.direction = 1; } state.page = 1; render(); updateCurrentHistoryState(); }); th.appendChild(button); elements.tableHead.appendChild(th);
       });
       elements.tableBody.replaceChildren();
-      pageRows.forEach(row => { const tr = document.createElement('tr'); views[state.view].columns.forEach(([key]) => tr.appendChild(renderCell(row, key))); elements.tableBody.appendChild(tr); });
+      let previousComputerKey = '';
+      pageRows.forEach(row => {
+        if (state.view === 'summary' && state.grouped) {
+          const computerKey = `${text(row.ComputerName)}|${text(row.SID)}`;
+          if (computerKey !== previousComputerKey) {
+            const groupRow = document.createElement('tr'); groupRow.className = 'computer-group';
+            const groupCell = document.createElement('td'); groupCell.colSpan = views.summary.columns.length;
+            const expanded = state.expandedComputers.includes(computerKey);
+            const groupButton = document.createElement('button'); groupButton.className = 'computer-group-button'; groupButton.type = 'button'; groupButton.setAttribute('aria-expanded', text(expanded));
+            const indicator = document.createElement('span'); indicator.className = 'computer-group-indicator'; indicator.setAttribute('aria-hidden', 'true'); indicator.textContent = expanded ? '▼' : '▶'; groupButton.appendChild(indicator);
+            groupButton.append(document.createTextNode(text(row.ComputerName) || 'Unnamed computer'));
+            const meta = document.createElement('span'); meta.className = 'computer-group-meta'; meta.textContent = `| SID: ${text(row.SID)}`; groupButton.appendChild(meta);
+            const count = document.createElement('span'); count.className = 'computer-group-count'; count.textContent = `${formatter.format(computerCounts.get(computerKey) || 0)} entries`; groupButton.appendChild(count);
+            groupButton.addEventListener('click', () => { state.expandedComputers = expanded ? state.expandedComputers.filter(key => key !== computerKey) : [...state.expandedComputers, computerKey]; render(); updateCurrentHistoryState(); });
+            groupCell.appendChild(groupButton);
+            groupRow.appendChild(groupCell); elements.tableBody.appendChild(groupRow); previousComputerKey = computerKey;
+          }
+          if (!state.expandedComputers.includes(computerKey)) return;
+        }
+        const tr = document.createElement('tr'); views[state.view].columns.forEach(([key]) => tr.appendChild(renderCell(row, key))); elements.tableBody.appendChild(tr);
+      });
       elements.emptyState.hidden = rows.length !== 0;
-      elements.pageInfo.textContent = rows.length ? `${formatter.format(start + 1)}-${formatter.format(Math.min(start + state.size, rows.length))} of ${formatter.format(rows.length)} | Page ${state.page} of ${pages}` : '0 rows';
+      const itemLabel = groupedSummary ? 'computers' : 'rows';
+      elements.pageInfo.textContent = itemCount ? `${formatter.format(start + 1)}-${formatter.format(Math.min(start + state.size, itemCount))} of ${formatter.format(itemCount)} ${itemLabel} | Page ${state.page} of ${pages}` : `0 ${itemLabel}`;
       elements.firstPage.disabled = elements.previousPage.disabled = state.page === 1; elements.nextPage.disabled = elements.lastPage.disabled = state.page === pages;
     }
     function exportCsv() {
@@ -357,11 +427,12 @@
     elements.search.addEventListener('input', event => { state.query = event.target.value; state.page = 1; if (state.view === 'summary') { state.linked = false; elements.backButton.classList.remove('visible'); } render(); updateCurrentHistoryState(); });
     elements.joinFilter.addEventListener('change', event => { state.join = event.target.value; state.page = 1; render(); updateCurrentHistoryState(); });
     elements.removedFilter.addEventListener('change', event => { state.removed = event.target.value; state.page = 1; render(); updateCurrentHistoryState(); });
+    elements.groupToggle.addEventListener('change', event => { state.grouped = event.target.checked; state.expandedComputers = []; state.sort = 'ComputerName'; state.direction = 1; state.page = 1; render(); updateCurrentHistoryState(); });
     elements.pageSize.addEventListener('change', event => { state.size = Number(event.target.value); state.page = 1; render(); updateCurrentHistoryState(); });
-    elements.resetButton.addEventListener('click', () => { state.query = state.join = state.removed = ''; state.page = 1; elements.search.value = elements.joinFilter.value = elements.removedFilter.value = ''; render(); updateCurrentHistoryState(); });
+    elements.resetButton.addEventListener('click', () => { state.query = state.join = state.removed = ''; state.expandedComputers = []; state.page = 1; elements.search.value = elements.joinFilter.value = elements.removedFilter.value = ''; render(); updateCurrentHistoryState(); });
     elements.exportButton.addEventListener('click', exportCsv); elements.backButton.addEventListener('click', () => history.back());
     elements.refreshButton.addEventListener('click', refreshFromAzure);
-    elements.firstPage.addEventListener('click', () => { state.page = 1; render(); updateCurrentHistoryState(); }); elements.previousPage.addEventListener('click', () => { state.page--; render(); updateCurrentHistoryState(); }); elements.nextPage.addEventListener('click', () => { state.page++; render(); updateCurrentHistoryState(); }); elements.lastPage.addEventListener('click', () => { state.page = Math.max(1, Math.ceil(filteredRows().length / state.size)); render(); updateCurrentHistoryState(); });
+    elements.firstPage.addEventListener('click', () => { state.page = 1; render(); updateCurrentHistoryState(); }); elements.previousPage.addEventListener('click', () => { state.page--; render(); updateCurrentHistoryState(); }); elements.nextPage.addEventListener('click', () => { state.page++; render(); updateCurrentHistoryState(); }); elements.lastPage.addEventListener('click', () => { state.page = Math.max(1, Math.ceil(paginationItemCount() / state.size)); render(); updateCurrentHistoryState(); });
     window.addEventListener('popstate', event => {
       if (event.state?.localAdminReport && event.state.viewState) restoreViewState(event.state.viewState);
     });

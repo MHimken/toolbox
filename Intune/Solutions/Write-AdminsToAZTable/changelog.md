@@ -2,6 +2,13 @@
 
 ## 2026
 
+### 31st of August
+
+* Added grouping: HTML/LocalAdminResolvedLive.html - enabled computer-object grouping by default with accessible, initially collapsed headers while preserving search, filters, pagination, detail links, and CSV exports.
+* Improved ordering: HTML/LocalAdminResolvedLive.html - ordered grouped results by computer name and defaulted ungrouped results to computer name followed by entry number.
+* Fixed grouped pagination: HTML/LocalAdminResolvedLive.html - made page size and navigation count computer objects instead of their administrator entries when grouping is enabled.
+* Published demo: HTML/LocalAdminResolvedDemo.html - linked the generated [synthetic demonstration](https://intune.best/LocalAdminResolvedDemo.html).
+
 ### 30th of August
 
 * Add: README.md - documented solution deployment, reporting options, data schema, and operational guidance.
