@@ -76,6 +76,12 @@ See the [Intune remediation changelog](Intune/Remediations/changelog.md) for det
 | [Get-GSAPolicyRuleIDandName.ps1](GlobalSecureAccess/Get-GSAPolicyRuleIDandName.ps1) | Lists Global Secure Access policy rule IDs and names. | Finished | 2025-08-29 |
 | [Script-ShowSignOutAndDisablePrivateAccessButton.ps1](GlobalSecureAccess/Script-ShowSignOutAndDisablePrivateAccessButton.ps1) | Configures Global Secure Access client sign-out and Private Access controls. | Finished | 2024-10-01 |
 
+### [Other](Other/README.md)
+
+| Script | Description | Status | Last updated |
+| --- | --- | --- | --- |
+| [Analyze-CSP-Header.ps1](Other/Analyze-CSP-Header.ps1) / [Demo report](Other/Analyze-CSP-Header-Demo.html) | Analyzes Content-Security-Policy response headers and creates a self-contained interactive HTML report. | Finished | 2026-09-01 |
+
 ### Intune: Autopatch, compliance, and detections
 
 | Script | Description | Status | Last updated |
