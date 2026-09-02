@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
   <title>Local administrator inventory</title>
   <style>
     :root {
@@ -30,6 +31,10 @@
     .connection { margin-bottom: 20px; padding: 18px; border-left: 5px solid var(--accent); background: var(--paper); }
     .connection-grid { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr) auto; gap: 10px; align-items: end; }
     .connection-grid > * { min-width: 0; }
+    .connection-options { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
+    .connection-options .toggle-control { border: 0; padding: 0; background: transparent; }
+    .forget-connection { border: 0; padding: 4px 0; color: var(--accent-deep); background: transparent; font-weight: 700; }
+    .forget-connection:hover { text-decoration: underline; }
     .refresh-note { margin: 12px 0 0; padding: 10px 12px; color: var(--ink); background: #f7e4e8; border: 1px solid #d8a7b1; font-size: .86rem; }
     .refresh-status { min-height: 20px; margin: 10px 0 0; color: var(--muted); font-size: .84rem; }
     .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
@@ -119,6 +124,10 @@
         <label>Read-only SAS token<input id="sasToken" type="password" placeholder="sv=..." autocomplete="off"></label>
         <button class="command" id="refreshButton" type="button">Refresh from Azure</button>
       </div>
+      <div class="connection-options">
+        <label class="toggle-control"><input id="rememberConnection" type="checkbox">Remember connection on this device</label>
+        <button class="forget-connection" id="forgetConnection" type="button">Forget saved connection</button>
+      </div>
       <p class="refresh-note" id="refreshWarning" role="alert" hidden>Please do not click Refresh repeatedly. Azure Table pagination can take a while; wait patiently until this message changes.</p>
       <p class="refresh-status" id="refreshStatus" aria-live="polite">No request has been sent. Data loads only when you click Refresh from Azure.</p>
     </section>
@@ -175,8 +184,9 @@
       groups: { rows: REPORT.groups, columns: [['GroupID', 'Group ID'], ['GroupName', 'Group name'], ['LocalOrEntraOrAD', 'Source'], ['Timestamp', 'Azure timestamp']] }
     };
     const state = { view: 'summary', query: '', join: '', removed: '', grouped: true, expandedComputers: [], sort: 'ComputerName', direction: 1, page: 1, size: 50, linked: false };
-    const elements = Object.fromEntries(['generatedAt','visibleCount','totalMain','totalRemoved','totalComputers','totalUsers','totalGroups','connectionPanel','storageAccountName','sasToken','refreshButton','refreshWarning','refreshStatus','backButton','search','joinField','joinFilter','removedField','removedFilter','groupField','groupToggle','pageSize','resetButton','exportButton','tableHead','tableBody','emptyState','pageInfo','firstPage','previousPage','nextPage','lastPage'].map(id => [id, document.getElementById(id)]));
+    const elements = Object.fromEntries(['generatedAt','visibleCount','totalMain','totalRemoved','totalComputers','totalUsers','totalGroups','connectionPanel','storageAccountName','sasToken','rememberConnection','forgetConnection','refreshButton','refreshWarning','refreshStatus','backButton','search','joinField','joinFilter','removedField','removedFilter','groupField','groupToggle','pageSize','resetButton','exportButton','tableHead','tableBody','emptyState','pageInfo','firstPage','previousPage','nextPage','lastPage'].map(id => [id, document.getElementById(id)]));
     const formatter = new Intl.NumberFormat();
+    const connectionStorageKey = 'localAdminAzureConnection.v1';
 
     function text(value) { return value === null || value === undefined ? '' : String(value); }
     function displayValue(key, value) {
@@ -188,6 +198,51 @@
       return text(value);
     }
     function searchable(row) { return Object.entries(row).filter(([key]) => !key.startsWith('_')).map(([, value]) => text(value).toLowerCase()).join(' '); }
+    function validateConnection(accountName, token) {
+      if (!/^[a-z0-9]{3,24}$/.test(accountName)) return 'Account names contain 3 to 24 lowercase letters or numbers.';
+      const parameters = new URLSearchParams(token.replace(/^\?/, ''));
+      if (!parameters.get('sig') || !parameters.get('se')) return 'The SAS token is incomplete.';
+      if (!text(parameters.get('ss')).includes('t') || !text(parameters.get('srt')).includes('o') || !text(parameters.get('sp')).includes('r')) return 'Use an account SAS with Table, Object, and Read access.';
+      if (parameters.has('spr') && parameters.get('spr') !== 'https') return 'Use a SAS token restricted to HTTPS only.';
+      const expiry = new Date(parameters.get('se'));
+      if (Number.isNaN(expiry.getTime()) || expiry <= new Date()) return 'The SAS token is expired or has an invalid expiry.';
+      return '';
+    }
+    function removeSavedConnection() {
+      try { localStorage.removeItem(connectionStorageKey); return true; }
+      catch { return false; }
+    }
+    function saveConnection(accountName, token) {
+      try {
+        localStorage.setItem(connectionStorageKey, JSON.stringify({ version: 1, accountName, token }));
+        return true;
+      } catch { return false; }
+    }
+    function restoreSavedConnection() {
+      if (hasEmbeddedData) return;
+      let saved;
+      try {
+        const serialized = localStorage.getItem(connectionStorageKey);
+        if (!serialized) return;
+        saved = JSON.parse(serialized);
+      } catch {
+        removeSavedConnection();
+        elements.refreshStatus.textContent = 'Saved connection data could not be read and was removed.';
+        return;
+      }
+      const accountName = text(saved?.accountName).trim().toLowerCase();
+      const token = text(saved?.token).trim();
+      const validationError = saved?.version === 1 ? validateConnection(accountName, token) : 'The saved connection format is no longer supported.';
+      if (validationError) {
+        removeSavedConnection();
+        elements.refreshStatus.textContent = `Saved connection was removed. ${validationError}`;
+        return;
+      }
+      elements.storageAccountName.value = accountName;
+      elements.sasToken.value = token;
+      elements.rememberConnection.checked = true;
+      elements.refreshStatus.textContent = 'Saved connection loaded. Select Refresh from Azure to retrieve data.';
+    }
     async function getAzureTableEntities(tableName, accountUrl, token) {
       const rows = [];
       let nextPartitionKey = '';
@@ -239,8 +294,9 @@
     async function refreshFromAzure() {
       const accountName = elements.storageAccountName.value.trim().toLowerCase();
       const token = elements.sasToken.value.trim();
-      if (!/^[a-z0-9]{3,24}$/.test(accountName) || !token) {
-        elements.refreshStatus.textContent = 'Enter a valid storage account name and a read-only SAS token. Account names contain 3 to 24 lowercase letters or numbers.';
+      const validationError = validateConnection(accountName, token);
+      if (validationError) {
+        elements.refreshStatus.textContent = validationError;
         return;
       }
       const accountUrl = `https://${accountName}.table.core.windows.net`;
@@ -260,8 +316,11 @@
         state.query = state.join = state.removed = ''; state.expandedComputers = []; state.page = 1;
         elements.search.value = elements.joinFilter.value = elements.removedFilter.value = '';
         updateReportSummary(); activateView('summary');
+        const persistenceMessage = elements.rememberConnection.checked
+          ? (saveConnection(accountName, token) ? ' Connection saved on this device.' : ' Connection could not be saved by this browser.')
+          : (removeSavedConnection() ? '' : ' Previously saved connection could not be removed.');
         elements.refreshWarning.textContent = 'Refresh complete. The report now shows the latest retrieved Azure Table data.';
-        elements.refreshStatus.textContent = `Loaded ${formatter.format(REPORT.summary.length)} local administrator rows, ${formatter.format(REPORT.users.length)} users, and ${formatter.format(REPORT.groups.length)} groups.`;
+        elements.refreshStatus.textContent = `Loaded ${formatter.format(REPORT.summary.length)} local administrator rows, ${formatter.format(REPORT.users.length)} users, and ${formatter.format(REPORT.groups.length)} groups.${persistenceMessage}`;
       } catch (error) {
         elements.refreshWarning.textContent = 'Refresh stopped. Review the error below before trying again.';
         elements.refreshStatus.textContent = `${error.message} Verify the SAS permissions and Azure Storage CORS configuration.`;
@@ -421,6 +480,7 @@
     }
 
     elements.connectionPanel.hidden = hasEmbeddedData;
+    restoreSavedConnection();
     updateReportSummary();
     history.replaceState({ localAdminReport: true, viewState: captureViewState() }, '', location.href.split('#')[0]);
     document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => { activateView(tab.dataset.view); updateCurrentHistoryState(); }));
@@ -431,6 +491,13 @@
     elements.pageSize.addEventListener('change', event => { state.size = Number(event.target.value); state.page = 1; render(); updateCurrentHistoryState(); });
     elements.resetButton.addEventListener('click', () => { state.query = state.join = state.removed = ''; state.expandedComputers = []; state.page = 1; elements.search.value = elements.joinFilter.value = elements.removedFilter.value = ''; render(); updateCurrentHistoryState(); });
     elements.exportButton.addEventListener('click', exportCsv); elements.backButton.addEventListener('click', () => history.back());
+    elements.forgetConnection.addEventListener('click', () => {
+      const removed = removeSavedConnection();
+      elements.storageAccountName.value = '';
+      elements.sasToken.value = '';
+      elements.rememberConnection.checked = false;
+      elements.refreshStatus.textContent = removed ? 'Saved connection forgotten. Loaded report data remains available until this page is closed or refreshed.' : 'The browser did not allow the saved connection to be removed.';
+    });
     elements.refreshButton.addEventListener('click', refreshFromAzure);
     elements.firstPage.addEventListener('click', () => { state.page = 1; render(); updateCurrentHistoryState(); }); elements.previousPage.addEventListener('click', () => { state.page--; render(); updateCurrentHistoryState(); }); elements.nextPage.addEventListener('click', () => { state.page++; render(); updateCurrentHistoryState(); }); elements.lastPage.addEventListener('click', () => { state.page = Math.max(1, Math.ceil(paginationItemCount() / state.size)); render(); updateCurrentHistoryState(); });
     window.addEventListener('popstate', event => {

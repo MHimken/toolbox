@@ -50,7 +50,9 @@ Leave **Blob**, **File**, **Queue**, **Service**, **Container**, **Write**, **De
 
 The report queries entities from the known `LocalAdminCollection`, `AdminUserNames`, and `AdminGroups` tables. It does not list, create, modify, or delete tables or entities, so **List** and all write permissions are unnecessary. Set the shortest practical expiry and, where possible, restrict the SAS to the public outbound IPv4 address or range used by report viewers.
 
-The page keeps the SAS token in its password field and browser memory for the current page only. It does not write the token to local storage or embed it into the HTML file. The SAS remains visible in browser developer tools and request URLs, so do not share it or use the remediation or stress-test token in the browser.
+By default, the page keeps the SAS token in its password field and browser memory for the current page only. Select **Remember connection on this device** to save the validated storage account name and SAS token in browser `localStorage` after a successful refresh. The page restores the fields on future visits but never refreshes automatically. Clearing the checkbox removes a previously saved connection after the next successful refresh; **Forget saved connection** removes it immediately, clears both fields, and leaves the currently loaded report data available.
+
+Browser storage is a convenience, not a secure credential vault. Any script running on the same origin can read `localStorage`, and anyone using the same browser profile can recover the saved SAS. Host this report on a dedicated, trusted origin without unrelated scripts, avoid shared devices and browser profiles, keep the read-only SAS short-lived and least-privileged, and use **Forget saved connection** when persistence is no longer needed. Browser-side encryption would not protect the token from same-origin script execution. The SAS also remains visible in browser developer tools and request URLs, so never use the remediation or stress-test token in the browser.
 
 ### CORS settings
 
@@ -89,7 +91,7 @@ Use `-OutputPath` to choose another report location and `-OpenReport` to open it
 pwsh.exe -NoProfile -File .\HTML\Export-LocalAdminResolvedHtml.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<read-only-sas-token>' -OutputPath C:\Reports\LocalAdmins.html -OpenReport
 ```
 
-The generated report embeds inventory data but not the SAS token, hides the live connection controls, and requires regeneration to obtain newer data. Protect the HTML according to the sensitivity of the reported device and account information.
+The generated report embeds inventory data but not the SAS token, hides the live connection controls, never reads or writes saved connection data, and requires regeneration to obtain newer data. Protect the HTML according to the sensitivity of the reported device and account information.
 
 The hosted [Local administrator inventory demo](https://intune.best/LocalAdminResolvedDemo.html) is a publishable snapshot generated from 20,000 deterministic synthetic main rows. It contains no SAS token or real inventory data and can be opened without an Azure connection. The generated `HTML\LocalAdminResolvedDemo.html` file can be uploaded to replace the hosted version.
 

@@ -2,6 +2,14 @@
 
 ## 2026
 
+### 2nd of September
+
+* Added opt-in connection persistence: HTML/LocalAdminResolvedLive.html - saves a validated storage account name and read-only SAS in browser local storage only after a successful refresh, restores fields without automatically querying Azure, and provides an immediate forget action.
+* Hardened live reporting: HTML/LocalAdminResolvedLive.html - validates required Table, Object, Read, HTTPS, and future-expiry SAS settings and disables referrer transmission.
+* Documented browser-storage security: README.md - described same-origin script and shared-profile risks, dedicated-origin guidance, and snapshot isolation from saved connections.
+* Improved remediation reliability: Remediation/Remediate-Write-AdminsToAZTable.ps1 - sends Azure Table JSON as explicit UTF-8 so localized account names remain consistent between entity URIs and request bodies.
+* Improved remediation diagnostics: Remediation/Remediate-Write-AdminsToAZTable.ps1 - reports the failing Azure table, entity identity, HTTP status, and Azure response body without exposing the SAS token.
+
 ### 31st of August
 
 * Added grouping: HTML/LocalAdminResolvedLive.html - enabled computer-object grouping by default with accessible, initially collapsed headers while preserving search, filters, pagination, detail links, and CSV exports.

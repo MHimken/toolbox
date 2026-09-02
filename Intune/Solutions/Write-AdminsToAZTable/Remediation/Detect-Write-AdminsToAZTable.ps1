@@ -5,6 +5,13 @@
     This detection script targets domain joined, Microsoft Entra joined, and hybrid joined devices.
     Applicable devices always return noncompliant so the paired remediation can collect
     local Administrators membership and upload the result to Azure Table Storage.
+.NOTES
+    Version: 1.0
+    Author: Martin Himken
+    Original script name: Detect-Write-AdminsToAZTable.ps1
+    Initial creation date: 2026-08-30
+    Last change: 2026-09-02
+    Changes: Added the required script metadata header.
 .LINK
     ..\changelog.md
 #>

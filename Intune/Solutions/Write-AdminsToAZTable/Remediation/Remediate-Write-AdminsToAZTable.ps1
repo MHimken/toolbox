@@ -7,6 +7,13 @@
     domain group members when domain connectivity is available, and writes a typed snapshot into
     three Azure Tables using SID-backed keys. Previously reported members that are no longer found
     are retained in the main table with Removed set to 1.
+.NOTES
+    Version: 2.1
+    Author: Martin Himken
+    Original script name: Remediate-Write-AdminsToAZTable.ps1
+    Initial creation date: 2026-08-30
+    Last change: 2026-09-02
+    Changes: Added detailed Azure errors and UTF-8 request bodies for localized account names.
 .LINK
     ..\changelog.md
 #>
@@ -792,6 +799,34 @@ function Get-EntityUri {
     return "https://{0}.table.core.windows.net/{1}(PartitionKey='{2}',RowKey='{3}')?{4}" -f $storageAccountName, $TableName, $escapedPartitionKey, $escapedRowKey, $Token
 }
 
+function Get-HttpErrorResponseBody {
+    param(
+        [Parameter(Mandatory = $false)]
+        [System.Net.WebResponse]$Response
+    )
+
+    if ($null -eq $Response) {
+        return ''
+    }
+
+    $reader = $null
+    try {
+        $responseStream = $Response.GetResponseStream()
+        if ($null -eq $responseStream) {
+            return ''
+        }
+
+        $reader = New-Object System.IO.StreamReader($responseStream)
+        return $reader.ReadToEnd().Trim()
+    } catch {
+        return ''
+    } finally {
+        if ($null -ne $reader) {
+            $reader.Dispose()
+        }
+    }
+}
+
 function Get-TablePartitionEntities {
     param(
         [Parameter(Mandatory = $true)]
@@ -936,13 +971,18 @@ function Set-TableEntity {
     $headers = Get-StorageHeaders
     $entityUri = Get-EntityUri -TableName $TableName -PartitionKey $Entity.PartitionKey -RowKey $Entity.RowKey -Token $Token
     $jsonPayload = $Entity | ConvertTo-Json -Depth 4 -Compress
+    $requestBody = [System.Text.Encoding]::UTF8.GetBytes($jsonPayload)
 
     try {
-        Invoke-RestMethod -Uri $entityUri -Method Put -Headers $headers -Body $jsonPayload -ErrorAction Stop | Out-Null
+        Invoke-RestMethod -Uri $entityUri -Method Put -Headers $headers -Body $requestBody -ErrorAction Stop | Out-Null
     } catch {
         $statusCode = $null
+        $responseBody = [string]$_.ErrorDetails.Message
         if ($_.Exception.Response) {
             $statusCode = $_.Exception.Response.StatusCode.value__
+            if ([string]::IsNullOrWhiteSpace($responseBody)) {
+                $responseBody = Get-HttpErrorResponseBody -Response $_.Exception.Response
+            }
         }
 
         if ($statusCode -eq 404) {
@@ -953,7 +993,9 @@ function Set-TableEntity {
             throw "Azure table '$TableName' rejected the upsert request with 403. The SAS token does not have the required add/update permissions for this table."
         }
 
-        throw
+        $entityIdentity = '{0}/{1}' -f [string]$Entity.PartitionKey, [string]$Entity.RowKey
+        $errorDetail = if ([string]::IsNullOrWhiteSpace($responseBody)) { $_.Exception.Message } else { $responseBody }
+        throw "Azure table '$TableName' rejected entity '$entityIdentity' with HTTP $statusCode. $errorDetail"
     }
 }
 
