@@ -8,12 +8,12 @@
     three Azure Tables using SID-backed keys. Previously reported members that are no longer found
     are retained in the main table with Removed set to 1.
 .NOTES
-    Version: 2.1
+    Version: 2.4
     Author: Martin Himken
     Original script name: Remediate-Write-AdminsToAZTable.ps1
     Initial creation date: 2026-08-30
     Last change: 2026-09-02
-    Changes: Added detailed Azure errors and UTF-8 request bodies for localized account names.
+    Changes: Increased computer names to 63 Unicode code points and validates surrogate pairs.
 .LINK
     ..\changelog.md
 #>
@@ -142,12 +142,30 @@ function Get-AuthorityName {
 function Convert-ObjectSidToString {
     param(
         [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$SidValue,
+        [Parameter(Mandatory = $false)]
         [System.DirectoryServices.DirectoryEntry]$DirectoryEntry,
         [Parameter(Mandatory = $false)]
         [string]$Authority,
         [Parameter(Mandatory = $false)]
         [string]$Name
     )
+
+    if ($null -ne $SidValue) {
+        try {
+            $sidText = [string]$SidValue
+            if ($sidText -match '^S-\d-(?:\d+-)+\d+$') {
+                return (New-Object System.Security.Principal.SecurityIdentifier -ArgumentList $sidText).Value
+            }
+
+            $sidBytes = [byte[]]@($SidValue)
+            if ($sidBytes.Count -gt 0) {
+                return (New-Object System.Security.Principal.SecurityIdentifier -ArgumentList @($sidBytes, 0)).Value
+            }
+        } catch {
+        }
+    }
 
     if ($null -ne $DirectoryEntry) {
         try {
@@ -198,6 +216,53 @@ function Get-MemberSource {
     }
 
     return 'A'
+}
+
+function Get-EntraPrincipalName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Sid,
+        [Parameter(Mandatory = $false)]
+        [string]$FallbackName
+    )
+
+    $fallback = Get-LeafAccountName -AccountName $FallbackName
+    if ([string]::IsNullOrWhiteSpace($fallback) -or
+        $fallback -match '^S-\d-(?:\d+-)+\d+$' -or
+        $fallback.Length -gt 128 -or
+        $fallback -match '[/\\#?]' -or
+        $fallback -match '[\x00-\x1F\x7F-\x9F]') {
+        $fallback = $Sid
+    }
+
+    if ($Sid -notmatch '^S-1-12-1-') {
+        return $fallback
+    }
+
+    $identityCachePath = 'HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache\{0}\IdentityCache' -f $Sid
+    try {
+        $identityCache = Get-ItemProperty -LiteralPath $identityCachePath -ErrorAction Stop
+        $displayName = [string]$identityCache.DisplayName
+        if (-not [string]::IsNullOrWhiteSpace($displayName) -and
+            $displayName -ne $Sid -and
+            $displayName.Length -le 128 -and
+            $displayName -notmatch '[/\\#?]' -and
+            $displayName -notmatch '[\x00-\x1F\x7F-\x9F]') {
+            return $displayName
+        }
+
+        $identityName = Get-LeafAccountName -AccountName ([string]$identityCache.IdentityName)
+        if (-not [string]::IsNullOrWhiteSpace($identityName) -and
+            $identityName -ne $Sid -and
+            $identityName.Length -le 128 -and
+            $identityName -notmatch '[/\\#?]' -and
+            $identityName -notmatch '[\x00-\x1F\x7F-\x9F]') {
+            return $identityName
+        }
+    } catch {
+    }
+
+    return $fallback
 }
 
 function Get-ComputerSid {
@@ -266,10 +331,21 @@ function Get-LocalAdministratorsMembers {
         } catch {
         }
 
-        $resolvedSid = Convert-ObjectSidToString -DirectoryEntry $directoryEntry -Authority $authorityName -Name $memberName
+        $memberSidValue = Get-AdsPropertyValue -AdsObject $member -PropertyName 'ObjectSID'
+        $resolvedSid = Convert-ObjectSidToString -SidValue $memberSidValue -DirectoryEntry $directoryEntry -Authority $authorityName -Name $memberName
+        if ([string]::IsNullOrWhiteSpace($resolvedSid)) {
+            $sidFromName = Get-LeafAccountName -AccountName $memberName
+            if ($sidFromName -match '^S-\d-(?:\d+-)+\d+$') {
+                $resolvedSid = Convert-ObjectSidToString -SidValue $sidFromName
+            }
+        }
         $accountName = $memberName
         if (-not [string]::IsNullOrWhiteSpace($authorityName)) {
             $accountName = '{0}\{1}' -f $authorityName, $memberName
+        }
+
+        if ([string]::IsNullOrWhiteSpace($resolvedSid)) {
+            throw "The SID could not be resolved for Administrators member '$accountName' with class '$memberClass' and path '$memberAdsPath'."
         }
 
         [void]$results.Add([pscustomobject]@{
@@ -523,6 +599,30 @@ function Convert-TableValue {
     return $Value
 }
 
+function Get-UnicodeCodePointCount {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    $count = 0
+    for ($index = 0; $index -lt $Value.Length; $index++) {
+        if ([char]::IsHighSurrogate($Value[$index])) {
+            if (($index + 1 -ge $Value.Length) -or -not [char]::IsLowSurrogate($Value[$index + 1])) {
+                throw 'Value contains an invalid Unicode surrogate sequence.'
+            }
+
+            $index++
+        } elseif ([char]::IsLowSurrogate($Value[$index])) {
+            throw 'Value contains an invalid Unicode surrogate sequence.'
+        }
+
+        $count++
+    }
+
+    return $count
+}
+
 function Get-RequiredTableValue {
     param(
         [Parameter(Mandatory = $false)]
@@ -533,7 +633,9 @@ function Get-RequiredTableValue {
         [Parameter(Mandatory = $true)]
         [int]$MaximumLength,
         [Parameter(Mandatory = $false)]
-        [switch]$UseNotAvailable
+        [switch]$UseNotAvailable,
+        [Parameter(Mandatory = $false)]
+        [switch]$CountUnicodeCodePoints
     )
 
     $result = $Value
@@ -545,7 +647,8 @@ function Get-RequiredTableValue {
         }
     }
 
-    if ($result.Length -gt $MaximumLength) {
+    $resultLength = if ($CountUnicodeCodePoints) { Get-UnicodeCodePointCount -Value $result } else { $result.Length }
+    if ($resultLength -gt $MaximumLength) {
         throw "$PropertyName exceeds the maximum length of $MaximumLength characters."
     }
 
@@ -691,7 +794,7 @@ function Add-MainTableRow {
     )
 
     $computerId = Get-RequiredTableValue -Value $ComputerSid -PropertyName 'ComputerID' -MaximumLength 256
-    $resolvedComputerName = Get-RequiredTableValue -Value $ComputerName -PropertyName 'Computername' -MaximumLength 15
+    $resolvedComputerName = Get-RequiredTableValue -Value $ComputerName -PropertyName 'Computername' -MaximumLength 63 -CountUnicodeCodePoints
     $resolvedAdminGroupName = Get-RequiredTableValue -Value $AdminGroupName -PropertyName 'LocalAdminGroupName' -MaximumLength 128
     Assert-ValidTableKey -Value $computerId -PropertyName 'ComputerID'
     if (($EntraOrHybrid -lt 1) -or ($EntraOrHybrid -gt 3)) {
@@ -1013,7 +1116,7 @@ function Assert-TableEntity {
     Assert-ValidTableKey -Value $rowKey -PropertyName 'RowKey'
 
     if ($TableName -eq $MainTable) {
-        $null = Get-RequiredTableValue -Value ([string]$Entity.Computername) -PropertyName 'Computername' -MaximumLength 15
+        $null = Get-RequiredTableValue -Value ([string]$Entity.Computername) -PropertyName 'Computername' -MaximumLength 63 -CountUnicodeCodePoints
         $null = Get-RequiredTableValue -Value ([string]$Entity.LocalAdminGroupName) -PropertyName 'LocalAdminGroupName' -MaximumLength 128
         if ([string]$Entity.EntraOrHybrid -notmatch '^[123]$') {
             throw 'EntraOrHybrid must contain one of the values 1, 2, or 3.'
@@ -1101,7 +1204,8 @@ try {
         $displayName = $member.AccountName
 
         if ($isGroup) {
-            $groupId = Add-AdminGroup -GroupName $displayName -Sid $member.Sid -Source $member.Source
+            $groupName = if ($member.Source -eq 'E') { Get-EntraPrincipalName -Sid $member.Sid -FallbackName $displayName } else { $displayName }
+            $groupId = Add-AdminGroup -GroupName $groupName -Sid $member.Sid -Source $member.Source
             Add-MainTableRow -ComputerSid $computerSid -ComputerName $env:COMPUTERNAME -EntraOrHybrid $joinState.EntraOrHybrid -Timestamp $timestamp -AdminGroupName $administratorsGroup.Name -GroupId $groupId
 
             $groupResolution = Resolve-DomainGroupMembers -GroupMember $member -JoinState $joinState -RetryCount $MaxRetries -RetryDelay $RetryDelaySeconds

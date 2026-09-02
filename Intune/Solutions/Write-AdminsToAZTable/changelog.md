@@ -9,6 +9,9 @@
 * Documented browser-storage security: README.md - described same-origin script and shared-profile risks, dedicated-origin guidance, and snapshot isolation from saved connections.
 * Improved remediation reliability: Remediation/Remediate-Write-AdminsToAZTable.ps1 - sends Azure Table JSON as explicit UTF-8 so localized account names remain consistent between entity URIs and request bodies.
 * Improved remediation diagnostics: Remediation/Remediate-Write-AdminsToAZTable.ps1 - reports the failing Azure table, entity identity, HTTP status, and Azure response body without exposing the SAS token.
+* Improved Entra administrator collection: Remediation/Remediate-Write-AdminsToAZTable.ps1 - resolves SIDs directly from WinNT member objects and reports contextual details for unresolved entries.
+* Improved Entra group naming: Remediation/Remediate-Write-AdminsToAZTable.ps1 - reads cached IdentityStore display names when available and stores the SID as the group name when translation is unavailable.
+* Updated device-name validation: Remediation/Remediate-Write-AdminsToAZTable.ps1 - accepts up to 63 Unicode code points and rejects malformed surrogate sequences.
 
 ### 31st of August
 
