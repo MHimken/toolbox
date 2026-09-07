@@ -73,6 +73,13 @@
     .computer-group-indicator { width: 1em; font-size: .78rem; text-align: center; }
     .computer-group-meta { margin-left: 8px; font-size: .78rem; font-weight: 400; opacity: .85; }
     .computer-group-count { margin-left: auto; font-size: .78rem; font-weight: 400; opacity: .85; }
+    .access-group td { max-width: none; padding: 0; color: var(--paper); background: var(--jet); border-bottom-color: #424c52; font-weight: 700; }
+    .access-group:hover { box-shadow: none; }
+    .access-group-button { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; padding: 9px 12px 9px 34px; color: inherit; background: transparent; text-align: left; }
+    .access-group-button:hover { background: var(--ink); }
+    .access-group-indicator { width: 1em; font-size: .72rem; text-align: center; }
+    .access-group-meta { margin-left: 8px; font-size: .76rem; font-weight: 400; opacity: .82; }
+    .access-group-count { margin-left: auto; font-size: .76rem; font-weight: 400; opacity: .82; }
     .detail-link { border: 0; padding: 0; color: var(--accent-deep); background: transparent; text-align: left; text-decoration: underline; font-weight: 700; }
     .status { display: inline-block; min-width: 62px; border-radius: 3px; padding: 3px 7px; text-align: center; font-size: .72rem; font-weight: 700; }
     .status.active { color: var(--paper); background: var(--jet); }
@@ -187,7 +194,7 @@
       users: { rows: REPORT.users, columns: [['UserID', 'User ID'], ['SamAccountName', 'SAM account name'], ['UserPrincipalName', 'User principal name'], ['LocalOrEntraOrAD', 'Source'], ['Timestamp', 'Azure timestamp']] },
       groups: { rows: REPORT.groups, columns: [['GroupID', 'Group ID'], ['GroupName', 'Group name'], ['LocalOrEntraOrAD', 'Source'], ['Timestamp', 'Azure timestamp']] }
     };
-    const state = { view: 'summary', query: '', join: '', removed: '', grouped: true, expandedComputers: [], sort: 'ComputerName', direction: 1, page: 1, size: 50, linked: false };
+    const state = { view: 'summary', query: '', join: '', removed: '', grouped: true, expandedComputers: [], expandedGroups: [], sort: 'ComputerName', direction: 1, page: 1, size: 50, linked: false };
     const elements = Object.fromEntries(['generatedAt','visibleCount','totalMain','totalRemoved','totalComputers','totalUsers','totalGroups','connectionPanel','storageAccountName','sasToken','rememberConnection','forgetConnection','refreshButton','refreshWarning','refreshStatus','backButton','search','joinField','joinFilter','removedField','removedFilter','groupField','groupToggle','pageSize','resetButton','exportButton','tableHead','tableBody','emptyState','pageInfo','firstPage','previousPage','nextPage','lastPage'].map(id => [id, document.getElementById(id)]));
     const formatter = new Intl.NumberFormat();
     const connectionStorageKey = 'localAdminAzureConnection.v1';
@@ -342,7 +349,7 @@
         ]);
         REPORT = resolveAzureData(main, users, groups);
         views.summary.rows = REPORT.summary; views.users.rows = REPORT.users; views.groups.rows = REPORT.groups;
-        state.query = state.join = state.removed = ''; state.expandedComputers = []; state.page = 1;
+        state.query = state.join = state.removed = ''; state.expandedComputers = []; state.expandedGroups = []; state.page = 1;
         elements.search.value = elements.joinFilter.value = elements.removedFilter.value = '';
         updateReportSummary(); activateView('summary');
         const persistenceMessage = elements.rememberConnection.checked
@@ -399,6 +406,32 @@
       });
       return groups;
     }
+    function groupAccessRows(rows, computerKey) {
+      const directRows = [];
+      const groups = [];
+      const groupsBySid = new Map();
+      rows.forEach(row => {
+        const groupSid = row.MembershipType === 'Transitive' ? text(row._AssignedThroughGroupSID) : (row._GroupSID ? text(row._GroupSID) : '');
+        if (!groupSid) {
+          directRows.push(row);
+          return;
+        }
+        if (!groupsBySid.has(groupSid)) {
+          const group = {
+            key: `${computerKey}|${groupSid}`,
+            sid: groupSid,
+            name: text(row.AddedThroughGroupName || row.GroupName || groupSid),
+            rows: []
+          };
+          groupsBySid.set(groupSid, group);
+          groups.push(group);
+        }
+        const group = groupsBySid.get(groupSid);
+        if (!group.name || group.name === group.sid) group.name = text(row.AddedThroughGroupName || row.GroupName || group.sid);
+        group.rows.push(row);
+      });
+      return { directRows, groups };
+    }
     function paginationItemCount() {
       const rows = sortedRows(filteredRows());
       return state.view === 'summary' && state.grouped ? groupComputerRows(rows).length : rows.length;
@@ -417,6 +450,7 @@
       elements.removedFilter.value = state.removed;
       elements.groupToggle.checked = Boolean(state.grouped);
       state.expandedComputers = Array.isArray(state.expandedComputers) ? state.expandedComputers : [];
+      state.expandedGroups = Array.isArray(state.expandedGroups) ? state.expandedGroups : [];
       elements.pageSize.value = text(state.size);
       document.querySelectorAll('.tab').forEach(tab => tab.setAttribute('aria-selected', text(tab.dataset.view === state.view)));
       elements.joinField.hidden = state.view !== 'summary';
@@ -469,7 +503,8 @@
       const itemCount = groupedSummary ? computerGroups.length : rows.length;
       const pages = Math.max(1, Math.ceil(itemCount / state.size)); state.page = Math.min(state.page, pages);
       const start = (state.page - 1) * state.size;
-      const pageRows = groupedSummary ? computerGroups.slice(start, start + state.size).flatMap(group => group.rows) : rows.slice(start, start + state.size);
+      const pageComputerGroups = groupedSummary ? computerGroups.slice(start, start + state.size) : [];
+      const pageRows = groupedSummary ? [] : rows.slice(start, start + state.size);
       const computerCounts = new Map();
       if (groupedSummary) computerGroups.forEach(group => computerCounts.set(group.key, group.rows.length));
       elements.visibleCount.textContent = formatter.format(rows.length);
@@ -478,26 +513,40 @@
         const th = document.createElement('th'); const button = document.createElement('button'); button.type = 'button'; button.textContent = `${label}${state.sort === key ? (state.direction === 1 ? '  ▲' : '  ▼') : ''}`; button.addEventListener('click', () => { if (state.sort === key) state.direction *= -1; else { state.sort = key; state.direction = 1; } state.page = 1; render(); updateCurrentHistoryState(); }); th.appendChild(button); elements.tableHead.appendChild(th);
       });
       elements.tableBody.replaceChildren();
-      let previousComputerKey = '';
-      pageRows.forEach(row => {
-        if (state.view === 'summary' && state.grouped) {
-          const computerKey = `${text(row.ComputerName)}|${text(row.SID)}`;
-          if (computerKey !== previousComputerKey) {
-            const groupRow = document.createElement('tr'); groupRow.className = 'computer-group';
-            const groupCell = document.createElement('td'); groupCell.colSpan = views.summary.columns.length;
-            const expanded = state.expandedComputers.includes(computerKey);
-            const groupButton = document.createElement('button'); groupButton.className = 'computer-group-button'; groupButton.type = 'button'; groupButton.setAttribute('aria-expanded', text(expanded));
-            const indicator = document.createElement('span'); indicator.className = 'computer-group-indicator'; indicator.setAttribute('aria-hidden', 'true'); indicator.textContent = expanded ? '▼' : '▶'; groupButton.appendChild(indicator);
-            groupButton.append(document.createTextNode(text(row.ComputerName) || 'Unnamed computer'));
-            const meta = document.createElement('span'); meta.className = 'computer-group-meta'; meta.textContent = `| SID: ${text(row.SID)}`; groupButton.appendChild(meta);
-            const count = document.createElement('span'); count.className = 'computer-group-count'; count.textContent = `${formatter.format(computerCounts.get(computerKey) || 0)} entries`; groupButton.appendChild(count);
-            groupButton.addEventListener('click', () => { state.expandedComputers = expanded ? state.expandedComputers.filter(key => key !== computerKey) : [...state.expandedComputers, computerKey]; render(); updateCurrentHistoryState(); });
-            groupCell.appendChild(groupButton);
-            groupRow.appendChild(groupCell); elements.tableBody.appendChild(groupRow); previousComputerKey = computerKey;
-          }
-          if (!state.expandedComputers.includes(computerKey)) return;
-        }
+      const appendDataRow = row => {
         const tr = document.createElement('tr'); views[state.view].columns.forEach(([key]) => tr.appendChild(renderCell(row, key))); elements.tableBody.appendChild(tr);
+      };
+      pageRows.forEach(appendDataRow);
+      pageComputerGroups.forEach(computerGroup => {
+        const row = computerGroup.rows[0];
+        const computerKey = computerGroup.key;
+        const computerRow = document.createElement('tr'); computerRow.className = 'computer-group';
+        const computerCell = document.createElement('td'); computerCell.colSpan = views.summary.columns.length;
+        const computerExpanded = state.expandedComputers.includes(computerKey);
+        const computerButton = document.createElement('button'); computerButton.className = 'computer-group-button'; computerButton.type = 'button'; computerButton.setAttribute('aria-expanded', text(computerExpanded));
+        const computerIndicator = document.createElement('span'); computerIndicator.className = 'computer-group-indicator'; computerIndicator.setAttribute('aria-hidden', 'true'); computerIndicator.textContent = computerExpanded ? '▼' : '▶'; computerButton.appendChild(computerIndicator);
+        computerButton.append(document.createTextNode(text(row.ComputerName) || 'Unnamed computer'));
+        const computerMeta = document.createElement('span'); computerMeta.className = 'computer-group-meta'; computerMeta.textContent = `| SID: ${text(row.SID)}`; computerButton.appendChild(computerMeta);
+        const computerCount = document.createElement('span'); computerCount.className = 'computer-group-count'; computerCount.textContent = `${formatter.format(computerCounts.get(computerKey) || 0)} entries`; computerButton.appendChild(computerCount);
+        computerButton.addEventListener('click', () => { state.expandedComputers = computerExpanded ? state.expandedComputers.filter(key => key !== computerKey) : [...state.expandedComputers, computerKey]; render(); updateCurrentHistoryState(); });
+        computerCell.appendChild(computerButton); computerRow.appendChild(computerCell); elements.tableBody.appendChild(computerRow);
+        if (!computerExpanded) return;
+
+        const accessRows = groupAccessRows(computerGroup.rows, computerKey);
+        accessRows.directRows.forEach(appendDataRow);
+        accessRows.groups.forEach(group => {
+          const groupRow = document.createElement('tr'); groupRow.className = 'access-group';
+          const groupCell = document.createElement('td'); groupCell.colSpan = views.summary.columns.length;
+          const groupExpanded = state.expandedGroups.includes(group.key);
+          const groupButton = document.createElement('button'); groupButton.className = 'access-group-button'; groupButton.type = 'button'; groupButton.setAttribute('aria-expanded', text(groupExpanded));
+          const indicator = document.createElement('span'); indicator.className = 'access-group-indicator'; indicator.setAttribute('aria-hidden', 'true'); indicator.textContent = groupExpanded ? '▼' : '▶'; groupButton.appendChild(indicator);
+          groupButton.append(document.createTextNode(group.name || 'Unnamed group'));
+          const meta = document.createElement('span'); meta.className = 'access-group-meta'; meta.textContent = `| SID: ${group.sid}`; groupButton.appendChild(meta);
+          const count = document.createElement('span'); count.className = 'access-group-count'; count.textContent = `${formatter.format(group.rows.length)} entries`; groupButton.appendChild(count);
+          groupButton.addEventListener('click', () => { state.expandedGroups = groupExpanded ? state.expandedGroups.filter(key => key !== group.key) : [...state.expandedGroups, group.key]; render(); updateCurrentHistoryState(); });
+          groupCell.appendChild(groupButton); groupRow.appendChild(groupCell); elements.tableBody.appendChild(groupRow);
+          if (groupExpanded) group.rows.forEach(appendDataRow);
+        });
       });
       elements.emptyState.hidden = rows.length !== 0;
       const itemLabel = groupedSummary ? 'computers' : 'rows';
@@ -518,9 +567,9 @@
     elements.search.addEventListener('input', event => { state.query = event.target.value; state.page = 1; if (state.view === 'summary') { state.linked = false; elements.backButton.classList.remove('visible'); } render(); updateCurrentHistoryState(); });
     elements.joinFilter.addEventListener('change', event => { state.join = event.target.value; state.page = 1; render(); updateCurrentHistoryState(); });
     elements.removedFilter.addEventListener('change', event => { state.removed = event.target.value; state.page = 1; render(); updateCurrentHistoryState(); });
-    elements.groupToggle.addEventListener('change', event => { state.grouped = event.target.checked; state.expandedComputers = []; state.sort = 'ComputerName'; state.direction = 1; state.page = 1; render(); updateCurrentHistoryState(); });
+    elements.groupToggle.addEventListener('change', event => { state.grouped = event.target.checked; state.expandedComputers = []; state.expandedGroups = []; state.sort = 'ComputerName'; state.direction = 1; state.page = 1; render(); updateCurrentHistoryState(); });
     elements.pageSize.addEventListener('change', event => { state.size = Number(event.target.value); state.page = 1; render(); updateCurrentHistoryState(); });
-    elements.resetButton.addEventListener('click', () => { state.query = state.join = state.removed = ''; state.expandedComputers = []; state.page = 1; elements.search.value = elements.joinFilter.value = elements.removedFilter.value = ''; render(); updateCurrentHistoryState(); });
+    elements.resetButton.addEventListener('click', () => { state.query = state.join = state.removed = ''; state.expandedComputers = []; state.expandedGroups = []; state.page = 1; elements.search.value = elements.joinFilter.value = elements.removedFilter.value = ''; render(); updateCurrentHistoryState(); });
     elements.exportButton.addEventListener('click', exportCsv); elements.backButton.addEventListener('click', () => history.back());
     elements.forgetConnection.addEventListener('click', () => {
       const removed = removeSavedConnection();

@@ -8,6 +8,7 @@
 * Normalized local administrator rows: LocalAdminCollection now stores `PrincipalID`, `PrincipalType`, `MembershipType`, and optional `AssignedThroughGroupID` instead of mutually exclusive `UserID` and `GroupID` fields.
 * Preserved access paths: direct assignments and one-level Active Directory group-derived assignments now remain independently visible, removable, and reactivatable with stable numeric RowKeys.
 * Expanded resolved reports: live HTML, generated HTML, CSV, and Excel now show Membership type and Added through group with SID-safe detail links.
+* Improved live HTML grouping: directly assigned groups now appear as nested, initially collapsed sections within each computer, while direct users remain visible and duplicate direct/transitive user paths stay separate.
 * Expanded stress coverage: deterministic data now includes direct users and groups, nested group observations, direct-plus-transitive users, and users assigned through multiple groups while keeping Entra groups direct-only.
 
 ### 6th of September
