@@ -16,9 +16,19 @@
     Number of deterministic synthetic computers to create.
 .PARAMETER EntriesPerComputer
     Number of local administrator entries to create for each synthetic computer.
+.PARAMETER EntryCount
+    Optional exact main-table entry count. Supported stress levels are 5000, 10000, 15000, and
+    20000. When supplied, this overrides ComputerCount and uses EntriesPerComputer to distribute
+    entries across the required number of synthetic computers.
 .PARAMETER Execute
     Writes the generated entities to Azure Table Storage. Without this switch, the script only
     reports the number of entities that would be generated.
+.PARAMETER IncludeReconciliationScenarios
+    Adds Entra and domain SID fallbacks, a newer AD rename candidate, and a legacy duplicate row.
+.PARAMETER EntraGroupObjectIds
+    Optional Microsoft Entra group object IDs to include as unresolved local group names. Duplicate
+    IDs are ignored. When supplied, other synthetic principals use local or domain identities so
+    runbook validation is limited to the specified Entra groups.
 .PARAMETER RemoveStressData
     Removes entities identified by the deterministic stress-test computer, user, and group names.
 .PARAMETER ClearTables
@@ -44,7 +54,11 @@ param(
     [int]$ComputerCount = 834,
     [ValidateRange(1, 1000)]
     [int]$EntriesPerComputer = 12,
+    [ValidateSet(5000, 10000, 15000, 20000)]
+    [int]$EntryCount,
     [switch]$Execute,
+    [switch]$IncludeReconciliationScenarios,
+    [guid[]]$EntraGroupObjectIds = @(),
     [switch]$RemoveStressData,
     [switch]$ClearTables,
     [switch]$Force,
@@ -161,12 +175,28 @@ function Get-SyntheticSid {
     return 'S-1-5-21-{0}-950000002-960000003-{1}' -f $authority, (1000 + $Index)
 }
 
+function ConvertTo-EntraSid {
+    param(
+        [Parameter(Mandatory = $true)]
+        [guid]$ObjectId
+    )
+
+    $bytes = $ObjectId.ToByteArray()
+    return 'S-1-12-1-{0}-{1}-{2}-{3}' -f
+        [BitConverter]::ToUInt32($bytes, 0),
+        [BitConverter]::ToUInt32($bytes, 4),
+        [BitConverter]::ToUInt32($bytes, 8),
+        [BitConverter]::ToUInt32($bytes, 12)
+}
+
 function New-TestEntitySets {
     param(
         [Parameter(Mandatory = $true)]
         [int]$NumberOfComputers,
         [Parameter(Mandatory = $true)]
-        [int]$NumberOfEntriesPerComputer
+        [int]$NumberOfEntriesPerComputer,
+        [int]$TargetEntryCount = 0,
+        [guid[]]$EntraObjectIds = @()
     )
 
     $generationTime = [datetime]::UtcNow
@@ -182,17 +212,40 @@ function New-TestEntitySets {
     $userEntities = [System.Collections.Generic.List[object]]::new()
     $groupEntities = [System.Collections.Generic.List[object]]::new()
     $principalIndex = 0
+    $groupIndex = 0
+    $entraGroupIndex = 0
+    $syntheticSources = if ($EntraObjectIds.Count -gt 0) { @('L', 'A') } else { @('L', 'E', 'A') }
+    $resolvedNumberOfComputers = if ($TargetEntryCount -gt 0) {
+        [int][math]::Ceiling($TargetEntryCount / [double]$NumberOfEntriesPerComputer)
+    } else {
+        $NumberOfComputers
+    }
 
-    for ($computerIndex = 1; $computerIndex -le $NumberOfComputers; $computerIndex++) {
+    for ($computerIndex = 1; $computerIndex -le $resolvedNumberOfComputers; $computerIndex++) {
         $computerSid = Get-SyntheticSid -Type Computer -Index $computerIndex
         $computerName = 'STRESS{0:D4}' -f $computerIndex
         $joinCode = [string](1 + (($computerIndex - 1) % 3))
         $administratorGroupName = $administratorGroupNames[($computerIndex - 1) % $administratorGroupNames.Count]
+        $entriesForComputer = if ($TargetEntryCount -gt 0) {
+            [math]::Min($NumberOfEntriesPerComputer, $TargetEntryCount - $principalIndex)
+        } else {
+            $NumberOfEntriesPerComputer
+        }
 
-        for ($entryNumber = 1; $entryNumber -le $NumberOfEntriesPerComputer; $entryNumber++) {
+        for ($entryNumber = 1; $entryNumber -le $entriesForComputer; $entryNumber++) {
             $principalIndex++
-            $source = @('L', 'E', 'A')[($principalIndex - 1) % 3]
-            $isGroup = ($entryNumber % 4) -eq 0
+            $scenario = (($entryNumber - 1) % 8) + 1
+            $scenarioCycle = [int][math]::Floor(($entryNumber - 1) / 8)
+            $scenarioBaseIndex = [int](($computerIndex * 100000) + ($scenarioCycle * 10))
+            $source = $syntheticSources[($principalIndex - 1) % $syntheticSources.Count]
+            $isGroup = $scenario -in @(2, 4, 5, 7)
+            $membershipType = if ($scenario -in @(3, 4, 6)) { 'Transitive' } else { 'Direct' }
+            $parentGroupIndex = if ($scenario -in @(3, 4)) { $scenarioBaseIndex + 2 } else { $scenarioBaseIndex + 5 }
+            $assignedThroughGroupId = if ($membershipType -eq 'Transitive') {
+                Get-SyntheticSid -Type Group -Index $parentGroupIndex -Source A
+            } else {
+                $null
+            }
             $reportTimestamp = $generationTime.AddMinutes(-(($principalIndex * 17) % 360)).AddSeconds(-(($computerIndex * 13 + $entryNumber) % 60))
 
             $mainEntity = [ordered]@{
@@ -203,13 +256,46 @@ function New-TestEntitySets {
                 'LastReportTimeStamp@odata.type' = 'Edm.DateTime'
                 LastReportTimeStamp              = $reportTimestamp.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
                 LocalAdminGroupName              = $administratorGroupName
+                MembershipType                   = $membershipType
                 Removed                          = if (($principalIndex * 37) % 19 -eq 0) { 1 } else { 0 }
+            }
+            if ($membershipType -eq 'Transitive') {
+                $mainEntity.AssignedThroughGroupID = $assignedThroughGroupId
             }
 
             if ($isGroup) {
-                $groupSid = Get-SyntheticSid -Type Group -Index $principalIndex -Source $source
-                $groupName = 'StressGroup{0:D6}' -f $principalIndex
-                $mainEntity.GroupID = $groupSid
+                $groupIndex++
+                if ($scenario -eq 7 -and $entraGroupIndex -lt $EntraObjectIds.Count) {
+                    $source = 'E'
+                    $groupSid = ConvertTo-EntraSid -ObjectId $EntraObjectIds[$entraGroupIndex]
+                    $groupName = $groupSid
+                    $entraGroupIndex++
+                } else {
+                    $source = if ($scenario -in @(2, 4, 5)) { 'A' } else { $source }
+                    $groupPrincipalIndex = switch ($scenario) {
+                        2 { $scenarioBaseIndex + 2 }
+                        4 { $scenarioBaseIndex + 4 }
+                        5 { $scenarioBaseIndex + 5 }
+                        default { $scenarioBaseIndex + 7 }
+                    }
+                    $groupSid = Get-SyntheticSid -Type Group -Index $groupPrincipalIndex -Source $source
+                    $groupName = 'StressGroup{0:D6}' -f $groupPrincipalIndex
+                }
+                if ($IncludeReconciliationScenarios -and $principalIndex -eq 4) {
+                    $groupEntities.Add([pscustomobject][ordered]@{
+                        TableName    = 'AdminGroups'
+                        PartitionKey = $groupSid
+                        RowKey       = 'LegacyStressGroup000004'
+                        Entity       = [pscustomobject][ordered]@{
+                            PartitionKey     = $groupSid
+                            RowKey           = 'LegacyStressGroup000004'
+                            LocalOrEntraOrAD = $source
+                            StressData       = 1
+                        }
+                    })
+                }
+                $mainEntity.PrincipalID = $groupSid
+                $mainEntity.PrincipalType = 'Group'
                 $groupEntities.Add([pscustomobject][ordered]@{
                     TableName       = 'AdminGroups'
                     PartitionKey    = $groupSid
@@ -218,12 +304,28 @@ function New-TestEntitySets {
                         PartitionKey     = $groupSid
                         RowKey           = $groupName
                         LocalOrEntraOrAD = $source
+                        'ObservedAt@odata.type' = 'Edm.DateTime'
+                        ObservedAt       = $reportTimestamp.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+                        ResolutionState  = if ($source -eq 'E') { 'EntraPending' } else { 'Resolved' }
+                        StressData       = 1
                     }
                 })
             } else {
-                $userSid = Get-SyntheticSid -Type User -Index $principalIndex -Source $source
-                $samAccountName = 'StressUsr{0:D6}' -f $principalIndex
-                $mainEntity.UserID = $userSid
+                if ($scenario -in @(1, 3, 6)) {
+                    $source = 'A'
+                    $userPrincipalIndex = $scenarioBaseIndex + 1
+                } else {
+                    $userPrincipalIndex = $scenarioBaseIndex + 8
+                }
+                $userSid = Get-SyntheticSid -Type User -Index $userPrincipalIndex -Source $source
+                $samAccountName = 'StressUsr{0:D6}' -f $userPrincipalIndex
+                if ($IncludeReconciliationScenarios -and $source -eq 'E' -and $principalIndex -eq 2) {
+                    $samAccountName = $userSid
+                } elseif ($IncludeReconciliationScenarios -and $source -eq 'A' -and $principalIndex -eq 3) {
+                    $samAccountName = $userSid
+                }
+                $mainEntity.PrincipalID = $userSid
+                $mainEntity.PrincipalType = 'User'
                 if ($source -eq 'L') {
                     $mainEntity['LocalAccountLastPasswordChange@odata.type'] = 'Edm.DateTime'
                     $mainEntity.LocalAccountLastPasswordChange = [datetime]::UtcNow.AddDays(-($principalIndex % 365)).ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
@@ -237,8 +339,19 @@ function New-TestEntitySets {
                         RowKey            = $samAccountName
                         UserPrincipalName = if ($source -eq 'L') { 'N/A' } else { '{0}@stress.example' -f $samAccountName.ToLowerInvariant() }
                         LocalOrEntraOrAD  = $source
+                        'ObservedAt@odata.type' = 'Edm.DateTime'
+                        ObservedAt        = $reportTimestamp.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+                        ResolutionState   = if ($source -eq 'E') { 'EntraPending' } elseif ($samAccountName -eq $userSid) { 'DomainUnavailable' } else { 'Resolved' }
+                        StressData        = 1
                     }
                 })
+                if ($IncludeReconciliationScenarios -and $source -eq 'A' -and $principalIndex -eq 6) {
+                    $candidateEntity = $userEntities[$userEntities.Count - 1].Entity
+                    $candidateEntity | Add-Member -NotePropertyName 'CandidateObservedAt@odata.type' -NotePropertyValue 'Edm.DateTime'
+                    $candidateEntity | Add-Member -NotePropertyName CandidateObservedAt -NotePropertyValue $generationTime.AddMinutes(5).ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+                    $candidateEntity | Add-Member -NotePropertyName CandidateSamAccountName -NotePropertyValue 'RenamedStressUsr000006'
+                    $candidateEntity | Add-Member -NotePropertyName CandidateUserPrincipalName -NotePropertyValue 'renamedstressusr000006@stress.example'
+                }
             }
 
             $mainEntities.Add([pscustomobject][ordered]@{
@@ -250,10 +363,15 @@ function New-TestEntitySets {
         }
     }
 
+    if ($entraGroupIndex -lt $EntraObjectIds.Count) {
+        throw "The selected computer and entry counts provide $entraGroupIndex Entra group slots, but $($EntraObjectIds.Count) Entra group IDs were supplied."
+    }
+
     return [pscustomobject]@{
         MainEntities  = $mainEntities
         UserEntities  = $userEntities
         GroupEntities = $groupEntities
+        ComputerCount = $resolvedNumberOfComputers
     }
 }
 
@@ -432,8 +550,8 @@ try {
 
         if ($RemoveStressData) {
             $mainEntities = @($mainEntities | Where-Object { $_.Entity.Computername -like 'STRESS*' })
-            $userEntities = @($userEntities | Where-Object { $_.RowKey -like 'StressUsr*' })
-            $groupEntities = @($groupEntities | Where-Object { $_.RowKey -like 'StressGroup*' })
+            $userEntities = @($userEntities | Where-Object { $_.Entity.StressData -eq 1 -or $_.RowKey -like 'StressUsr*' })
+            $groupEntities = @($groupEntities | Where-Object { $_.Entity.StressData -eq 1 -or $_.RowKey -like '*StressGroup*' })
             $operationName = 'Remove stress-test data'
         } else {
             $operationName = 'Clear all solution table data'
@@ -464,18 +582,27 @@ try {
 
     Write-Log -Message 'Generating deterministic stress-test entities.' -Component 'Initialize' -Type 1
 
-    $entitySets = New-TestEntitySets -NumberOfComputers $ComputerCount -NumberOfEntriesPerComputer $EntriesPerComputer
+    $uniqueEntraGroupObjectIds = [System.Collections.Generic.List[guid]]::new()
+    $seenEntraGroupObjectIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($objectId in $EntraGroupObjectIds) {
+        if ($seenEntraGroupObjectIds.Add($objectId.ToString())) {
+            $uniqueEntraGroupObjectIds.Add($objectId)
+        }
+    }
+
+    $entitySets = New-TestEntitySets `
+        -NumberOfComputers $ComputerCount `
+        -NumberOfEntriesPerComputer $EntriesPerComputer `
+        -TargetEntryCount $(if ($PSBoundParameters.ContainsKey('EntryCount')) { $EntryCount } else { 0 }) `
+        -EntraObjectIds $uniqueEntraGroupObjectIds.ToArray()
     $mainCount = $entitySets.MainEntities.Count
     $userCount = $entitySets.UserEntities.Count
     $groupCount = $entitySets.GroupEntities.Count
     $totalCount = $mainCount + $userCount + $groupCount
-
-    if ($mainCount -lt 10000) {
-        throw "The selected values generate $mainCount main rows. Increase ComputerCount or EntriesPerComputer to generate at least 10000 main rows."
-    }
+    $generatedComputerCount = $entitySets.ComputerCount
 
     if (-not $Execute) {
-        $message = "DRY RUN: Would upsert $mainCount main rows, $userCount user rows, and $groupCount group rows across $ComputerCount computers. Use -Execute to write the data."
+        $message = "DRY RUN: Would upsert $mainCount main rows, $userCount user rows, and $groupCount group rows across $generatedComputerCount computers, including $($uniqueEntraGroupObjectIds.Count) specified Entra groups. Use -Execute to write the data."
         Write-Log -Message $message -Component 'Summary' -Type 1
         Write-Output $message
         exit 0
@@ -488,7 +615,7 @@ try {
     $uploadedGroups = Invoke-TableEntityRequests -Entities $entitySets.GroupEntities -AccountName $StorageAccountName -Token $resolvedSasToken -MaximumConcurrency $ThrottleLimit
     $uploadedMain = Invoke-TableEntityRequests -Entities $entitySets.MainEntities -AccountName $StorageAccountName -Token $resolvedSasToken -MaximumConcurrency $ThrottleLimit
 
-    $message = "SUCCESS: Upserted $uploadedMain main rows, $uploadedUsers user rows, and $uploadedGroups group rows across $ComputerCount synthetic computers."
+    $message = "SUCCESS: Upserted $uploadedMain main rows, $uploadedUsers user rows, and $uploadedGroups group rows across $generatedComputerCount synthetic computers, including $($uniqueEntraGroupObjectIds.Count) specified Entra groups."
     Write-Log -Message $message -Component 'Summary' -Type 1
     Write-Output $message
     exit 0

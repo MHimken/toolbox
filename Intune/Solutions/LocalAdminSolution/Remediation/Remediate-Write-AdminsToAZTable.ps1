@@ -8,12 +8,12 @@
     three Azure Tables using SID-backed keys. Previously reported members that are no longer found
     are retained in the main table with Removed set to 1.
 .NOTES
-    Version: 2.4
+    Version: 2.5
     Author: Martin Himken
     Original script name: Remediate-Write-AdminsToAZTable.ps1
     Initial creation date: 2026-08-30
     Last change: 2026-09-02
-    Changes: Increased computer names to 63 Unicode code points and validates surrogate pairs.
+    Changes: Suppresses unchanged lookup writes and submits newer name candidates for reconciliation.
 .LINK
     ..\changelog.md
 #>
@@ -35,6 +35,10 @@ $script:UserEntities = New-Object System.Collections.ArrayList
 $script:GroupEntities = New-Object System.Collections.ArrayList
 $script:MainEntities = New-Object System.Collections.ArrayList
 $script:MainRowCounter = 1
+$script:LookupRowsCreated = 0
+$script:LookupCandidatesUpdated = 0
+$script:LookupRowsSkipped = 0
+$script:ObservationTimestamp = [datetime]::UtcNow
 
 function Get-JoinState {
     $joinInfoPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\CloudDomainJoin\JoinInfo'
@@ -717,10 +721,13 @@ function Add-AdminUser {
     }
 
     $entity = [ordered]@{
-        PartitionKey        = $userId
-        RowKey              = $userName
-        UserPrincipalName   = $upn
-        LocalOrEntraOrAD    = $Source
+        PartitionKey                   = $userId
+        RowKey                         = $userName
+        UserPrincipalName              = $upn
+        LocalOrEntraOrAD               = $Source
+        'ObservedAt@odata.type'         = 'Edm.DateTime'
+        ObservedAt                     = ConvertTo-AzureDateTime -Value $script:ObservationTimestamp
+        ResolutionState                = if ($Source -eq 'E') { 'EntraPending' } elseif ($userName -eq 'N-A' -or $userName -match '^S-\d-(?:\d+-)+\d+$') { 'DomainUnavailable' } else { 'Resolved' }
     }
 
     $record = [pscustomobject]$entity
@@ -755,9 +762,12 @@ function Add-AdminGroup {
     }
 
     $entity = [ordered]@{
-        PartitionKey     = $groupId
-        RowKey           = $resolvedGroupName
-        LocalOrEntraOrAD = $Source
+        PartitionKey                   = $groupId
+        RowKey                         = $resolvedGroupName
+        LocalOrEntraOrAD               = $Source
+        'ObservedAt@odata.type'         = 'Edm.DateTime'
+        ObservedAt                     = ConvertTo-AzureDateTime -Value $script:ObservationTimestamp
+        ResolutionState                = if ($Source -eq 'E') { 'EntraPending' } elseif ($resolvedGroupName -match '^S-\d-(?:\d+-)+\d+$') { 'DomainUnavailable' } else { 'Resolved' }
     }
 
     $record = [pscustomobject]$entity
@@ -779,10 +789,16 @@ function Add-MainTableRow {
         [datetime]$Timestamp,
         [Parameter(Mandatory = $true)]
         [string]$AdminGroupName,
+        [Parameter(Mandatory = $true)]
+        [string]$PrincipalId,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('User', 'Group')]
+        [string]$PrincipalType,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Direct', 'Transitive')]
+        [string]$MembershipType,
         [Parameter(Mandatory = $false)]
-        [string]$GroupId,
-        [Parameter(Mandatory = $false)]
-        [string]$UserId,
+        [string]$AssignedThroughGroupId,
         [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$LocalAccountCredentialChangedAt,
@@ -801,8 +817,17 @@ function Add-MainTableRow {
         throw 'EntraOrHybrid must be 1, 2, or 3.'
     }
 
-    if ([string]::IsNullOrWhiteSpace($GroupId) -eq [string]::IsNullOrWhiteSpace($UserId)) {
-        throw 'Exactly one of GroupID or UserID must be set.'
+    $resolvedPrincipalId = Get-RequiredTableValue -Value $PrincipalId -PropertyName 'PrincipalID' -MaximumLength 256
+    if ($resolvedPrincipalId -notmatch '^S-\d-(?:\d+-)+\d+$') {
+        throw 'PrincipalID must be a valid SID.'
+    }
+
+    if ($MembershipType -eq 'Direct' -and -not [string]::IsNullOrWhiteSpace($AssignedThroughGroupId)) {
+        throw 'AssignedThroughGroupID must not be set for direct membership.'
+    }
+
+    if ($MembershipType -eq 'Transitive' -and [string]::IsNullOrWhiteSpace($AssignedThroughGroupId)) {
+        throw 'AssignedThroughGroupID must be set for transitive membership.'
     }
 
     if ($EntryNumber -le 0) {
@@ -818,13 +843,19 @@ function Add-MainTableRow {
         'LastReportTimeStamp@odata.type'    = 'Edm.DateTime'
         LastReportTimeStamp                 = ConvertTo-AzureDateTime -Value $Timestamp
         LocalAdminGroupName                 = $resolvedAdminGroupName
+        PrincipalID                        = $resolvedPrincipalId
+        PrincipalType                      = $PrincipalType
+        MembershipType                     = $MembershipType
         Removed                             = $Removed
     }
 
-    if (-not [string]::IsNullOrWhiteSpace($GroupId)) {
-        $entity.GroupID = Get-RequiredTableValue -Value $GroupId -PropertyName 'GroupID' -MaximumLength 256
-    } else {
-        $entity.UserID = Get-RequiredTableValue -Value $UserId -PropertyName 'UserID' -MaximumLength 256
+    if ($MembershipType -eq 'Transitive') {
+        $resolvedAssignedThroughGroupId = Get-RequiredTableValue -Value $AssignedThroughGroupId -PropertyName 'AssignedThroughGroupID' -MaximumLength 256
+        if ($resolvedAssignedThroughGroupId -notmatch '^S-\d-(?:\d+-)+\d+$') {
+            throw 'AssignedThroughGroupID must be a valid SID.'
+        }
+
+        $entity.AssignedThroughGroupID = $resolvedAssignedThroughGroupId
     }
 
     if ($LocalAccountCredentialChangedAt -is [datetime]) {
@@ -964,18 +995,228 @@ function Get-TablePartitionEntities {
     return @($entities)
 }
 
+function ConvertTo-LookupDateTime {
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Value
+    )
+
+    $parsed = [datetime]::MinValue
+    if ($null -ne $Value -and [datetime]::TryParse(
+            [string]$Value,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal,
+            [ref]$parsed)) {
+        return $parsed.ToUniversalTime()
+    }
+
+    return [datetime]::MinValue
+}
+
+function Get-LookupObservationTime {
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Entity,
+        [Parameter(Mandatory = $false)]
+        [switch]$Candidate
+    )
+
+    if ($Candidate) {
+        return ConvertTo-LookupDateTime -Value $Entity.CandidateObservedAt
+    }
+
+    $observedAt = ConvertTo-LookupDateTime -Value $Entity.ObservedAt
+    if ($observedAt -ne [datetime]::MinValue) {
+        return $observedAt
+    }
+
+    return ConvertTo-LookupDateTime -Value $Entity.Timestamp
+}
+
+function Select-CanonicalLookupEntity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Entities
+    )
+
+    if ($Entities.Count -eq 0) {
+        return $null
+    }
+
+    return @($Entities | Sort-Object -Property @(
+        @{ Expression = { if ([string]$_.ResolutionState -eq 'Resolved') { 1 } else { 0 } }; Descending = $true },
+        @{ Expression = { Get-LookupObservationTime -Entity $_ }; Descending = $true },
+        @{ Expression = { [string]$_.RowKey }; Descending = $true }
+    ))[0]
+}
+
+function Test-LookupValuesEqual {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('User', 'Group')]
+        [string]$LookupType,
+        [Parameter(Mandatory = $true)]
+        [psobject]$Left,
+        [Parameter(Mandatory = $true)]
+        [psobject]$Right,
+        [Parameter(Mandatory = $false)]
+        [switch]$RightIsCandidate
+    )
+
+    if ($LookupType -eq 'Group') {
+        $rightName = if ($RightIsCandidate) { [string]$Right.CandidateGroupName } else { [string]$Right.RowKey }
+        return [string]::Equals([string]$Left.RowKey, $rightName, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+
+    $rightName = if ($RightIsCandidate) { [string]$Right.CandidateSamAccountName } else { [string]$Right.RowKey }
+    $rightUpn = if ($RightIsCandidate) { [string]$Right.CandidateUserPrincipalName } else { [string]$Right.UserPrincipalName }
+    return [string]::Equals([string]$Left.RowKey, $rightName, [System.StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([string]$Left.UserPrincipalName, $rightUpn, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-ExactTableEntity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TableName,
+        [Parameter(Mandatory = $true)]
+        [string]$PartitionKey,
+        [Parameter(Mandatory = $true)]
+        [string]$RowKey,
+        [Parameter(Mandatory = $true)]
+        [string]$Token
+    )
+
+    $uri = Get-EntityUri -TableName $TableName -PartitionKey $PartitionKey -RowKey $RowKey -Token $Token
+    $response = Invoke-WebRequest -Uri $uri -Method Get -Headers (Get-StorageHeaders) -UseBasicParsing -ErrorAction Stop
+    [pscustomobject]@{
+        Entity = $response.Content | ConvertFrom-Json
+        ETag   = [string]$response.Headers['ETag']
+    }
+}
+
+function Set-LookupCandidate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TableName,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('User', 'Group')]
+        [string]$LookupType,
+        [Parameter(Mandatory = $true)]
+        [psobject]$ObservedEntity,
+        [Parameter(Mandatory = $true)]
+        [psobject]$CanonicalEntity,
+        [Parameter(Mandatory = $true)]
+        [string]$Token
+    )
+
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            $current = Get-ExactTableEntity -TableName $TableName -PartitionKey ([string]$CanonicalEntity.PartitionKey) -RowKey ([string]$CanonicalEntity.RowKey) -Token $Token
+        } catch {
+            $statusCode = if ($_.Exception.Response) { $_.Exception.Response.StatusCode.value__ } else { $null }
+            if ($attempt -eq 2 -and $statusCode -eq 404) {
+                $script:LookupRowsSkipped++
+                return
+            }
+            throw
+        }
+        if (Test-LookupValuesEqual -LookupType $LookupType -Left $ObservedEntity -Right $current.Entity) {
+            $script:LookupRowsSkipped++
+            return
+        }
+
+        $candidateTime = Get-LookupObservationTime -Entity $current.Entity -Candidate
+        if ((Test-LookupValuesEqual -LookupType $LookupType -Left $ObservedEntity -Right $current.Entity -RightIsCandidate) -or
+            $script:ObservationTimestamp -le (Get-LookupObservationTime -Entity $current.Entity) -or
+            $script:ObservationTimestamp -le $candidateTime) {
+            $script:LookupRowsSkipped++
+            return
+        }
+
+        $candidate = [ordered]@{
+            PartitionKey                    = [string]$current.Entity.PartitionKey
+            RowKey                          = [string]$current.Entity.RowKey
+            'CandidateObservedAt@odata.type' = 'Edm.DateTime'
+            CandidateObservedAt             = ConvertTo-AzureDateTime -Value $script:ObservationTimestamp
+        }
+        if ($LookupType -eq 'Group') {
+            $candidate.CandidateGroupName = [string]$ObservedEntity.RowKey
+        } else {
+            $candidate.CandidateSamAccountName = [string]$ObservedEntity.RowKey
+            $candidate.CandidateUserPrincipalName = [string]$ObservedEntity.UserPrincipalName
+        }
+
+        $headers = Get-StorageHeaders
+        $headers['If-Match'] = if ([string]::IsNullOrWhiteSpace($current.ETag)) { '*' } else { $current.ETag }
+        $uri = Get-EntityUri -TableName $TableName -PartitionKey $candidate.PartitionKey -RowKey $candidate.RowKey -Token $Token
+        $body = [System.Text.Encoding]::UTF8.GetBytes(($candidate | ConvertTo-Json -Depth 4 -Compress))
+        try {
+            Invoke-RestMethod -Uri $uri -Method Merge -Headers $headers -Body $body -ErrorAction Stop | Out-Null
+            $script:LookupCandidatesUpdated++
+            return
+        } catch {
+            $statusCode = if ($_.Exception.Response) { $_.Exception.Response.StatusCode.value__ } else { $null }
+            if ($statusCode -ne 412 -or $attempt -eq 2) {
+                throw
+            }
+        }
+    }
+}
+
+function Write-LookupEntitySet {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TableName,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('User', 'Group')]
+        [string]$LookupType,
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IEnumerable]$Entities,
+        [Parameter(Mandatory = $true)]
+        [string]$Token
+    )
+
+    foreach ($entity in $Entities) {
+        $existing = @(Get-TablePartitionEntities -TableName $TableName -PartitionKey ([string]$entity.PartitionKey) -Token $Token)
+        if ($existing.Count -eq 0) {
+            Set-TableEntity -TableName $TableName -Entity $entity -Token $Token
+            $script:LookupRowsCreated++
+            continue
+        }
+
+        $canonical = Select-CanonicalLookupEntity -Entities $existing
+        if ([string]$entity.LocalOrEntraOrAD -eq 'E' -or
+            [string]$entity.ResolutionState -eq 'DomainUnavailable' -or
+            (Test-LookupValuesEqual -LookupType $LookupType -Left $entity -Right $canonical)) {
+            $script:LookupRowsSkipped++
+            continue
+        }
+
+        Set-LookupCandidate -TableName $TableName -LookupType $LookupType -ObservedEntity $entity -CanonicalEntity $canonical -Token $Token
+    }
+}
+
 function Get-MainEntityIdentity {
     param(
         [Parameter(Mandatory = $true)]
         [psobject]$Entity
     )
 
-    if (-not [string]::IsNullOrWhiteSpace([string]$Entity.GroupID)) {
-        return 'G|{0}' -f [string]$Entity.GroupID
+    $principalId = [string]$Entity.PrincipalID
+    $principalType = [string]$Entity.PrincipalType
+    $membershipType = [string]$Entity.MembershipType
+    if ([string]::IsNullOrWhiteSpace($principalId) -or $principalType -notin @('User', 'Group')) {
+        return $null
     }
 
-    if (-not [string]::IsNullOrWhiteSpace([string]$Entity.UserID)) {
-        return 'U|{0}' -f [string]$Entity.UserID
+    if ($membershipType -eq 'Direct') {
+        return '{0}|{1}|Direct' -f $principalType, $principalId
+    }
+
+    $assignedThroughGroupId = [string]$Entity.AssignedThroughGroupID
+    if ($membershipType -eq 'Transitive' -and -not [string]::IsNullOrWhiteSpace($assignedThroughGroupId)) {
+        return '{0}|{1}|{2}' -f $principalType, $principalId, $assignedThroughGroupId
     }
 
     return $null
@@ -1040,10 +1281,11 @@ function Merge-MainEntitySnapshot {
             Removed                          = 1
         }
 
-        if ($identity.StartsWith('G|')) {
-            $removedEntity.GroupID = [string]$existingEntity.GroupID
-        } else {
-            $removedEntity.UserID = [string]$existingEntity.UserID
+        $removedEntity.PrincipalID = [string]$existingEntity.PrincipalID
+        $removedEntity.PrincipalType = [string]$existingEntity.PrincipalType
+        $removedEntity.MembershipType = [string]$existingEntity.MembershipType
+        if ([string]$existingEntity.MembershipType -eq 'Transitive') {
+            $removedEntity.AssignedThroughGroupID = [string]$existingEntity.AssignedThroughGroupID
         }
 
         if (-not [string]::IsNullOrWhiteSpace([string]$existingEntity.LocalAccountLastPasswordChange)) {
@@ -1135,10 +1377,29 @@ function Assert-TableEntity {
             throw 'Removed must be the Int32 value 0 or 1.'
         }
 
-        $groupId = [string]$Entity.GroupID
-        $userId = [string]$Entity.UserID
-        if ([string]::IsNullOrWhiteSpace($groupId) -eq [string]::IsNullOrWhiteSpace($userId)) {
-            throw 'Exactly one of GroupID or UserID must be set.'
+        $principalId = Get-RequiredTableValue -Value ([string]$Entity.PrincipalID) -PropertyName 'PrincipalID' -MaximumLength 256
+        if ($principalId -notmatch '^S-\d-(?:\d+-)+\d+$') {
+            throw 'PrincipalID must be a valid SID.'
+        }
+
+        $principalType = [string]$Entity.PrincipalType
+        if ($principalType -notin @('User', 'Group')) {
+            throw 'PrincipalType must contain User or Group.'
+        }
+
+        $membershipType = [string]$Entity.MembershipType
+        $assignedThroughGroupId = [string]$Entity.AssignedThroughGroupID
+        if ($membershipType -eq 'Direct' -and -not [string]::IsNullOrWhiteSpace($assignedThroughGroupId)) {
+            throw 'AssignedThroughGroupID must not be set for direct membership.'
+        }
+
+        if ($membershipType -eq 'Transitive') {
+            $assignedThroughGroupId = Get-RequiredTableValue -Value $assignedThroughGroupId -PropertyName 'AssignedThroughGroupID' -MaximumLength 256
+            if ($assignedThroughGroupId -notmatch '^S-\d-(?:\d+-)+\d+$') {
+                throw 'AssignedThroughGroupID must be a valid SID.'
+            }
+        } elseif ($membershipType -ne 'Direct') {
+            throw 'MembershipType must contain Direct or Transitive.'
         }
 
         if ($Entity.PSObject.Properties.Name -contains 'LocalAccountLastPasswordChange') {
@@ -1150,11 +1411,17 @@ function Assert-TableEntity {
         $null = Get-RequiredTableValue -Value $partitionKey -PropertyName 'GroupID' -MaximumLength 256
         $null = Get-RequiredTableValue -Value $rowKey -PropertyName 'GroupName' -MaximumLength 128
         Assert-ValidSourceCode -Source ([string]$Entity.LocalOrEntraOrAD)
+        if ([string]$Entity.ResolutionState -notin @('Resolved', 'EntraPending', 'DomainUnavailable')) {
+            throw 'ResolutionState must contain Resolved, EntraPending, or DomainUnavailable.'
+        }
     } elseif ($TableName -eq $AdminUserNames) {
         $null = Get-RequiredTableValue -Value $partitionKey -PropertyName 'UserID' -MaximumLength 256
         $null = Get-RequiredTableValue -Value $rowKey -PropertyName 'SamAccountName' -MaximumLength 20
         $null = Get-RequiredTableValue -Value ([string]$Entity.UserPrincipalName) -PropertyName 'UserPrincipalName' -MaximumLength 1024
         Assert-ValidSourceCode -Source ([string]$Entity.LocalOrEntraOrAD)
+        if ([string]$Entity.ResolutionState -notin @('Resolved', 'EntraPending', 'DomainUnavailable')) {
+            throw 'ResolutionState must contain Resolved, EntraPending, or DomainUnavailable.'
+        }
     } else {
         throw "No schema validator is defined for table '$TableName'."
     }
@@ -1195,7 +1462,7 @@ try {
 
     $administratorsGroup = Get-LocalizedAdministratorsGroup
     $computerSid = Get-ComputerSid
-    $timestamp = [datetime]::UtcNow
+    $timestamp = $script:ObservationTimestamp
     $existingMainEntities = @(Get-TablePartitionEntities -TableName $MainTable -PartitionKey $computerSid -Token $sanitizedSasToken)
     $localMembers = @(Get-LocalAdministratorsMembers -GroupPath $administratorsGroup.Path -JoinState $joinState)
 
@@ -1206,16 +1473,16 @@ try {
         if ($isGroup) {
             $groupName = if ($member.Source -eq 'E') { Get-EntraPrincipalName -Sid $member.Sid -FallbackName $displayName } else { $displayName }
             $groupId = Add-AdminGroup -GroupName $groupName -Sid $member.Sid -Source $member.Source
-            Add-MainTableRow -ComputerSid $computerSid -ComputerName $env:COMPUTERNAME -EntraOrHybrid $joinState.EntraOrHybrid -Timestamp $timestamp -AdminGroupName $administratorsGroup.Name -GroupId $groupId
+            Add-MainTableRow -ComputerSid $computerSid -ComputerName $env:COMPUTERNAME -EntraOrHybrid $joinState.EntraOrHybrid -Timestamp $timestamp -AdminGroupName $administratorsGroup.Name -PrincipalId $groupId -PrincipalType Group -MembershipType Direct
 
             $groupResolution = Resolve-DomainGroupMembers -GroupMember $member -JoinState $joinState -RetryCount $MaxRetries -RetryDelay $RetryDelaySeconds
             foreach ($resolvedMember in $groupResolution.ResolvedMembers) {
                 if ($resolvedMember.Class -ieq 'group') {
                     $resolvedGroupId = Add-AdminGroup -GroupName $resolvedMember.AccountName -Sid $resolvedMember.Sid -Source $resolvedMember.Source
-                    Add-MainTableRow -ComputerSid $computerSid -ComputerName $env:COMPUTERNAME -EntraOrHybrid $joinState.EntraOrHybrid -Timestamp $timestamp -AdminGroupName $administratorsGroup.Name -GroupId $resolvedGroupId
+                    Add-MainTableRow -ComputerSid $computerSid -ComputerName $env:COMPUTERNAME -EntraOrHybrid $joinState.EntraOrHybrid -Timestamp $timestamp -AdminGroupName $administratorsGroup.Name -PrincipalId $resolvedGroupId -PrincipalType Group -MembershipType Transitive -AssignedThroughGroupId $groupId
                 } else {
                     $resolvedUserId = Add-AdminUser -SamAccountName $resolvedMember.SamAccountName -UserPrincipalName $resolvedMember.UserPrincipalName -Sid $resolvedMember.Sid -Source $resolvedMember.Source
-                    Add-MainTableRow -ComputerSid $computerSid -ComputerName $env:COMPUTERNAME -EntraOrHybrid $joinState.EntraOrHybrid -Timestamp $timestamp -AdminGroupName $administratorsGroup.Name -UserId $resolvedUserId
+                    Add-MainTableRow -ComputerSid $computerSid -ComputerName $env:COMPUTERNAME -EntraOrHybrid $joinState.EntraOrHybrid -Timestamp $timestamp -AdminGroupName $administratorsGroup.Name -PrincipalId $resolvedUserId -PrincipalType User -MembershipType Transitive -AssignedThroughGroupId $groupId
                 }
             }
 
@@ -1236,16 +1503,16 @@ try {
         }
 
         $userId = Add-AdminUser -SamAccountName $userDetails.SamAccountName -UserPrincipalName $userDetails.UserPrincipalName -Sid $member.Sid -Source $member.Source
-        Add-MainTableRow -ComputerSid $computerSid -ComputerName $env:COMPUTERNAME -EntraOrHybrid $joinState.EntraOrHybrid -Timestamp $timestamp -AdminGroupName $administratorsGroup.Name -UserId $userId -LocalAccountCredentialChangedAt $userDetails.PasswordLastSet
+        Add-MainTableRow -ComputerSid $computerSid -ComputerName $env:COMPUTERNAME -EntraOrHybrid $joinState.EntraOrHybrid -Timestamp $timestamp -AdminGroupName $administratorsGroup.Name -PrincipalId $userId -PrincipalType User -MembershipType Direct -LocalAccountCredentialChangedAt $userDetails.PasswordLastSet
     }
 
     Merge-MainEntitySnapshot -ExistingEntities $existingMainEntities -Timestamp $timestamp
 
-    Write-EntitySet -TableName $AdminUserNames -Entities $script:UserEntities -Token $sanitizedSasToken
-    Write-EntitySet -TableName $AdminGroups -Entities $script:GroupEntities -Token $sanitizedSasToken
+    Write-LookupEntitySet -TableName $AdminUserNames -LookupType User -Entities $script:UserEntities -Token $sanitizedSasToken
+    Write-LookupEntitySet -TableName $AdminGroups -LookupType Group -Entities $script:GroupEntities -Token $sanitizedSasToken
     Write-EntitySet -TableName $MainTable -Entities $script:MainEntities -Token $sanitizedSasToken
 
-    Write-Output ('COMPLIANT: Uploaded {0} main rows, {1} user rows, and {2} group rows.' -f $script:MainEntities.Count, $script:UserEntities.Count, $script:GroupEntities.Count)
+    Write-Output ('COMPLIANT: Uploaded {0} main rows; created {1} lookup rows, updated {2} candidates, and skipped {3} unchanged lookup rows.' -f $script:MainEntities.Count, $script:LookupRowsCreated, $script:LookupCandidatesUpdated, $script:LookupRowsSkipped)
     exit 0
 } catch {
     Write-Output "ERROR: Remediation failed. $($_.Exception.Message)"

@@ -142,6 +142,29 @@ function Get-AzureTableEntities {
     return $entities
 }
 
+function Select-CanonicalLookupEntities {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Entities
+    )
+
+    $canonicalSort = @(
+        @{ Expression = { if ([string]$_.ResolutionState -eq 'Resolved') { 1 } else { 0 } }; Descending = $true },
+        @{ Expression = {
+            $value = if ($null -ne $_.ObservedAt) { $_.ObservedAt } else { $_.Timestamp }
+            $parsed = [datetimeoffset]::MinValue
+            if ($null -ne $value) { [void][datetimeoffset]::TryParse([string]$value, [ref]$parsed) }
+            $parsed
+        }; Descending = $true },
+        @{ Expression = { [string]$_.RowKey }; Descending = $true }
+    )
+
+    return @($Entities | Group-Object -Property PartitionKey | ForEach-Object {
+        $sortedRows = @($_.Group | Sort-Object -Property $canonicalSort)
+        $sortedRows[0]
+    })
+}
+
 function ConvertTo-ResolvedData {
     param(
         [Parameter(Mandatory = $true)]
@@ -162,8 +185,12 @@ function ConvertTo-ResolvedData {
     }
 
     $resolved = foreach ($entity in $MainEntities) {
-        $userSid = [string]$entity.UserID
-        $groupSid = [string]$entity.GroupID
+        $principalSid = [string]$entity.PrincipalID
+        $principalType = [string]$entity.PrincipalType
+        $membershipType = [string]$entity.MembershipType
+        $userSid = if ($principalType -eq 'User') { $principalSid } else { '' }
+        $groupSid = if ($principalType -eq 'Group') { $principalSid } else { '' }
+        $assignedThroughGroupSid = [string]$entity.AssignedThroughGroupID
         $joinState = switch ([string]$entity.EntraOrHybrid) {
             '1' { 'Entra joined' }
             '2' { 'Hybrid joined' }
@@ -172,6 +199,7 @@ function ConvertTo-ResolvedData {
         }
         $userName = if ($userSid -and $usersBySid.ContainsKey($userSid)) { [string]$usersBySid[$userSid].RowKey } else { $userSid }
         $groupName = if ($groupSid -and $groupsBySid.ContainsKey($groupSid)) { [string]$groupsBySid[$groupSid].RowKey } else { $groupSid }
+        $assignedThroughGroupName = if ($assignedThroughGroupSid -and $groupsBySid.ContainsKey($assignedThroughGroupSid)) { [string]$groupsBySid[$assignedThroughGroupSid].RowKey } else { $assignedThroughGroupSid }
 
         [pscustomobject][ordered]@{
             ComputerName                   = [string]$entity.Computername
@@ -183,10 +211,13 @@ function ConvertTo-ResolvedData {
             Removed                        = [int]$entity.Removed
             UserName                       = $userName
             GroupName                      = $groupName
+            MembershipType                 = $membershipType
+            AddedThroughGroupName          = $assignedThroughGroupName
             LocalAccountLastPasswordChange = $entity.LocalAccountLastPasswordChange
             Timestamp                      = $entity.Timestamp
             _UserSID                       = $userSid
             _GroupSID                      = $groupSid
+            _AssignedThroughGroupSID       = $assignedThroughGroupSid
         }
     }
 
@@ -229,11 +260,13 @@ try {
     $mainEntities = @(Get-AzureTableEntities -TableName 'LocalAdminCollection' -AccountName $StorageAccountName -Token $resolvedSasToken)
     $userEntities = @(Get-AzureTableEntities -TableName 'AdminUserNames' -AccountName $StorageAccountName -Token $resolvedSasToken)
     $groupEntities = @(Get-AzureTableEntities -TableName 'AdminGroups' -AccountName $StorageAccountName -Token $resolvedSasToken)
+    $canonicalUsers = @(Select-CanonicalLookupEntities -Entities $userEntities)
+    $canonicalGroups = @(Select-CanonicalLookupEntities -Entities $groupEntities)
     $reportData = [ordered]@{
         generatedAt = [datetime]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
-        summary     = ConvertTo-ResolvedData -MainEntities $mainEntities -UserEntities $userEntities -GroupEntities $groupEntities
-        users       = ConvertTo-UserDetails -Entities $userEntities
-        groups      = ConvertTo-GroupDetails -Entities $groupEntities
+        summary     = ConvertTo-ResolvedData -MainEntities $mainEntities -UserEntities $canonicalUsers -GroupEntities $canonicalGroups
+        users       = ConvertTo-UserDetails -Entities $canonicalUsers
+        groups      = ConvertTo-GroupDetails -Entities $canonicalGroups
     }
 
     $templatePath = Join-Path -Path $PSScriptRoot -ChildPath 'LocalAdminResolvedLive.html'

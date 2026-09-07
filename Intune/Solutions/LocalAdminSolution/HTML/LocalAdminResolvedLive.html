@@ -98,6 +98,9 @@
       .tab { flex: 1; padding-inline: 5px; font-size: .78rem; }
       .connection-grid { grid-template-columns: 1fr; }
       .connection-grid .command { grid-column: auto; }
+      .connection-options { align-items: stretch; flex-direction: column; }
+      .connection-options .toggle-control { white-space: normal; }
+      .forget-connection { align-self: flex-start; }
       .toolbar { grid-template-columns: 1fr; }
       .search-field, .actions { grid-column: auto; }
       .actions { justify-content: stretch; }
@@ -177,6 +180,7 @@
           ['EntraOrHybrid', 'Join state'], ['LastReportTimeStamp', 'Last report'],
           ['LocalAdminGroupName', 'Administrators group'], ['Removed', 'Status'],
           ['UserName', 'User name'], ['GroupName', 'Group name'],
+          ['MembershipType', 'Membership type'], ['AddedThroughGroupName', 'Added through group'],
           ['LocalAccountLastPasswordChange', 'Password changed'], ['Timestamp', 'Azure timestamp']
         ]
       },
@@ -262,23 +266,48 @@
       } while (nextPartitionKey);
       return rows;
     }
+    function canonicalLookupRows(entities) {
+      const compare = (left, right) => {
+        const resolvedDifference = Number(text(right.ResolutionState) === 'Resolved') - Number(text(left.ResolutionState) === 'Resolved');
+        if (resolvedDifference) return resolvedDifference;
+        const leftTime = Date.parse(left.ObservedAt || left.Timestamp) || 0;
+        const rightTime = Date.parse(right.ObservedAt || right.Timestamp) || 0;
+        if (leftTime !== rightTime) return rightTime - leftTime;
+        const leftKey = text(left.RowKey), rightKey = text(right.RowKey);
+        return leftKey === rightKey ? 0 : (leftKey > rightKey ? -1 : 1);
+      };
+      const bySid = new Map();
+      entities.forEach(entity => {
+        const sid = text(entity.PartitionKey);
+        const current = bySid.get(sid);
+        if (!current || compare(entity, current) < 0) bySid.set(sid, entity);
+      });
+      return [...bySid.values()];
+    }
     function resolveAzureData(mainEntities, userEntities, groupEntities) {
-      const usersBySid = new Map(userEntities.map(user => [text(user.PartitionKey), user]));
-      const groupsBySid = new Map(groupEntities.map(group => [text(group.PartitionKey), group]));
+      const canonicalUsers = canonicalLookupRows(userEntities);
+      const canonicalGroups = canonicalLookupRows(groupEntities);
+      const usersBySid = new Map(canonicalUsers.map(user => [text(user.PartitionKey), user]));
+      const groupsBySid = new Map(canonicalGroups.map(group => [text(group.PartitionKey), group]));
       const joinStates = { '1': 'Entra joined', '2': 'Hybrid joined', '3': 'Domain joined' };
       const summary = mainEntities.map(entity => {
-        const userSid = text(entity.UserID), groupSid = text(entity.GroupID);
+        const principalSid = text(entity.PrincipalID), principalType = text(entity.PrincipalType);
+        const userSid = principalType === 'User' ? principalSid : '', groupSid = principalType === 'Group' ? principalSid : '';
+        const assignedThroughGroupSid = text(entity.AssignedThroughGroupID);
         return {
           ComputerName: text(entity.Computername), SID: text(entity.PartitionKey), RowKey: Number(entity.RowKey),
           EntraOrHybrid: entity.EntraOrHybrid == null ? '' : (joinStates[text(entity.EntraOrHybrid)] || `Unknown (${entity.EntraOrHybrid})`),
           LastReportTimeStamp: entity.LastReportTimeStamp, LocalAdminGroupName: text(entity.LocalAdminGroupName), Removed: Number(entity.Removed),
           UserName: userSid && usersBySid.has(userSid) ? text(usersBySid.get(userSid).RowKey) : userSid,
           GroupName: groupSid && groupsBySid.has(groupSid) ? text(groupsBySid.get(groupSid).RowKey) : groupSid,
-          LocalAccountLastPasswordChange: entity.LocalAccountLastPasswordChange, Timestamp: entity.Timestamp, _UserSID: userSid, _GroupSID: groupSid
+          MembershipType: text(entity.MembershipType),
+          AddedThroughGroupName: assignedThroughGroupSid && groupsBySid.has(assignedThroughGroupSid) ? text(groupsBySid.get(assignedThroughGroupSid).RowKey) : assignedThroughGroupSid,
+          LocalAccountLastPasswordChange: entity.LocalAccountLastPasswordChange, Timestamp: entity.Timestamp,
+          _UserSID: userSid, _GroupSID: groupSid, _AssignedThroughGroupSID: assignedThroughGroupSid
         };
       }).sort((left, right) => left.RowKey - right.RowKey);
-      const users = userEntities.map(user => ({ UserID: text(user.PartitionKey), SamAccountName: text(user.RowKey), UserPrincipalName: text(user.UserPrincipalName), LocalOrEntraOrAD: text(user.LocalOrEntraOrAD), Timestamp: user.Timestamp }));
-      const groups = groupEntities.map(group => ({ GroupID: text(group.PartitionKey), GroupName: text(group.RowKey), LocalOrEntraOrAD: text(group.LocalOrEntraOrAD), Timestamp: group.Timestamp }));
+      const users = canonicalUsers.map(user => ({ UserID: text(user.PartitionKey), SamAccountName: text(user.RowKey), UserPrincipalName: text(user.UserPrincipalName), LocalOrEntraOrAD: text(user.LocalOrEntraOrAD), Timestamp: user.Timestamp }));
+      const groups = canonicalGroups.map(group => ({ GroupID: text(group.PartitionKey), GroupName: text(group.RowKey), LocalOrEntraOrAD: text(group.LocalOrEntraOrAD), Timestamp: group.Timestamp }));
       return { generatedAt: new Date().toISOString(), summary, users, groups };
     }
     function updateReportSummary() {
@@ -428,6 +457,8 @@
         const button = document.createElement('button'); button.className = 'detail-link'; button.type = 'button'; button.textContent = text(row.UserName); button.title = `Open user details for ${row._UserSID}`; button.addEventListener('click', () => openDetail('user', row._UserSID)); cell.appendChild(button);
       } else if (state.view === 'summary' && key === 'GroupName' && row._GroupSID) {
         const button = document.createElement('button'); button.className = 'detail-link'; button.type = 'button'; button.textContent = text(row.GroupName); button.title = `Open group details for ${row._GroupSID}`; button.addEventListener('click', () => openDetail('group', row._GroupSID)); cell.appendChild(button);
+      } else if (state.view === 'summary' && key === 'AddedThroughGroupName' && row._AssignedThroughGroupSID) {
+        const button = document.createElement('button'); button.className = 'detail-link'; button.type = 'button'; button.textContent = text(row.AddedThroughGroupName); button.title = `Open group details for ${row._AssignedThroughGroupSID}`; button.addEventListener('click', () => openDetail('group', row._AssignedThroughGroupSID)); cell.appendChild(button);
       } else { cell.textContent = displayValue(key, row[key]); }
       return cell;
     }

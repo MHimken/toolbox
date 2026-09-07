@@ -2,6 +2,11 @@
 
 ## 2026
 
+### 6th of September
+
+* Add: Detect-VBATimestampSettings.ps1 - added SYSTEM-context detection for VBA timestamp settings in all cloud-only Entra profile hives.
+* Add: Remediate-VBATimestampSettings.ps1 - added SYSTEM-context remediation for VBA timestamp settings in all cloud-only Entra profile hives.
+
 ### 30th of August
 
 * Add: Detect-GSA-Settings.ps1 - added detection for Global Secure Access, Kerberos timeout, and IPv4 preference registry settings.

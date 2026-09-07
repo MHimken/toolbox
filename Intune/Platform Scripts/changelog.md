@@ -2,6 +2,10 @@
 
 ## 2026
 
+### 6th of September
+
+* Add: Set-VBATimestampSettings.ps1 - added a SYSTEM-context platform script that configures VBA timestamp settings in all cloud-only Entra profile hives.
+
 ### 30th of August
 
 * Change: Reset-WindowsUpdateSettings.ps1 - uses a five-minute base runtime plus the configured `GPUpdateTimeout` and `IntuneSyncTimeout`, with the combined runtime capped at 50 minutes.

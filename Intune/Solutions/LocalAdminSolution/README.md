@@ -6,8 +6,9 @@ This package builds Excel and interactive HTML views over the three Azure Tables
 
 The solution can:
 
-- Inventory direct members of the localized Windows Administrators group on domain-joined, Microsoft Entra joined, and hybrid-joined devices.
+- Inventory direct members of the localized Windows Administrators group and one-level members of directly assigned Active Directory groups on domain-joined, Microsoft Entra joined, and hybrid-joined devices.
 - Resolve local users, Active Directory users and groups, and Microsoft Entra principals into three linked Azure Tables.
+- Suppress unchanged lookup writes and reconcile renamed principals centrally with an Azure Automation managed identity.
 - Preserve previously reported members and mark missing entries as removed.
 - Display current Azure data in a standalone live HTML report with search, filters, sorting, pagination, linked details, and CSV export.
 - Generate a self-contained HTML snapshot that can be viewed without an Azure connection.
@@ -17,17 +18,72 @@ The solution can:
 ## Contents
 
 - [Live Azure HTML report](#live-azure-html-report)
+- [Automated Azure deployment](#automated-azure-deployment)
 - [Read-only SAS for the live report](#read-only-sas-for-the-live-report)
 - [Generated HTML snapshot](#generated-html-snapshot)
 - [Workbook setup](#workbook-setup)
 - [Clickable names in Excel](#clickable-names-in-excel)
 - [SAS security and permissions](#sas-security-and-permissions)
+- [Central lookup reconciliation](#central-lookup-reconciliation)
+- [Local administrator schema](#local-administrator-schema)
 - [Query outputs](#query-outputs)
 - [Stress-test data](#stress-test-data)
 - [SAS settings for stress testing](#sas-settings-for-stress-testing)
 - [Remove stress-test data](#remove-stress-test-data)
 - [Clear all table data](#clear-all-table-data)
 - [Change history](#change-history)
+
+## Automated Azure deployment
+
+`Deployment\Deploy-LocalAdminReporting.ps1` provides an interactive deployment path for the Azure resources and reconciliation service. It deploys `Deployment\main.bicep`, imports and schedules the PowerShell 7 reconciliation runbook, grants its managed identity the required Microsoft Graph application permissions, and optionally creates separate endpoint and reporting SAS tokens.
+
+The deployment creates:
+
+- One StorageV2 account with `LocalAdminCollection`, `AdminUserNames`, and `AdminGroups` tables.
+- An Azure Automation account with a system-assigned managed identity.
+- `Storage Table Data Contributor` assignments scoped only to `AdminUserNames` and `AdminGroups`.
+- A Table service CORS rule when the Live HTML frontend is selected.
+- A published PowerShell 7.2 reconciliation runbook and four-hour schedule by default.
+
+Run the deployment from PowerShell 7:
+
+```powershell
+pwsh.exe -NoProfile -File .\Deployment\Deploy-LocalAdminReporting.ps1 `
+   -SubscriptionId '<subscription-id>' `
+   -TenantId '<tenant-id>' `
+   -ResourceGroupName 'rg-local-admin-reporting' `
+   -Location 'westeurope' `
+   -StorageAccountName '<globally-unique-storage-name>' `
+   -InstallMissingModules `
+   -InstallTemporaryBicep
+```
+
+At startup, the script lists its prerequisite behavior. Missing PowerShell modules can be installed from PowerShell Gallery for the current user. If Bicep is unavailable on `PATH`, the script requests permission to download the official Microsoft-signed Windows executable to a unique directory under the current user's TEMP folder. `-InstallTemporaryBicep` provides that approval noninteractively. The temporary directory is added only to the deployment process `PATH` and is removed when the script finishes, including after an error.
+
+Current-user module installation and temporary Bicep download do not normally require administrator rights, so the script does not self-elevate. Azure and Microsoft Graph permissions are still required for cloud operations. Environments that block PowerShell Gallery, GitHub release downloads, TEMP execution, or Microsoft-signed application execution must have those controls adjusted by an administrator or provide the prerequisites centrally.
+
+`-ReportingFrontend LiveHtml` is the default and creates the required Table CORS rule. When `-AllowedCorsOrigins` is omitted, the rule allows `*` so the HTML file can be opened directly. For hosted reports, restrict it to the exact origin, for example `-AllowedCorsOrigins 'https://reports.contoso.com'`. Select `-ReportingFrontend GeneratedHtml` or `-ReportingFrontend Excel` to remove Table CORS because those frontends do not make browser requests to Azure Storage. Use `-SkipGraphPermissionGrant` only when `User.Read.All` and `Group.Read.All` will be assigned to the Automation managed identity separately.
+
+The script uses these modules:
+
+- `Az.Accounts`, `Az.Resources`, `Az.Storage`, and `Az.Automation` for Azure deployment, runbook configuration, and account SAS generation.
+- `Microsoft.Graph.Authentication` for interactive Graph sign-in and direct `Invoke-MgGraphRequest` calls. The complete Microsoft Graph SDK is not required.
+
+The script also requires Bicep to compile `Deployment\main.bicep`. It uses an existing `bicep` command when available and otherwise offers the temporary installation described above.
+
+The Azure identity performing the deployment needs permission to create the resource group resources and Azure role assignments. It also needs permission to list Storage account keys because Azure Table account SAS tokens are signed with an account key. The Graph sign-in requires `Application.Read.All` and `AppRoleAssignment.ReadWrite.All` delegated consent and a directory role permitted to grant application permissions.
+
+Shared-key access remains enabled on this dedicated Storage account because Azure Table account SAS tokens are signed with an account key and are rejected when shared-key authorization is disabled. These are account-level tokens, so their Table/Object permissions apply to every table in this Storage account. Keep unrelated tables in separate Storage accounts.
+
+Token delivery is always explicit. The default `Prompt` mode offers:
+
+1. Save the tokens to a protected plaintext file.
+2. Display the tokens once in the console after an additional warning and confirmation.
+3. Do not expose the generated tokens.
+
+Use `-TokenOutputMode None` to skip SAS generation. In `File` mode, `-TokenOutputPath` can provide a destination, but the script still warns and requests confirmation before writing. On Windows, inheritance is removed and file access is granted only to the current user. Generated files following `LocalAdminReporting-Secrets_*.txt` are ignored by Git. The file describes each token's permissions, expiry, and intended use.
+
+The token file remains a plaintext credential container. Move its values into their final management systems and securely delete it afterwards. Account SAS tokens cannot be revoked individually; rotating the signing Storage account key invalidates all SAS tokens signed by that key.
 
 ## Live Azure HTML report
 
@@ -141,7 +197,7 @@ The built-in Azure Table Storage Power Query connector accepts account-key authe
 
 If the existing `GetAzureAdminTable` query reports HTTP 415 or mentions Atom format, replace its complete **Advanced Editor** contents with the current `Excel\GetAzureAdminTable.pq`, select **Done**, and refresh the other queries.
 
-If `LocalAdminResolved` reports that `_UserSID` or `_GroupSID` was not found, replace the complete **Advanced Editor** contents of both `GetAzureAdminTable` and `LocalAdminResolved` with their current files in the `Excel` folder. Azure Table Storage is schemaless, so `UserID` and `GroupID` occur on different entities; the current queries combine all entity property names and create absent optional columns as null before joining.
+If `LocalAdminResolved` reports that `PrincipalID`, `PrincipalType`, or `AssignedThroughGroupID` was not found, replace the complete **Advanced Editor** contents of both `GetAzureAdminTable` and `LocalAdminResolved` with their current files in the `Excel` folder. Azure Table Storage is schemaless, so the current queries combine all entity property names and create absent optional columns as null before joining.
 
 ## Clickable names in Excel
 
@@ -151,7 +207,7 @@ Power Query cannot create active worksheet hyperlinks by itself. To add them:
 2. Import `Excel\LocalAdminLinks.bas` into the workbook.
 3. Run `RefreshLocalAdminView` instead of **Refresh All**.
 
-The macro refreshes every query, waits for asynchronous queries, and then links each populated `UserName` or `GroupName` cell in `LocalAdminResolved` to the matching row in the appropriate detail worksheet. It uses `LocalAdminLinkMap` and the original SID internally, so duplicate display names still resolve to the correct detail row.
+The macro refreshes every query, waits for asynchronous queries, and then links each populated `UserName`, `GroupName`, or `AddedThroughGroupName` cell in `LocalAdminResolved` to the matching row in the appropriate detail worksheet. It uses `LocalAdminLinkMap` and immutable SIDs internally, so duplicate display names still resolve to the correct detail row.
 
 `BuildLocalAdminDetailLinks` can be run independently if the workbook was already refreshed.
 
@@ -168,6 +224,7 @@ Use separate SAS tokens for reading reports and writing inventory whenever pract
 | --- | --- | --- | --- |
 | Live HTML, HTML exporter, and Excel | Table | Object | Read |
 | Intune remediation | Table | Object | Read, Add, Update |
+| Azure Automation reconciler | Managed identity | Lookup table entities | Read, Add, Update, Delete |
 | Stress-test upload | Table | Object | Add, Update |
 | Stress-test removal or table clearing | Table | Object | Read, Delete |
 | Complete stress-test lifecycle with one temporary token | Table | Object | Read, Delete, Add, Update |
@@ -185,34 +242,76 @@ For `Remediation\Remediate-Write-AdminsToAZTable.ps1`, generate an **account SAS
 
 Leave **Blob**, **File**, **Queue**, **Service**, **Container**, **Write**, **Delete**, **List**, **Create**, **Process**, **Immutable storage**, and **Permanent delete** unselected. The resulting access is equivalent to `ss=t`, `srt=o`, and `sp=rau`.
 
-The remediation uses **Read** to query existing entities and **Add** plus **Update** for insert-or-replace upserts. All three tables must already exist; the script does not create or delete tables or entities. Use the shortest practical expiry and restrict the SAS to known outbound IPv4 addresses where applicable.
+The remediation uses **Read** to compare lookup partitions, **Add** to create missing rows, and **Update** to submit newer AD/local name candidates. Identical observations, existing Entra rows, domain-unavailable SID fallbacks, and older candidates are not rewritten. All three tables must already exist; the script does not create or delete tables or entities. Use the shortest practical expiry and restrict the SAS to known outbound IPv4 addresses where applicable.
 
 See Microsoft's [account SAS permissions by operation](https://learn.microsoft.com/rest/api/storageservices/create-account-sas#account-sas-permissions-by-operation) for the Table service mapping.
 
 This remediation SAS is intentionally insufficient for `New-WriteAdminsStressTestData.ps1 -ClearTables` or `-RemoveStressData`, which also require **Delete**.
 
+## Central lookup reconciliation
+
+`Runbooks\Resolve-LocalAdminLookupNames.ps1` is a PowerShell 7 Azure Automation runbook that owns canonical lookup names. Configure its Automation Account managed identity with:
+
+- `Storage Table Data Contributor` on the storage account, or a narrower custom data role that permits entity read, add, update, and delete on `AdminUserNames` and `AdminGroups`.
+- Microsoft Graph application permissions `User.Read.All` and `Group.Read.All`, with tenant administrator consent.
+- The `Az.Accounts` module in the Automation Account runtime.
+
+Create a schedule and pass `StorageAccountName`. For a user-assigned identity, also pass `ManagedIdentityClientId`. No SAS token or webhook is required. Use `-WhatIf` from a test worker before the first production run.
+
+Endpoints add `ObservedAt` and `ResolutionState` to new lookup rows. Newer, differing AD/local observations are stored in `CandidateGroupName`, or `CandidateSamAccountName` and `CandidateUserPrincipalName`, with `CandidateObservedAt`. Equal candidates are strict no-ops. Entra names remain Graph-authoritative and endpoints never replace an existing Entra row.
+
+The runbook resolves Entra SIDs through Graph, validates newer AD/local candidates, writes the target RowKey before deleting obsolete rows, and clears candidate properties through replacement. Repeated runs converge safely after interruption. Only the managed identity needs Delete permission; do not add Delete to endpoint SAS tokens.
+
+Deploy the remediation and current HTML or Excel readers together, then schedule the runbook. The normalized `LocalAdminCollection` schema is a clean break and the readers do not support legacy main rows containing `UserID` or `GroupID`. Clear pre-release main-table data before testing this version. Lookup-table rows remain compatible; all included readers choose `Resolved` first, then newest `ObservedAt` or Azure `Timestamp`, then RowKey as a deterministic tie-breaker. Candidate values are not displayed before promotion.
+
+## Local administrator schema
+
+Each `LocalAdminCollection` entity represents one access path to the localized Administrators group on one computer. Numeric RowKeys remain stable while a path is active, removed, and later reactivated.
+
+| Property | Required | Meaning |
+| --- | --- | --- |
+| `PrincipalID` | Yes | SID of the user or group represented by this row. |
+| `PrincipalType` | Yes | `User` or `Group`. |
+| `MembershipType` | Yes | `Direct` or `Transitive`. |
+| `AssignedThroughGroupID` | Transitive only | SID of the directly assigned Active Directory group that produced the one-level expanded member. |
+
+Examples:
+
+| PrincipalType | PrincipalID | MembershipType | AssignedThroughGroupID | Meaning |
+| --- | --- | --- | --- | --- |
+| `User` | `S-1-5-21-...-1101` | `Direct` | | User is directly in Administrators. |
+| `Group` | `S-1-5-21-...-2101` | `Direct` | | Group is directly in Administrators. |
+| `User` | `S-1-5-21-...-1102` | `Transitive` | `S-1-5-21-...-2101` | User was returned by one-level expansion of the direct group. |
+| `Group` | `S-1-5-21-...-2201` | `Transitive` | `S-1-5-21-...-2101` | Nested group was observed during one-level expansion; its members are not expanded. |
+
+The same principal can have multiple rows when it is assigned directly and through a group, or through multiple directly assigned groups. Direct paths are identified by `PrincipalType|PrincipalID|Direct`; transitive paths are identified by `PrincipalType|PrincipalID|AssignedThroughGroupID`.
+
+Only directly assigned Active Directory groups are expanded, and only one membership level is read. Local and Microsoft Entra groups are reported as direct group principals but are not expanded. `AdminUserNames` and `AdminGroups` remain independent canonical SID-to-name lookup tables.
+
 ## Query outputs
 
 ### LocalAdminResolved
 
-Contains the source `LocalAdminCollection` fields with `ComputerName` first and `SID` second. The source `UserID` and `GroupID` fields are presented as `UserName` and `GroupName`, containing resolved names rather than SIDs. `EntraOrHybrid` is translated to `Entra joined`, `Hybrid joined`, or `Domain joined`. `RowKey` is converted to a number and sorted ascending.
+Contains the source `LocalAdminCollection` fields with `ComputerName` first and `SID` second. `PrincipalID` is presented in either `UserName` or `GroupName`, according to `PrincipalType`. `AssignedThroughGroupID` is presented as `AddedThroughGroupName`. `EntraOrHybrid` is translated to `Entra joined`, `Hybrid joined`, or `Domain joined`. `RowKey` is converted to a number and sorted ascending.
 
 The presentation applies these mappings:
 
 - `Computername` becomes `ComputerName` and moves to the first column.
 - `PartitionKey` becomes `SID` and moves to the second column.
-- `UserID` becomes `UserName` and contains the resolved `SamAccountName` from `AdminUserNames`.
-- `GroupID` becomes `GroupName` and contains the resolved group name from `AdminGroups`.
+- A user `PrincipalID` becomes `UserName` and contains the resolved `SamAccountName` from `AdminUserNames`.
+- A group `PrincipalID` becomes `GroupName` and contains the resolved group name from `AdminGroups`.
+- `MembershipType` shows whether the principal is direct or transitive.
+- `AssignedThroughGroupID` becomes `AddedThroughGroupName` and resolves through `AdminGroups`.
 
 If a lookup is missing, the original SID remains visible instead of being discarded. Removed records remain in the result and can be filtered with the `Removed` column.
 
 ### AdminUserDetails
 
-Contains `UserID` (SID), `SamAccountName`, `UserPrincipalName`, `LocalOrEntraOrAD`, and the Azure entity `Timestamp`.
+Contains one canonical row per `UserID` (SID), including `SamAccountName`, `UserPrincipalName`, `LocalOrEntraOrAD`, `ObservedAt`, `ResolutionState`, and the Azure entity `Timestamp`.
 
 ### AdminGroupDetails
 
-Contains `GroupID` (SID), `GroupName`, `LocalOrEntraOrAD`, and the Azure entity `Timestamp`.
+Contains one canonical row per `GroupID` (SID), including `GroupName`, `LocalOrEntraOrAD`, `ObservedAt`, `ResolutionState`, and the Azure entity `Timestamp`.
 
 Source codes are `L` for local, `E` for Microsoft Entra ID, and `A` for Active Directory.
 
@@ -221,12 +320,16 @@ Source codes are `L` for local, `E` for Microsoft Entra ID, and `A` for Active D
 `New-WriteAdminsStressTestData.ps1` creates deterministic, schema-valid test data for validating Excel refresh and transformation performance. Its defaults create:
 
 - 10,008 `LocalAdminCollection` rows across 834 synthetic computers.
-- 7,506 linked `AdminUserNames` rows.
-- 2,502 linked `AdminGroups` rows.
+- 5,004 linked `AdminUserNames` observations.
+- 5,004 linked `AdminGroups` observations.
 - A mix of local, Microsoft Entra ID, and Active Directory principals and device join states.
+- Direct users and groups, transitive users and nested groups, users that are both direct and transitive, and users assigned through multiple direct groups.
+- Microsoft Entra groups only as direct principals; their membership is not synthesized.
 - Deterministically distributed removed entries for status filtering and demonstrations.
 - Localized Administrators group names in English, German, French, Spanish, Italian, and Dutch.
 - Report timestamps distributed across a six-hour period.
+
+Use `-EntryCount` to select an exact main-table stress level of `5000`, `10000`, `15000`, or `20000` rows. The script distributes those rows across the required number of computers. Use `-EntraGroupObjectIds` to include specific Microsoft Entra groups whose names were unavailable locally. Duplicate object IDs are ignored; when IDs are supplied, other synthetic principals use local or Active Directory identities so reconciliation output remains focused on those groups.
 
 ### SAS settings for stress testing
 
@@ -257,6 +360,23 @@ Write the entities by passing the target storage account and SAS token:
 
 ```powershell
 pwsh.exe -NoProfile -File .\New-WriteAdminsStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -Execute
+```
+
+Add deterministic reconciliation cases, including SID fallbacks, a newer AD rename candidate, and a legacy duplicate RowKey:
+
+```powershell
+pwsh.exe -NoProfile -File .\New-WriteAdminsStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -IncludeReconciliationScenarios -Execute
+```
+
+Generate exactly 5,000 main rows and include specific Microsoft Entra groups for runbook validation:
+
+```powershell
+pwsh.exe -NoProfile -File .\New-WriteAdminsStressTestData.ps1 `
+   -StorageAccountName '<storage-account-name>' `
+   -SasToken '<endpoint-sas-token>' `
+   -EntryCount 5000 `
+   -EntraGroupObjectIds '<group-object-id-1>','<group-object-id-2>' `
+   -Execute
 ```
 
 The defaults exceed 10,000 main rows because 834 computers multiplied by 12 entries equals 10,008. The following tested configuration creates exactly 20,000 main rows:

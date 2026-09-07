@@ -58,16 +58,18 @@ Private Sub IndexLinkRows(ByVal sourceTable As ListObject, ByVal index As Object
 
     Dim rowNumber As Long
     Dim recordKey As String
-    Dim userSid As String
-    Dim groupSid As String
+    Dim principalId As String
+    Dim principalType As String
+    Dim assignedThroughGroupId As String
 
     For rowNumber = 1 To sourceTable.DataBodyRange.Rows.Count
         recordKey = BuildRecordKey( _
             sourceTable.ListColumns("PartitionKey").DataBodyRange.Cells(rowNumber, 1).Value2, _
             sourceTable.ListColumns("RowKey").DataBodyRange.Cells(rowNumber, 1).Value2)
-        userSid = CStr(sourceTable.ListColumns("UserID").DataBodyRange.Cells(rowNumber, 1).Value2)
-        groupSid = CStr(sourceTable.ListColumns("GroupID").DataBodyRange.Cells(rowNumber, 1).Value2)
-        index(recordKey) = Array(userSid, groupSid)
+        principalId = CStr(sourceTable.ListColumns("PrincipalID").DataBodyRange.Cells(rowNumber, 1).Value2)
+        principalType = CStr(sourceTable.ListColumns("PrincipalType").DataBodyRange.Cells(rowNumber, 1).Value2)
+        assignedThroughGroupId = CStr(sourceTable.ListColumns("AssignedThroughGroupID").DataBodyRange.Cells(rowNumber, 1).Value2)
+        index(recordKey) = Array(principalId, principalType, assignedThroughGroupId)
     Next rowNumber
 End Sub
 
@@ -112,18 +114,28 @@ Private Sub ApplyDetailLinks( _
 
         RemoveCellLink summaryTable.ListColumns("UserName").DataBodyRange.Cells(rowNumber, 1)
         RemoveCellLink summaryTable.ListColumns("GroupName").DataBodyRange.Cells(rowNumber, 1)
+        RemoveCellLink summaryTable.ListColumns("AddedThroughGroupName").DataBodyRange.Cells(rowNumber, 1)
 
         If linkRows.Exists(recordKey) Then
             principalIds = linkRows(recordKey)
 
-            If Len(CStr(principalIds(0))) > 0 And userTargets.Exists(CStr(principalIds(0))) Then
+            If StrComp(CStr(principalIds(1)), "User", vbTextCompare) = 0 _
+                And Len(CStr(principalIds(0))) > 0 _
+                And userTargets.Exists(CStr(principalIds(0))) Then
                 targetAddress = userTargets(CStr(principalIds(0)))
                 AddCellLink summaryTable.ListColumns("UserName").DataBodyRange.Cells(rowNumber, 1), targetAddress
             End If
 
-            If Len(CStr(principalIds(1))) > 0 And groupTargets.Exists(CStr(principalIds(1))) Then
-                targetAddress = groupTargets(CStr(principalIds(1)))
+            If StrComp(CStr(principalIds(1)), "Group", vbTextCompare) = 0 _
+                And Len(CStr(principalIds(0))) > 0 _
+                And groupTargets.Exists(CStr(principalIds(0))) Then
+                targetAddress = groupTargets(CStr(principalIds(0)))
                 AddCellLink summaryTable.ListColumns("GroupName").DataBodyRange.Cells(rowNumber, 1), targetAddress
+            End If
+
+            If Len(CStr(principalIds(2))) > 0 And groupTargets.Exists(CStr(principalIds(2))) Then
+                targetAddress = groupTargets(CStr(principalIds(2)))
+                AddCellLink summaryTable.ListColumns("AddedThroughGroupName").DataBodyRange.Cells(rowNumber, 1), targetAddress
             End If
         End If
     Next rowNumber

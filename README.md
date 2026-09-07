@@ -19,7 +19,7 @@ Multi-file solutions with dedicated documentation and supporting assets.
 | Solution | Scripts | Description | Status | Last updated |
 | --- | --- | --- | --- | --- |
 | [Broken Autopilot Device Cleanup](Autopilot/Solutions/README.md) | [Cleanup script](Autopilot/Solutions/BrokenAutopilotDeviceCleanup.ps1) | Identifies duplicate or stale Autopilot, Intune, and Entra device records and optionally cleans them up. | **Unfinished** | 2026-08-30 |
-| [Write Admins to Azure Table](Intune/Solutions/Write-AdminsToAZTable/README.md) | [Detect](Intune/Solutions/Write-AdminsToAZTable/Remediation/Detect-Write-AdminsToAZTable.ps1) / [Remediate](Intune/Solutions/Write-AdminsToAZTable/Remediation/Remediate-Write-AdminsToAZTable.ps1) / [HTML export](Intune/Solutions/Write-AdminsToAZTable/HTML/Export-LocalAdminResolvedHtml.ps1) / [Stress-test data](Intune/Solutions/Write-AdminsToAZTable/New-WriteAdminsStressTestData.ps1) | Inventories local administrators through Intune remediation, Azure Table Storage, Excel, and HTML reporting. | Finished | 2026-08-30 |
+| [Write Admins to Azure Table](Intune/Solutions/LocalAdminSolution/README.md) | [Detect](Intune/Solutions/LocalAdminSolution/Remediation/Detect-Write-AdminsToAZTable.ps1) / [Remediate](Intune/Solutions/LocalAdminSolution/Remediation/Remediate-Write-AdminsToAZTable.ps1) / [HTML export](Intune/Solutions/LocalAdminSolution/HTML/Export-LocalAdminResolvedHtml.ps1) / [Stress-test data](Intune/Solutions/LocalAdminSolution/New-WriteAdminsStressTestData.ps1) | Inventories local administrators through Intune remediation, Azure Table Storage, Excel, and HTML reporting. | Finished | 2026-08-30 |
 
 ## Intune remediations
 

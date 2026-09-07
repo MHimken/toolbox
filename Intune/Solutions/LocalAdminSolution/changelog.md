@@ -2,6 +2,34 @@
 
 ## 2026
 
+### 7th of September
+
+* Renamed the solution folder from `Write-AdminsToAZTable` to `LocalAdminSolution` and updated repository navigation links.
+* Normalized local administrator rows: LocalAdminCollection now stores `PrincipalID`, `PrincipalType`, `MembershipType`, and optional `AssignedThroughGroupID` instead of mutually exclusive `UserID` and `GroupID` fields.
+* Preserved access paths: direct assignments and one-level Active Directory group-derived assignments now remain independently visible, removable, and reactivatable with stable numeric RowKeys.
+* Expanded resolved reports: live HTML, generated HTML, CSV, and Excel now show Membership type and Added through group with SID-safe detail links.
+* Expanded stress coverage: deterministic data now includes direct users and groups, nested group observations, direct-plus-transitive users, and users assigned through multiple groups while keeping Entra groups direct-only.
+
+### 6th of September
+
+* Added automated deployment: Deployment/main.bicep - creates the Storage account, three Azure Tables, Automation account identity, optional Table CORS configuration, and lookup-table-scoped data role assignments.
+* Added deployment bootstrap: Deployment/Deploy-LocalAdminReporting.ps1 - performs interactive Azure and Graph authentication, deploys resources, imports and schedules the reconciliation runbook, and idempotently grants its Graph application permissions.
+* Added explicit SAS delivery controls: the bootstrap creates separate endpoint and reporting tokens and lets the user save a protected plaintext file, confirm one-time console output, or withhold token output. Token values are excluded from logs and generated secret files are ignored by Git.
+* Fixed managed identity permission deployment: the Graph service-principal lookup now preserves the object ID when appending its query string.
+* Added reporting frontend selection: Live HTML now configures Table CORS automatically, while generated HTML and Excel remove browser CORS configuration.
+* Reduced reconciliation frequency: new and existing deployments use a four-hour Automation schedule by default.
+* Expanded end-to-end testing: stress data supports exact 5,000-row increments through 20,000 rows and can include specified Microsoft Entra group object IDs; reconciliation output identifies resolved and unresolved Entra objects.
+* Fixed protected token replacement: overwriting a token file now retains its existing owner and replaces access rules without requiring `SeSecurityPrivilege`.
+* Added temporary Bicep support: missing Bicep can be downloaded with user approval, verified as Microsoft-signed, used only for the current process, and removed when deployment ends without requiring elevation in standard environments.
+
+### 3rd of September
+
+* Reduced lookup writes: Remediation/Remediate-Write-AdminsToAZTable.ps1 - skips unchanged lookup rows and submits only newer, differing AD/local observations as candidate properties with ETag conflict protection.
+* Added canonical reconciliation: Runbooks/Resolve-LocalAdminLookupNames.ps1 - uses an Azure Automation managed identity and Microsoft Graph to resolve Entra names, promote validated candidates, and consolidate immutable RowKeys with create-before-delete ordering.
+* Made reports deterministic: HTML and Excel readers - select one canonical lookup row per SID while legacy duplicates exist and do not display unpromoted candidates.
+* Expanded stress coverage: New-WriteAdminsStressTestData.ps1 - emits lookup observation metadata and optional fallback, rename-candidate, and legacy-duplicate scenarios.
+* Documented migration and permissions: README.md - separates endpoint SAS rights from the runbook identity's Graph and Azure Table data roles.
+
 ### 2nd of September
 
 * Added opt-in connection persistence: HTML/LocalAdminResolvedLive.html - saves a validated storage account name and read-only SAS in browser local storage only after a successful refresh, restores fields without automatically querying Azure, and provides an immediate forget action.
@@ -42,7 +70,7 @@
 * Added navigation: Excel/LocalAdminLinks.bas - added clickable links from the resolved summary to matching user and group details.
 * Organized: Excel and HTML reporting assets - moved format-specific files into dedicated `Excel` and `HTML` subfolders.
 * Organized remediation: Detect-Write-AdminsToAZTable.ps1 and Remediate-Write-AdminsToAZTable.ps1 - moved both Intune scripts into the `Remediation` subfolder.
-* Relocated: Write-AdminsToAZTable solution - moved the remediation and reporting files into `Intune/Solutions/Write-AdminsToAZTable`.
+* Relocated: Write-AdminsToAZTable solution - moved the remediation and reporting files into `Intune/Solutions/LocalAdminSolution`.
 
 ### 20th of August
 

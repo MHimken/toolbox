@@ -5,8 +5,9 @@ let
         {
             "PartitionKey",
             "RowKey",
-            "UserID",
-            "GroupID"
+            "PrincipalID",
+            "PrincipalType",
+            "AssignedThroughGroupID"
         },
         MissingField.UseNull
     ),
@@ -15,8 +16,9 @@ let
         {
             {"PartitionKey", type text},
             {"RowKey", type text},
-            {"UserID", type text},
-            {"GroupID", type text}
+            {"PrincipalID", type text},
+            {"PrincipalType", type text},
+            {"AssignedThroughGroupID", type text}
         }
     )
 in

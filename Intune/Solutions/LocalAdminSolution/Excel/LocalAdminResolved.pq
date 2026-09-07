@@ -1,21 +1,25 @@
 let
     Main = GetAzureAdminTable("LocalAdminCollection"),
-    MainColumnOrder = List.Union({Table.ColumnNames(Main), {"UserID", "GroupID"}}),
+    MainColumnOrder = List.Union({Table.ColumnNames(Main), {"PrincipalID", "PrincipalType", "MembershipType", "AssignedThroughGroupID"}}),
     NormalizedMain = Table.SelectColumns(
         Main,
         MainColumnOrder,
         MissingField.UseNull
     ),
-    LookupKeys = Table.RenameColumns(
+    AddedUserSID = Table.AddColumn(
         NormalizedMain,
-        {
-            {"UserID", "_UserSID"},
-            {"GroupID", "_GroupSID"}
-        },
-        MissingField.Ignore
+        "_UserSID",
+        each if [PrincipalType] = "User" then [PrincipalID] else null,
+        type text
+    ),
+    AddedGroupSID = Table.AddColumn(
+        AddedUserSID,
+        "_GroupSID",
+        each if [PrincipalType] = "Group" then [PrincipalID] else null,
+        type text
     ),
     JoinedUsers = Table.NestedJoin(
-        LookupKeys,
+        AddedGroupSID,
         {"_UserSID"},
         AdminUserDetails,
         {"UserID"},
@@ -42,9 +46,23 @@ let
         {"GroupName"},
         {"_ResolvedGroupName"}
     ),
-    AddedUserName = Table.AddColumn(
+    JoinedAssignedThroughGroups = Table.NestedJoin(
         ExpandedGroups,
-        "UserID",
+        {"AssignedThroughGroupID"},
+        AdminGroupDetails,
+        {"GroupID"},
+        "_AssignedThroughGroupDetails",
+        JoinKind.LeftOuter
+    ),
+    ExpandedAssignedThroughGroups = Table.ExpandTableColumn(
+        JoinedAssignedThroughGroups,
+        "_AssignedThroughGroupDetails",
+        {"GroupName"},
+        {"_ResolvedAssignedThroughGroupName"}
+    ),
+    AddedUserName = Table.AddColumn(
+        ExpandedAssignedThroughGroups,
+        "UserName",
         each
             if [_UserSID] = null then
                 null
@@ -56,7 +74,7 @@ let
     ),
     AddedGroupName = Table.AddColumn(
         AddedUserName,
-        "GroupID",
+        "GroupName",
         each
             if [_GroupSID] = null then
                 null
@@ -66,13 +84,29 @@ let
                 [_ResolvedGroupName],
         type text
     ),
-    RemovedTechnicalColumns = Table.RemoveColumns(
+    AddedAssignedThroughGroupName = Table.AddColumn(
         AddedGroupName,
+        "AddedThroughGroupName",
+        each
+            if [AssignedThroughGroupID] = null then
+                null
+            else if [_ResolvedAssignedThroughGroupName] = null or Text.Trim([_ResolvedAssignedThroughGroupName]) = "" then
+                [AssignedThroughGroupID]
+            else
+                [_ResolvedAssignedThroughGroupName],
+        type text
+    ),
+    RemovedTechnicalColumns = Table.RemoveColumns(
+        AddedAssignedThroughGroupName,
         {
+            "PrincipalID",
+            "PrincipalType",
+            "AssignedThroughGroupID",
             "_UserSID",
             "_GroupSID",
             "_ResolvedUserName",
-            "_ResolvedGroupName"
+            "_ResolvedGroupName",
+            "_ResolvedAssignedThroughGroupName"
         },
         MissingField.Ignore
     ),
@@ -80,18 +114,21 @@ let
         RemovedTechnicalColumns,
         {
             {"Computername", "ComputerName"},
-            {"PartitionKey", "SID"},
-            {"UserID", "UserName"},
-            {"GroupID", "GroupName"}
+            {"PartitionKey", "SID"}
         },
         MissingField.Ignore
     ),
     PresentationColumnOrder = List.Combine(
         {
             {"ComputerName", "SID"},
-            List.Transform(
-                List.RemoveItems(MainColumnOrder, {"Computername", "PartitionKey"}),
-                each if _ = "UserID" then "UserName" else if _ = "GroupID" then "GroupName" else _
+            List.Combine(
+                List.Transform(
+                    List.RemoveItems(MainColumnOrder, {"Computername", "PartitionKey", "PrincipalType"}),
+                    each
+                        if _ = "PrincipalID" then {"UserName", "GroupName"}
+                        else if _ = "AssignedThroughGroupID" then {"AddedThroughGroupName"}
+                        else {_}
+                )
             )
         }
     ),
