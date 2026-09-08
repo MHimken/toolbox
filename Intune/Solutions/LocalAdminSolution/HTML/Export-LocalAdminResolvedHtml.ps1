@@ -91,7 +91,7 @@ function Get-ConfiguredSasToken {
     }
 
     $solutionRoot = Split-Path -Path $PSScriptRoot -Parent
-    $remediationPath = Join-Path -Path $solutionRoot -ChildPath 'Remediation\Remediate-Write-AdminsToAZTable.ps1'
+    $remediationPath = Join-Path -Path $solutionRoot -ChildPath 'Remediation\Remediate-LocalAdminSolution.ps1'
     $remediationContent = Get-Content -LiteralPath $remediationPath -Raw
     $tokenMatch = [regex]::Match($remediationContent, '\$sasToken\s*=\s*''([^'']+)''')
     if (-not $tokenMatch.Success) {

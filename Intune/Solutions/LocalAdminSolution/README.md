@@ -1,6 +1,6 @@
 # Local administrator reporting
 
-This package builds Excel and interactive HTML views over the three Azure Tables written by `Remediation\Remediate-Write-AdminsToAZTable.ps1`. Detection and remediation scripts are stored in the `Remediation` folder, Excel assets in `Excel`, and HTML assets in `HTML`.
+This package builds Excel and interactive HTML views over the three Azure Tables written by `Remediation\Remediate-LocalAdminSolution.ps1`. Detection and remediation scripts are stored in the `Remediation` folder, Excel assets in `Excel`, and HTML assets in `HTML`.
 
 ## Capabilities
 
@@ -211,6 +211,14 @@ The macro refreshes every query, waits for asynchronous queries, and then links 
 
 `BuildLocalAdminDetailLinks` can be run independently if the workbook was already refreshed.
 
+## Intune remediation interval
+
+Upload `Remediation\Detect-LocalAdminSolution.ps1` and `Remediation\Remediate-LocalAdminSolution.ps1` as an Intune Remediations script package. Configure **Run this script using the logged-on credentials** as **No** and **Run script in 64-bit PowerShell** as **Yes** so both scripts use the same system-level registry location.
+
+The detection script defaults `$RemediationIntervalHours` to `4`. Because Intune Remediations does not pass custom command-line arguments to detection scripts, change that default in the uploaded detection file when a different interval is required. The Intune assignment schedule may run more frequently; the detection script reports compliant until the configured interval expires.
+
+After every complete Azure Table upload, remediation writes an invariant UTC timestamp to `LastSuccessfulRunUtc` under `HKLM:\Software\LocalAdminSolution`. Missing, invalid, or expired values cause detection to report noncompliant. Failed or partial uploads do not advance the timestamp and are retried at the next Intune evaluation.
+
 ## SAS security and permissions
 
 - Treat `StorageSasToken` as a credential. Use the narrowest permissions and shortest practical expiry.
@@ -233,7 +241,7 @@ Use **HTTPS only** for every token. **Service**, **Container**, **List**, and **
 
 ### Least-privilege remediation SAS
 
-For `Remediation\Remediate-Write-AdminsToAZTable.ps1`, generate an **account SAS** with only these portal options selected:
+For `Remediation\Remediate-LocalAdminSolution.ps1`, generate an **account SAS** with only these portal options selected:
 
 - Allowed services: **Table**.
 - Allowed resource types: **Object**.
@@ -246,7 +254,7 @@ The remediation uses **Read** to compare lookup partitions, **Add** to create mi
 
 See Microsoft's [account SAS permissions by operation](https://learn.microsoft.com/rest/api/storageservices/create-account-sas#account-sas-permissions-by-operation) for the Table service mapping.
 
-This remediation SAS is intentionally insufficient for `New-WriteAdminsStressTestData.ps1 -ClearTables` or `-RemoveStressData`, which also require **Delete**.
+This remediation SAS is intentionally insufficient for `New-LocalAdminSolutionStressTestData.ps1 -ClearTables` or `-RemoveStressData`, which also require **Delete**.
 
 ## Central lookup reconciliation
 
@@ -317,7 +325,7 @@ Source codes are `L` for local, `E` for Microsoft Entra ID, and `A` for Active D
 
 ## Stress-test data
 
-`New-WriteAdminsStressTestData.ps1` creates deterministic, schema-valid test data for validating Excel refresh and transformation performance. Its defaults create:
+`New-LocalAdminSolutionStressTestData.ps1` creates deterministic, schema-valid test data for validating Excel refresh and transformation performance. Its defaults create:
 
 - 10,008 `LocalAdminCollection` rows across 834 synthetic computers.
 - 5,004 linked `AdminUserNames` observations.
@@ -353,25 +361,25 @@ For the narrowest access, use one **Add + Update** token for `-Execute`, a separ
 Run a dry run first:
 
 ```powershell
-pwsh.exe -NoProfile -File .\New-WriteAdminsStressTestData.ps1
+pwsh.exe -NoProfile -File .\New-LocalAdminSolutionStressTestData.ps1
 ```
 
 Write the entities by passing the target storage account and SAS token:
 
 ```powershell
-pwsh.exe -NoProfile -File .\New-WriteAdminsStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -Execute
+pwsh.exe -NoProfile -File .\New-LocalAdminSolutionStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -Execute
 ```
 
 Add deterministic reconciliation cases, including SID fallbacks, a newer AD rename candidate, and a legacy duplicate RowKey:
 
 ```powershell
-pwsh.exe -NoProfile -File .\New-WriteAdminsStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -IncludeReconciliationScenarios -Execute
+pwsh.exe -NoProfile -File .\New-LocalAdminSolutionStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -IncludeReconciliationScenarios -Execute
 ```
 
 Generate exactly 5,000 main rows and include specific Microsoft Entra groups for runbook validation:
 
 ```powershell
-pwsh.exe -NoProfile -File .\New-WriteAdminsStressTestData.ps1 `
+pwsh.exe -NoProfile -File .\New-LocalAdminSolutionStressTestData.ps1 `
    -StorageAccountName '<storage-account-name>' `
    -SasToken '<endpoint-sas-token>' `
    -EntryCount 5000 `
@@ -382,7 +390,7 @@ pwsh.exe -NoProfile -File .\New-WriteAdminsStressTestData.ps1 `
 The defaults exceed 10,000 main rows because 834 computers multiplied by 12 entries equals 10,008. The following tested configuration creates exactly 20,000 main rows:
 
 ```powershell
-pwsh.exe -NoProfile -File .\New-WriteAdminsStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -ComputerCount 1000 -EntriesPerComputer 20 -Execute
+pwsh.exe -NoProfile -File .\New-LocalAdminSolutionStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -ComputerCount 1000 -EntriesPerComputer 20 -Execute
 ```
 
 The generated keys and names are deterministic. Running the command again replaces the same entities rather than creating duplicates. Synthetic computer names start with `STRESS`, user names start with `StressUsr`, and group names start with `StressGroup`.
@@ -394,13 +402,13 @@ After generating test data, replace the workbook's `GetAzureAdminTable` query wi
 Preview removal of only the deterministic stress-test entities:
 
 ```powershell
-pwsh.exe -NoProfile -File .\New-WriteAdminsStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -RemoveStressData -WhatIf
+pwsh.exe -NoProfile -File .\New-LocalAdminSolutionStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -RemoveStressData -WhatIf
 ```
 
 Remove the stress-test entities while preserving collected device data:
 
 ```powershell
-pwsh.exe -NoProfile -File .\New-WriteAdminsStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -RemoveStressData
+pwsh.exe -NoProfile -File .\New-LocalAdminSolutionStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -RemoveStressData
 ```
 
 The script identifies generated rows by the `STRESS`, `StressUsr`, and `StressGroup` prefixes. It requests confirmation before deletion. Add `-Force` for unattended execution.
@@ -410,13 +418,13 @@ The script identifies generated rows by the `STRESS`, `StressUsr`, and `StressGr
 Preview removal of every entity in all three solution tables:
 
 ```powershell
-pwsh.exe -NoProfile -File .\New-WriteAdminsStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -ClearTables -WhatIf
+pwsh.exe -NoProfile -File .\New-LocalAdminSolutionStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -ClearTables -WhatIf
 ```
 
 Clear `LocalAdminCollection`, `AdminUserNames`, and `AdminGroups`:
 
 ```powershell
-pwsh.exe -NoProfile -File .\New-WriteAdminsStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -ClearTables
+pwsh.exe -NoProfile -File .\New-LocalAdminSolutionStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -ClearTables
 ```
 
 This operation retains the Azure Table resources but removes every entity they contain. It requests confirmation before deletion. Add `-Force` for unattended execution. The SAS token must include **Read** and **Delete** permissions as described in [SAS settings for stress testing](#sas-settings-for-stress-testing).

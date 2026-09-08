@@ -1,24 +1,34 @@
 <#
 .SYNOPSIS
-    Detects whether the device should run the Write-AdminsToAZTable remediation.
+    Detects whether the device should run the LocalAdminSolution remediation.
 .DESCRIPTION
     This detection script targets domain joined, Microsoft Entra joined, and hybrid joined devices.
-    Applicable devices always return noncompliant so the paired remediation can collect
-    local Administrators membership and upload the result to Azure Table Storage.
+    Applicable devices return noncompliant when no successful run timestamp exists or the configured
+    interval has elapsed. The paired remediation collects local Administrators membership and uploads
+    the result to Azure Table Storage.
+.PARAMETER RemediationIntervalHours
+    Number of hours between successful inventory uploads. Defaults to four hours.
 .NOTES
-    Version: 1.0
+    Version: 1.1
     Author: Martin Himken
-    Original script name: Detect-Write-AdminsToAZTable.ps1
+    Original script name: Detect-LocalAdminSolution.ps1
     Initial creation date: 2026-08-30
-    Last change: 2026-09-02
-    Changes: Added the required script metadata header.
+    Last change: 2026-09-08
+    Changes: Added registry-backed interval gating for successful remediation runs.
 .LINK
     ..\changelog.md
 #>
 
+param(
+    [ValidateRange(1, 8760)]
+    [int]$RemediationIntervalHours = 4
+)
+
 $DomainName = ''
 $MaxRetries = 3
 $RetryDelaySeconds = 5
+$StateRegistryPath = 'HKLM:\Software\LocalAdminSolution'
+$LastSuccessfulRunValueName = 'LastSuccessfulRunUtc'
 
 $ErrorActionPreference = 'Stop'
 
@@ -61,7 +71,25 @@ try {
         exit 0
     }
 
-    Write-Output 'NONCOMPLIANT: Device is applicable and should run Write-AdminsToAZTable remediation.'
+    $lastSuccessfulRunText = [string](Get-ItemPropertyValue -LiteralPath $StateRegistryPath -Name $LastSuccessfulRunValueName -ErrorAction SilentlyContinue)
+    $lastSuccessfulRunUtc = [datetime]::MinValue
+    $hasValidTimestamp = [datetime]::TryParseExact(
+        $lastSuccessfulRunText,
+        'o',
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal,
+        [ref]$lastSuccessfulRunUtc
+    )
+
+    if ($hasValidTimestamp) {
+        $nextRunUtc = $lastSuccessfulRunUtc.AddHours($RemediationIntervalHours)
+        if ([datetime]::UtcNow -lt $nextRunUtc) {
+            Write-Output ('COMPLIANT: Last successful LocalAdminSolution run was {0}; next run is due at {1}.' -f $lastSuccessfulRunUtc.ToString('o'), $nextRunUtc.ToString('o'))
+            exit 0
+        }
+    }
+
+    Write-Output ('NONCOMPLIANT: LocalAdminSolution inventory is due; the successful-run interval is {0} hours.' -f $RemediationIntervalHours)
     exit 1
 } catch {
     Write-Output "ERROR: Detection failed. $($_.Exception.Message)"

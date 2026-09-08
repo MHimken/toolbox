@@ -8,12 +8,12 @@
     three Azure Tables using SID-backed keys. Previously reported members that are no longer found
     are retained in the main table with Removed set to 1.
 .NOTES
-    Version: 2.5
+    Version: 2.6
     Author: Martin Himken
-    Original script name: Remediate-Write-AdminsToAZTable.ps1
+    Original script name: Remediate-LocalAdminSolution.ps1
     Initial creation date: 2026-08-30
-    Last change: 2026-09-02
-    Changes: Suppresses unchanged lookup writes and submits newer name candidates for reconciliation.
+    Last change: 2026-09-08
+    Changes: Records a registry timestamp after a successful inventory upload.
 .LINK
     ..\changelog.md
 #>
@@ -26,6 +26,8 @@ $storageAccountName = '<storage-account-name>'
 $MainTable = 'LocalAdminCollection'
 $AdminUserNames = 'AdminUserNames'
 $AdminGroups = 'AdminGroups'
+$StateRegistryPath = 'HKLM:\Software\LocalAdminSolution'
+$LastSuccessfulRunValueName = 'LastSuccessfulRunUtc'
 
 $ErrorActionPreference = 'Stop'
 
@@ -1442,6 +1444,20 @@ function Write-EntitySet {
     }
 }
 
+function Set-LastSuccessfulRunTimestamp {
+    param(
+        [Parameter(Mandatory = $true)]
+        [datetime]$Timestamp
+    )
+
+    if (-not (Test-Path -LiteralPath $StateRegistryPath)) {
+        $null = New-Item -Path $StateRegistryPath -ItemType Directory -Force
+    }
+
+    $timestampText = $Timestamp.ToUniversalTime().ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+    $null = New-ItemProperty -LiteralPath $StateRegistryPath -Name $LastSuccessfulRunValueName -Value $timestampText -PropertyType String -Force
+}
+
 try {
     $joinState = Get-JoinState
 
@@ -1511,6 +1527,7 @@ try {
     Write-LookupEntitySet -TableName $AdminUserNames -LookupType User -Entities $script:UserEntities -Token $sanitizedSasToken
     Write-LookupEntitySet -TableName $AdminGroups -LookupType Group -Entities $script:GroupEntities -Token $sanitizedSasToken
     Write-EntitySet -TableName $MainTable -Entities $script:MainEntities -Token $sanitizedSasToken
+    Set-LastSuccessfulRunTimestamp -Timestamp ([datetime]::UtcNow)
 
     Write-Output ('COMPLIANT: Uploaded {0} main rows; created {1} lookup rows, updated {2} candidates, and skipped {3} unchanged lookup rows.' -f $script:MainEntities.Count, $script:LookupRowsCreated, $script:LookupCandidatesUpdated, $script:LookupRowsSkipped)
     exit 0

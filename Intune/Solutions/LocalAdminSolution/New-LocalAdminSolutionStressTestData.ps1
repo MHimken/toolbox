@@ -3,7 +3,7 @@
     Creates deterministic Azure Table entities for Excel Power Query stress testing.
 .DESCRIPTION
     Generates linked local administrator, user, and group entities across multiple synthetic
-    computers. The generated entities follow the Write-AdminsToAZTable schema and are upserted
+    computers. The generated entities follow the LocalAdminSolution schema and are upserted
     into the configured Azure Tables when Execute is specified. Repeated runs update the same
     deterministic entities. The script can also remove generated stress-test entities or clear
     every entity from all three solution tables.
@@ -104,7 +104,7 @@ function Initialize-Script {
     }
 
     $script:DateTime = Get-Date -Format 'yyyy-MM-ddTHH-mm-ss'
-    $definedScriptName = 'New-WriteAdminsStressTestData'
+    $definedScriptName = 'New-LocalAdminSolutionStressTestData'
     $sanitizedScriptName = $definedScriptName -replace '\s+', ''
     if (-not $LogFile) {
         $script:ResolvedLogFile = "$($sanitizedScriptName)_$($script:DateTime).log"
@@ -133,7 +133,7 @@ function Get-ConfiguredSasToken {
         return $resolvedToken
     }
 
-    $remediationPath = Join-Path -Path $PSScriptRoot -ChildPath 'Remediation\Remediate-Write-AdminsToAZTable.ps1'
+    $remediationPath = Join-Path -Path $PSScriptRoot -ChildPath 'Remediation\Remediate-LocalAdminSolution.ps1'
     if (-not (Test-Path -LiteralPath $remediationPath)) {
         throw 'SasToken was not provided and the remediation script was not found in the solution folder.'
     }
