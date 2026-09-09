@@ -149,7 +149,7 @@ pwsh.exe -NoProfile -File .\HTML\Export-LocalAdminResolvedHtml.ps1 -StorageAccou
 
 The generated report embeds inventory data but not the SAS token, hides the live connection controls, never reads or writes saved connection data, and requires regeneration to obtain newer data. Protect the HTML according to the sensitivity of the reported device and account information.
 
-The hosted [Local administrator inventory demo](https://intune.best/LocalAdminResolvedDemo.html) is a publishable snapshot generated from 20,000 deterministic synthetic main rows. It contains no SAS token or real inventory data and can be opened without an Azure connection. The generated `HTML\LocalAdminResolvedDemo.html` file can be uploaded to replace the hosted version.
+The hosted [Local administrator inventory demo](https://intune.best/LocalAdminResolvedDemo.html) is a publishable snapshot generated from 5,000 deterministic synthetic main rows. It contains no SAS token or real inventory data and can be opened without an Azure connection. The generated `HTML\LocalAdminResolvedDemo.html` file can be uploaded to replace the hosted version.
 
 Regenerate the demo after loading the synthetic stress-test data:
 
@@ -336,8 +336,12 @@ Source codes are `L` for local, `E` for Microsoft Entra ID, and `A` for Active D
 - Deterministically distributed removed entries for status filtering and demonstrations.
 - Localized Administrators group names in English, German, French, Spanish, Italian, and Dutch.
 - Report timestamps distributed across a six-hour period.
+- Fictional international Contoso names such as `BER-LT-0001`, `ines.davis-2560`, and `GG-Amsterdam-Deployment-Operators-5yc1u`.
+- Reserved `contoso.example` UPNs for non-local users; no production identities or routable mail domains are used.
 
 Use `-EntryCount` to select an exact main-table stress level of `5000`, `10000`, `15000`, or `20000` rows. The script distributes those rows across the required number of computers. Use `-EntraGroupObjectIds` to include specific Microsoft Entra groups whose names were unavailable locally. Duplicate object IDs are ignored; when IDs are supplied, other synthetic principals use local or Active Directory identities so reconciliation output remains focused on those groups.
+
+Realistic naming is the default. Pass `-LegacyNaming` to reproduce the original `STRESS*`, `StressUsr*`, `StressGroup*`, and `stress.example` values. Both profiles preserve the same deterministic SIDs, direct/transitive paths, row counts, removed-state distribution, and repeatable upsert keys.
 
 ### SAS settings for stress testing
 
@@ -393,7 +397,14 @@ The defaults exceed 10,000 main rows because 834 computers multiplied by 12 entr
 pwsh.exe -NoProfile -File .\New-LocalAdminSolutionStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -ComputerCount 1000 -EntriesPerComputer 20 -Execute
 ```
 
-The generated keys and names are deterministic. Running the command again replaces the same entities rather than creating duplicates. Synthetic computer names start with `STRESS`, user names start with `StressUsr`, and group names start with `StressGroup`.
+The generated keys and names are deterministic. Running the same profile again replaces the same entities rather than creating duplicates. Every generated main and lookup entity includes `StressData = 1` and a `SyntheticProfile` value so cleanup does not depend on realistic display names.
+
+Changing between realistic and legacy naming changes lookup RowKeys. Remove the existing stress data before uploading the other profile to avoid retaining both names for the same synthetic SID:
+
+```powershell
+pwsh.exe -NoProfile -File .\New-LocalAdminSolutionStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<read-delete-sas-token>' -RemoveStressData -Force
+pwsh.exe -NoProfile -File .\New-LocalAdminSolutionStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<add-update-sas-token>' -EntryCount 5000 -Execute
+```
 
 After generating test data, replace the workbook's `GetAzureAdminTable` query with `Excel\GetAzureAdminTable.pq` before refreshing. This version follows Azure Table continuation headers and retrieves every page beyond 1,000 entities.
 
@@ -411,7 +422,7 @@ Remove the stress-test entities while preserving collected device data:
 pwsh.exe -NoProfile -File .\New-LocalAdminSolutionStressTestData.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<sas-token>' -RemoveStressData
 ```
 
-The script identifies generated rows by the `STRESS`, `StressUsr`, and `StressGroup` prefixes. It requests confirmation before deletion. Add `-Force` for unattended execution.
+The script identifies current generated rows through `StressData = 1`. It also recognizes the legacy `STRESS`, `StressUsr`, and `StressGroup` prefixes so datasets uploaded before marker-based main rows remain removable. Lookup rows are additionally matched by the stable principal SIDs referenced from synthetic main rows, which keeps cleanup effective after the reconciliation runbook renames or replaces lookup rows. A lookup SID that is also referenced by non-synthetic inventory is protected from SID-derived deletion. The script requests confirmation before deletion. Add `-Force` for unattended execution.
 
 ## Clear all table data
 

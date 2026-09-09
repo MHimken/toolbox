@@ -2,6 +2,12 @@
 
 ## 2026
 
+### 9th of September
+
+* Improved synthetic data realism: stress generation now defaults to deterministic fictional international device, user, UPN, and group names while preserving exact row counts and direct/transitive access paths.
+* Added naming compatibility: `-LegacyNaming` reproduces the original stress names, and all newly generated entities carry explicit synthetic profile markers.
+* Improved cleanup compatibility: stress removal now uses explicit markers and stable principal SIDs while retaining legacy prefix detection and protecting identities referenced by non-synthetic inventory.
+
 ### 8th of September
 
 * Renamed the detection, remediation, and stress-data scripts to use the `LocalAdminSolution` name and updated all repository references.

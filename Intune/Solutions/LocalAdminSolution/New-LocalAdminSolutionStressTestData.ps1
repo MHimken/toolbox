@@ -29,8 +29,12 @@
     Optional Microsoft Entra group object IDs to include as unresolved local group names. Duplicate
     IDs are ignored. When supplied, other synthetic principals use local or domain identities so
     runbook validation is limited to the specified Entra groups.
+.PARAMETER LegacyNaming
+    Uses the original STRESS, StressUsr, StressGroup, and stress.example naming profile instead of
+    the default fictional Contoso international profile.
 .PARAMETER RemoveStressData
-    Removes entities identified by the deterministic stress-test computer, user, and group names.
+    Removes explicitly marked synthetic entities and legacy entities identified by their original
+    deterministic computer, user, and group name prefixes.
 .PARAMETER ClearTables
     Removes every entity from LocalAdminCollection, AdminUserNames, and AdminGroups. The tables
     themselves are retained.
@@ -59,6 +63,7 @@ param(
     [switch]$Execute,
     [switch]$IncludeReconciliationScenarios,
     [guid[]]$EntraGroupObjectIds = @(),
+    [switch]$LegacyNaming,
     [switch]$RemoveStressData,
     [switch]$ClearTables,
     [switch]$Force,
@@ -189,6 +194,95 @@ function ConvertTo-EntraSid {
         [BitConverter]::ToUInt32($bytes, 12)
 }
 
+function Get-SyntheticComputerName {
+    param([int]$Index)
+
+    if ($LegacyNaming) {
+        return 'STRESS{0:D4}' -f $Index
+    }
+
+    $sites = @('BER', 'LON', 'AMS', 'PAR', 'MAD', 'MIL', 'WAW', 'DUB', 'ZRH', 'VIE')
+    $deviceTypes = @('LT', 'WS', 'VDI', 'KSK')
+    $site = $sites[($Index - 1) % $sites.Count]
+    $deviceType = $deviceTypes[[int][math]::Floor(($Index - 1) / $sites.Count) % $deviceTypes.Count]
+    return '{0}-{1}-{2:D4}' -f $site, $deviceType, $Index
+}
+
+function ConvertTo-Base36 {
+    param([long]$Value)
+
+    $characters = '0123456789abcdefghijklmnopqrstuvwxyz'
+    if ($Value -eq 0) {
+        return '0'
+    }
+
+    $result = ''
+    while ($Value -gt 0) {
+        $result = $characters[[int]($Value % 36)] + $result
+        $Value = [math]::Floor($Value / 36)
+    }
+    return $result
+}
+
+function Get-SyntheticUserName {
+    param([int]$Index)
+
+    if ($LegacyNaming) {
+        return 'StressUsr{0:D6}' -f $Index
+    }
+
+    $firstNames = @('anna', 'ben', 'clara', 'daniel', 'elena', 'felix', 'grace', 'henry', 'ines', 'jonas', 'karla', 'lucas', 'maya', 'noah', 'olivia', 'paul', 'quinn', 'sara', 'theo', 'zoe')
+    $lastNames = @('adler', 'bauer', 'becker', 'brown', 'chen', 'davis', 'evans', 'fischer', 'garcia', 'hughes', 'ivanov', 'jensen', 'keller', 'khan', 'lewis', 'martin', 'meyer', 'novak', 'patel', 'rossi', 'schmidt', 'smith', 'taylor', 'wagner', 'walker', 'wang', 'wilson')
+    $firstName = $firstNames[$Index % $firstNames.Count]
+    $lastName = $lastNames[[int][math]::Floor($Index / $firstNames.Count) % $lastNames.Count]
+    $suffix = ConvertTo-Base36 -Value $Index
+    $nameStem = '{0}.{1}' -f $firstName, $lastName
+    $maximumStemLength = 19 - $suffix.Length
+    if ($nameStem.Length -gt $maximumStemLength) {
+        $nameStem = $nameStem.Substring(0, $maximumStemLength)
+    }
+    return '{0}-{1}' -f $nameStem, $suffix
+}
+
+function Get-SyntheticGroupName {
+    param(
+        [int]$Index,
+        [ValidateSet('L', 'E', 'A')]
+        [string]$Source
+    )
+
+    if ($LegacyNaming) {
+        return 'StressGroup{0:D6}' -f $Index
+    }
+
+    $sites = @('Berlin', 'London', 'Amsterdam', 'Paris', 'Madrid', 'Milan', 'Warsaw', 'Dublin', 'Zurich', 'Vienna')
+    $roles = @('Endpoint-Admins', 'Helpdesk-Tier2', 'Workplace-Engineers', 'Field-Support', 'Deployment-Operators', 'Security-Operations')
+    $site = $sites[$Index % $sites.Count]
+    $role = $roles[[int][math]::Floor($Index / $sites.Count) % $roles.Count]
+    $suffix = ConvertTo-Base36 -Value $Index
+    $groupName = switch ($Source) {
+        'L' { 'Local-{0}-{1}-{2}' -f $site, $role, $suffix }
+        'E' { 'Cloud-{0}-{1}-{2}' -f $site, $role, $suffix }
+        default { 'GG-{0}-{1}-{2}' -f $site, $role, $suffix }
+    }
+    return $groupName
+}
+
+function Get-SyntheticUserPrincipalName {
+    param(
+        [string]$SamAccountName,
+        [ValidateSet('L', 'E', 'A')]
+        [string]$Source
+    )
+
+    if ($Source -eq 'L') {
+        return 'N/A'
+    }
+
+    $domainName = if ($LegacyNaming) { 'stress.example' } else { 'contoso.example' }
+    return '{0}@{1}' -f $SamAccountName.ToLowerInvariant(), $domainName
+}
+
 function New-TestEntitySets {
     param(
         [Parameter(Mandatory = $true)]
@@ -223,7 +317,7 @@ function New-TestEntitySets {
 
     for ($computerIndex = 1; $computerIndex -le $resolvedNumberOfComputers; $computerIndex++) {
         $computerSid = Get-SyntheticSid -Type Computer -Index $computerIndex
-        $computerName = 'STRESS{0:D4}' -f $computerIndex
+        $computerName = Get-SyntheticComputerName -Index $computerIndex
         $joinCode = [string](1 + (($computerIndex - 1) % 3))
         $administratorGroupName = $administratorGroupNames[($computerIndex - 1) % $administratorGroupNames.Count]
         $entriesForComputer = if ($TargetEntryCount -gt 0) {
@@ -258,6 +352,8 @@ function New-TestEntitySets {
                 LocalAdminGroupName              = $administratorGroupName
                 MembershipType                   = $membershipType
                 Removed                          = if (($principalIndex * 37) % 19 -eq 0) { 1 } else { 0 }
+                StressData                       = 1
+                SyntheticProfile                 = if ($LegacyNaming) { 'LegacyStress' } else { 'ContosoInternational' }
             }
             if ($membershipType -eq 'Transitive') {
                 $mainEntity.AssignedThroughGroupID = $assignedThroughGroupId
@@ -279,18 +375,20 @@ function New-TestEntitySets {
                         default { $scenarioBaseIndex + 7 }
                     }
                     $groupSid = Get-SyntheticSid -Type Group -Index $groupPrincipalIndex -Source $source
-                    $groupName = 'StressGroup{0:D6}' -f $groupPrincipalIndex
+                    $groupName = Get-SyntheticGroupName -Index $groupPrincipalIndex -Source $source
                 }
                 if ($IncludeReconciliationScenarios -and $principalIndex -eq 4) {
+                    $legacyGroupName = if ($LegacyNaming) { 'LegacyStressGroup000004' } else { 'GG-Berlin-Legacy-Endpoint-Admins' }
                     $groupEntities.Add([pscustomobject][ordered]@{
                         TableName    = 'AdminGroups'
                         PartitionKey = $groupSid
-                        RowKey       = 'LegacyStressGroup000004'
+                        RowKey       = $legacyGroupName
                         Entity       = [pscustomobject][ordered]@{
                             PartitionKey     = $groupSid
-                            RowKey           = 'LegacyStressGroup000004'
+                            RowKey           = $legacyGroupName
                             LocalOrEntraOrAD = $source
                             StressData       = 1
+                            SyntheticProfile = if ($LegacyNaming) { 'LegacyStress' } else { 'ContosoInternational' }
                         }
                     })
                 }
@@ -308,6 +406,7 @@ function New-TestEntitySets {
                         ObservedAt       = $reportTimestamp.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
                         ResolutionState  = if ($source -eq 'E') { 'EntraPending' } else { 'Resolved' }
                         StressData       = 1
+                        SyntheticProfile = if ($LegacyNaming) { 'LegacyStress' } else { 'ContosoInternational' }
                     }
                 })
             } else {
@@ -318,7 +417,7 @@ function New-TestEntitySets {
                     $userPrincipalIndex = $scenarioBaseIndex + 8
                 }
                 $userSid = Get-SyntheticSid -Type User -Index $userPrincipalIndex -Source $source
-                $samAccountName = 'StressUsr{0:D6}' -f $userPrincipalIndex
+                $samAccountName = Get-SyntheticUserName -Index $userPrincipalIndex
                 if ($IncludeReconciliationScenarios -and $source -eq 'E' -and $principalIndex -eq 2) {
                     $samAccountName = $userSid
                 } elseif ($IncludeReconciliationScenarios -and $source -eq 'A' -and $principalIndex -eq 3) {
@@ -337,20 +436,22 @@ function New-TestEntitySets {
                     Entity          = [pscustomobject][ordered]@{
                         PartitionKey      = $userSid
                         RowKey            = $samAccountName
-                        UserPrincipalName = if ($source -eq 'L') { 'N/A' } else { '{0}@stress.example' -f $samAccountName.ToLowerInvariant() }
+                        UserPrincipalName = Get-SyntheticUserPrincipalName -SamAccountName $samAccountName -Source $source
                         LocalOrEntraOrAD  = $source
                         'ObservedAt@odata.type' = 'Edm.DateTime'
                         ObservedAt        = $reportTimestamp.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
                         ResolutionState   = if ($source -eq 'E') { 'EntraPending' } elseif ($samAccountName -eq $userSid) { 'DomainUnavailable' } else { 'Resolved' }
                         StressData        = 1
+                        SyntheticProfile  = if ($LegacyNaming) { 'LegacyStress' } else { 'ContosoInternational' }
                     }
                 })
                 if ($IncludeReconciliationScenarios -and $source -eq 'A' -and $principalIndex -eq 6) {
                     $candidateEntity = $userEntities[$userEntities.Count - 1].Entity
+                    $candidateSamAccountName = if ($LegacyNaming) { 'RenamedStressUsr000006' } else { 'sara.meyer006' }
                     $candidateEntity | Add-Member -NotePropertyName 'CandidateObservedAt@odata.type' -NotePropertyValue 'Edm.DateTime'
                     $candidateEntity | Add-Member -NotePropertyName CandidateObservedAt -NotePropertyValue $generationTime.AddMinutes(5).ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
-                    $candidateEntity | Add-Member -NotePropertyName CandidateSamAccountName -NotePropertyValue 'RenamedStressUsr000006'
-                    $candidateEntity | Add-Member -NotePropertyName CandidateUserPrincipalName -NotePropertyValue 'renamedstressusr000006@stress.example'
+                    $candidateEntity | Add-Member -NotePropertyName CandidateSamAccountName -NotePropertyValue $candidateSamAccountName
+                    $candidateEntity | Add-Member -NotePropertyName CandidateUserPrincipalName -NotePropertyValue (Get-SyntheticUserPrincipalName -SamAccountName $candidateSamAccountName -Source A)
                 }
             }
 
@@ -419,6 +520,29 @@ function Get-TableEntities {
     } while (-not [string]::IsNullOrWhiteSpace($nextPartitionKey))
 
     return $entities
+}
+
+function Test-IsStressDataEntity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Main', 'User', 'Group')]
+        [string]$EntityType,
+        [Parameter(Mandatory = $true)]
+        [psobject]$Entity,
+        [Parameter(Mandatory = $true)]
+        [string]$RowKey
+    )
+
+    if ($Entity.StressData -eq 1) {
+        return $true
+    }
+
+    $isStressData = switch ($EntityType) {
+        'Main' { [string]$Entity.Computername -like 'STRESS*' }
+        'User' { $RowKey -like 'StressUsr*' }
+        'Group' { $RowKey -like '*StressGroup*' }
+    }
+    return $isStressData
 }
 
 function Invoke-TableEntityRequests {
@@ -549,9 +673,46 @@ try {
         $groupEntities = @(Get-TableEntities -TableName 'AdminGroups' -AccountName $StorageAccountName -Token $resolvedSasToken)
 
         if ($RemoveStressData) {
-            $mainEntities = @($mainEntities | Where-Object { $_.Entity.Computername -like 'STRESS*' })
-            $userEntities = @($userEntities | Where-Object { $_.Entity.StressData -eq 1 -or $_.RowKey -like 'StressUsr*' })
-            $groupEntities = @($groupEntities | Where-Object { $_.Entity.StressData -eq 1 -or $_.RowKey -like '*StressGroup*' })
+            $allMainEntities = $mainEntities
+            $mainEntities = @($allMainEntities | Where-Object { Test-IsStressDataEntity -EntityType Main -Entity $_.Entity -RowKey $_.RowKey })
+            $stressMainEntityKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            foreach ($mainEntity in $mainEntities) {
+                [void]$stressMainEntityKeys.Add(('{0}|{1}' -f $mainEntity.PartitionKey, $mainEntity.RowKey))
+            }
+            $productionPrincipalIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            foreach ($mainEntity in $allMainEntities) {
+                if ($stressMainEntityKeys.Contains(('{0}|{1}' -f $mainEntity.PartitionKey, $mainEntity.RowKey))) {
+                    continue
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$mainEntity.Entity.PrincipalID)) {
+                    [void]$productionPrincipalIds.Add([string]$mainEntity.Entity.PrincipalID)
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$mainEntity.Entity.AssignedThroughGroupID)) {
+                    [void]$productionPrincipalIds.Add([string]$mainEntity.Entity.AssignedThroughGroupID)
+                }
+            }
+
+            $stressUserIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            $stressGroupIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            foreach ($mainEntity in $mainEntities) {
+                if ([string]$mainEntity.Entity.PrincipalType -eq 'User') {
+                    [void]$stressUserIds.Add([string]$mainEntity.Entity.PrincipalID)
+                } elseif ([string]$mainEntity.Entity.PrincipalType -eq 'Group') {
+                    [void]$stressGroupIds.Add([string]$mainEntity.Entity.PrincipalID)
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$mainEntity.Entity.AssignedThroughGroupID)) {
+                    [void]$stressGroupIds.Add([string]$mainEntity.Entity.AssignedThroughGroupID)
+                }
+            }
+
+            $userEntities = @($userEntities | Where-Object {
+                -not $productionPrincipalIds.Contains($_.PartitionKey) -and
+                ((Test-IsStressDataEntity -EntityType User -Entity $_.Entity -RowKey $_.RowKey) -or $stressUserIds.Contains($_.PartitionKey))
+            })
+            $groupEntities = @($groupEntities | Where-Object {
+                -not $productionPrincipalIds.Contains($_.PartitionKey) -and
+                ((Test-IsStressDataEntity -EntityType Group -Entity $_.Entity -RowKey $_.RowKey) -or $stressGroupIds.Contains($_.PartitionKey))
+            })
             $operationName = 'Remove stress-test data'
         } else {
             $operationName = 'Clear all solution table data'
