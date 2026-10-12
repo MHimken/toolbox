@@ -1,0 +1,17 @@
+Options -Indexes
+
+<IfModule mod_headers.c>
+  Header always set Cross-Origin-Opener-Policy "same-origin-allow-popups"
+</IfModule>
+
+<FilesMatch "^(config\.private\.json|local\.settings\.json|.*\.secrets\.json|\.env.*)$">
+  Require all denied
+</FilesMatch>
+
+<Files "config.json">
+  Require all granted
+  <IfModule mod_headers.c>
+    Header set Cache-Control "no-store, max-age=0"
+    Header set X-Content-Type-Options "nosniff"
+  </IfModule>
+</Files>

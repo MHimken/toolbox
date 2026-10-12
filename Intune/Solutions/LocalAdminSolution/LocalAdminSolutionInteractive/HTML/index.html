@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>Local administrator inventory</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div>
+        <h1>Local administrator inventory</h1>
+        <p class="generated" id="generatedAt"></p>
+      </div>
+      <div class="header-count" id="headerCount"><strong id="visibleCount">0</strong><span>matching rows</span></div>
+    </div>
+  </header>
+  <main>
+    <section class="mode-bar" aria-label="Report mode">
+      <div>
+        <strong>Report and personal review</strong>
+        <span>Governance approvals remain authoritative and separate from personal acknowledgement.</span>
+      </div>
+      <button class="command secondary" id="adminModeButton" type="button" aria-pressed="false" disabled>Enter Admin mode</button>
+    </section>
+    <p class="admin-status" id="adminModeStatus" aria-live="polite"></p>
+    <section class="connection" id="connectionPanel" aria-labelledby="connectionTitle" hidden>
+      <div class="connection-grid">
+        <label id="connectionTitle">Storage account name<input id="storageAccountName" type="text" placeholder="Example: storageaccount" autocomplete="off" spellcheck="false"></label>
+        <label>Read-only SAS token<input id="sasToken" type="password" placeholder="sv=..." autocomplete="off"></label>
+        <label>Governance storage account, optional<input id="governanceStorageAccountName" type="text" placeholder="Example: storageaccountgov" autocomplete="off" spellcheck="false"></label>
+        <label>Governance read-only SAS, optional<input id="governanceSasToken" type="password" placeholder="sv=..." autocomplete="off"></label>
+        <button class="command" id="refreshButton" type="button">Refresh from Azure</button>
+      </div>
+      <div class="connection-options">
+        <label class="toggle-control"><input id="rememberConnection" type="checkbox">Remember connection on this device</label>
+        <button class="forget-connection" id="forgetConnection" type="button">Forget saved connection</button>
+      </div>
+      <p class="refresh-note" id="refreshWarning" role="alert" hidden>Please do not click Refresh repeatedly. Azure Table pagination can take a while; wait patiently until this message changes.</p>
+      <p class="host-config-status" id="hostConfigStatus"></p>
+      <p class="refresh-status" id="refreshStatus" aria-live="polite">No request has been sent. Data loads only when you click Refresh from Azure.</p>
+    </section>
+    <nav class="tabs" aria-label="Report views">
+      <button class="tab" type="button" data-view="summary" aria-selected="true">Local admins</button>
+      <button class="tab" type="button" data-view="users" aria-selected="false">User details</button>
+      <button class="tab" type="button" data-view="groups" aria-selected="false">Group details</button>
+      <button class="tab" type="button" data-view="devices" aria-selected="false">Stale devices</button>
+      <button class="tab" type="button" data-view="review" aria-selected="false">Review</button>
+      <button class="tab governance-tab" id="governanceTab" type="button" data-view="governance" aria-selected="false" disabled>Governance</button>
+      <button class="tab" type="button" data-view="settings" aria-selected="false">Settings</button>
+      <button class="tab" type="button" data-view="guidance" aria-selected="false">Usage guidance</button>
+    </nav>
+    <button class="back" id="backButton" type="button">Back to local admins</button>
+    <section class="summary-band" aria-label="Inventory totals">
+      <div class="metric"><span>Local admins</span><strong id="totalMain">0</strong></div>
+      <div class="metric"><span>Removed</span><strong id="totalRemoved">0</strong></div>
+      <div class="metric"><span>Computers</span><strong id="totalComputers">0</strong></div>
+      <div class="metric"><span>Users</span><strong id="totalUsers">0</strong></div>
+      <div class="metric"><span>Groups</span><strong id="totalGroups">0</strong></div>
+    </section>
+    <section class="toolbar" aria-label="Table controls">
+      <label class="search-field">Search all columns<input id="search" type="search" placeholder="Computer, SID, user, group..." autocomplete="off"></label>
+      <label id="joinField">Join state<select id="joinFilter"><option value="">All join states</option></select></label>
+      <label id="removedField">Status<select id="removedFilter"><option value="">All records</option><option value="0">Active</option><option value="1">Removed</option></select></label>
+      <label id="groupField">Computer layout<span class="toggle-control"><input id="groupToggle" type="checkbox" checked>Group by computer</span></label>
+      <label id="staleField" hidden>Stale after days<input id="staleThreshold" type="number" min="1" step="1" value="90"></label>
+      <label>Rows per page<select id="pageSize"><option>25</option><option selected>50</option><option>100</option><option>250</option></select></label>
+      <div class="actions"><button class="command secondary" id="proposeRuleButton" type="button" hidden disabled>Propose rule</button><button class="command secondary" id="resetButton" type="button">Reset filters</button><button class="command secondary" id="resetTableLayoutButton" type="button" title="Restore the original column order and widths for this view">Reset columns</button><button class="command" id="exportButton" type="button">Export CSV</button></div>
+    </section>
+    <div class="table-frame">
+      <table aria-label="Current report data">
+        <thead><tr id="tableHead"></tr></thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+      <div class="empty" id="emptyState" hidden>No rows match the current filters.</div>
+    </div>
+    <div class="pagination">
+      <span class="page-info" id="pageInfo"></span>
+      <div class="page-controls"><button id="firstPage" type="button" title="First page">|&lt;</button><button id="previousPage" type="button" title="Previous page">&lt;</button><button id="nextPage" type="button" title="Next page">&gt;</button><button id="lastPage" type="button" title="Last page">&gt;|</button></div>
+    </div>
+    <section class="content-panel" id="settingsPanel" hidden>
+      <h2>Settings</h2>
+      <p>These browser preferences are convenience state. They do not change organizational governance or deployment security controls.</p>
+      <div class="settings-grid">
+        <label>Default landing view<select id="defaultViewSetting"><option value="summary">Local admins</option><option value="devices">Stale devices</option><option value="review">Review</option><option value="governance">Governance</option></select></label>
+        <label>Default page size<select id="pageSizeSetting"><option>25</option><option>50</option><option>100</option><option>250</option></select></label>
+        <label>Timestamp display<select id="timeDisplaySetting"><option value="local">Browser local time</option><option value="utc">UTC</option></select></label>
+        <div class="number-setting">
+          <label for="staleThresholdSetting">Stale after days</label>
+          <input id="staleThresholdSetting" type="text" inputmode="numeric" pattern="[1-9][0-9]*" autocomplete="off">
+          <div class="number-suggestions" aria-label="Suggested stale thresholds">
+            <button type="button" data-number-target="staleThresholdSetting" data-number-value="30">30</button>
+            <button type="button" data-number-target="staleThresholdSetting" data-number-value="60">60</button>
+            <button type="button" data-number-target="staleThresholdSetting" data-number-value="90">90</button>
+            <button type="button" data-number-target="staleThresholdSetting" data-number-value="180">180</button>
+          </div>
+        </div>
+        <div class="number-setting">
+          <label for="reviewWindowSetting">Review active within days</label>
+          <input id="reviewWindowSetting" type="text" inputmode="numeric" pattern="[1-9][0-9]*" autocomplete="off">
+          <div class="number-suggestions" aria-label="Suggested review windows">
+            <button type="button" data-number-target="reviewWindowSetting" data-number-value="30">30</button>
+            <button type="button" data-number-target="reviewWindowSetting" data-number-value="60">60</button>
+            <button type="button" data-number-target="reviewWindowSetting" data-number-value="90">90</button>
+            <button type="button" data-number-target="reviewWindowSetting" data-number-value="180">180</button>
+          </div>
+        </div>
+        <label>CSV filename prefix<input id="csvPrefixSetting" type="text" maxlength="40" pattern="[A-Za-z0-9_\-]+" autocomplete="off"></label>
+        <label class="toggle-control settings-toggle"><input id="groupByComputerSetting" type="checkbox">Group local admins by computer</label>
+      </div>
+      <button class="command settings-save" id="saveSettingsButton" type="button">Save local settings</button>
+      <p class="settings-status" id="settingsStatus" aria-live="polite"></p>
+      <hr>
+      <h3>Cloud profile</h3>
+      <p>Sign in with Microsoft Entra to synchronize these settings through the protected backend. OAuth access tokens remain in browser memory and are not written to browser storage.</p>
+      <p class="profile-status" id="cloudProfileStatus" aria-live="polite">Cloud profile synchronization is not configured.</p>
+      <div class="settings-actions">
+        <button class="command" id="signInButton" type="button" disabled>Sign in with Microsoft Entra</button>
+        <button class="command secondary" id="syncProfileButton" type="button" disabled>Reload cloud profile</button>
+        <button class="command secondary" id="signOutButton" type="button" disabled>Sign out</button>
+      </div>
+      <hr>
+      <h3>Recovery profile</h3>
+      <p>A recovery code is a bearer secret. Anyone who has it can restore the profile. Save it in an approved password manager. When the protected backend is configured, generating a code creates a cloud profile and importing a code loads its existing settings.</p>
+      <p class="profile-status" id="profileStatus" aria-live="polite"></p>
+      <div class="recovery-grid">
+        <label>Import recovery code<input id="recoveryCodeInput" type="password" autocomplete="off" spellcheck="false" placeholder="43-character recovery code"></label>
+        <label class="toggle-control settings-toggle"><input id="rememberRecoveryProfile" type="checkbox">Remember the recovery code in this browser profile</label>
+      </div>
+      <div class="settings-actions">
+        <button class="command" id="generateRecoveryButton" type="button">Generate recovery profile</button>
+        <button class="command secondary" id="importRecoveryButton" type="button">Import recovery profile</button>
+        <button class="command secondary" id="forgetRecoveryButton" type="button">Forget this browser</button>
+      </div>
+      <div class="recovery-result" id="recoveryResult" hidden>
+        <strong>Save this recovery code now. It will not be shown again after this page is closed.</strong>
+        <code id="recoveryCodeOutput"></code>
+      </div>
+    </section>
+    <section class="content-panel" id="guidancePanel" hidden>
+      <h2>Usage guidance</h2>
+      <p>The report shows observed local-administrator access paths. It does not prove that a device is currently reachable or that a requested change was completed.</p>
+      <ul>
+        <li>Direct entries are assigned on the endpoint. Transitive entries come through a directly assigned group.</li>
+        <li>Governance approval is organization-wide. Personal acknowledgement only changes the current user's review queue.</li>
+        <li>Review current mismatches daily during incidents, weekly for normal operations, and monthly for formal exception governance.</li>
+        <li>CSV exports contain protected operational data. They include every filtered row in the current sort order, not only the visible page.</li>
+        <li>Governance proposals start as pending approval. Approving, rejecting, or revoking rules requires Admin mode, which the protected backend verifies through an app role, a Conditional Access authentication context, and a token issued within the last 30 minutes. Admin mode ends after 15 minutes without activity, on sign-out, or when the account changes.</li>
+        <li>A host-provided <code>config.json</code> contains public defaults only. Values used by this browser can always be observed and must never include credentials.</li>
+        <li>Use exact CORS origins where possible. An allow-all origin is available for controlled testing, but permits requests from any website.</li>
+      </ul>
+    </section>
+    <dialog class="admin-dialog" id="ruleDialog" aria-labelledby="ruleDialogTitle">
+      <form id="ruleForm" method="dialog" novalidate>
+        <h2 id="ruleDialogTitle">Propose governance rule</h2>
+        <p class="dialog-note">Proposals start as pending approval. A governance approver must activate them in Admin mode. Your own proposals need a second approver unless you hold the self-approval role.</p>
+        <div class="dialog-grid">
+          <label>Effect<select id="ruleEffect"><option>Allow</option><option>Deny</option></select></label>
+          <label>Principal type<select id="rulePrincipalType"><option>User</option><option>Group</option></select></label>
+          <label class="wide">Principal SID<input id="rulePrincipalSid" type="text" placeholder="S-1-5-21-..." autocomplete="off" spellcheck="false"></label>
+          <label>Principal source<select id="rulePrincipalSource"><option>Any</option><option>Local</option><option>Entra</option><option>AD</option></select></label>
+          <label>Membership<select id="ruleMembershipScope"><option>Any</option><option>Direct</option><option>Transitive</option></select></label>
+          <label class="wide">Assigned through group SID, optional<input id="ruleAssignedThroughGroupSid" type="text" placeholder="Requires Transitive membership" autocomplete="off" spellcheck="false"></label>
+          <label>Device scope<select id="ruleDeviceScopeType"><option value="Any">Any device</option><option value="ExactComputer">Exact computer</option><option value="ComputerPrefix">Computer name prefix</option></select></label>
+          <label>Device value<input id="ruleDeviceScopeValue" type="text" maxlength="64" autocomplete="off" spellcheck="false"></label>
+          <fieldset class="wide join-states"><legend>Allowed join states</legend><label class="toggle-control"><input id="ruleAllowedEntraJoined" type="checkbox" checked>Entra joined</label><label class="toggle-control"><input id="ruleAllowedHybridJoined" type="checkbox" checked>Hybrid joined</label><label class="toggle-control"><input id="ruleAllowedDomainJoined" type="checkbox" checked>Domain joined</label></fieldset>
+          <label>Maximum device age in days, optional<input id="ruleMaxDeviceAgeDays" type="text" inputmode="numeric" autocomplete="off"></label>
+          <label>Ticket reference, optional<input id="ruleTicketReference" type="text" maxlength="100" autocomplete="off"></label>
+          <label>Valid from, optional<input id="ruleValidFrom" type="datetime-local"></label>
+          <label>Valid until, optional<input id="ruleValidUntil" type="datetime-local"></label>
+          <label class="wide">Reason<textarea id="ruleReason" rows="3" maxlength="2000" placeholder="Business justification, at least 10 characters."></textarea></label>
+        </div>
+        <p class="dialog-preview" id="rulePreview" aria-live="polite"></p>
+        <p class="dialog-status" id="ruleFormStatus" role="alert"></p>
+        <div class="dialog-actions"><button class="command secondary" id="ruleCancelButton" type="button">Cancel</button><button class="command" id="ruleSubmitButton" type="submit">Submit proposal</button></div>
+      </form>
+    </dialog>
+    <dialog class="admin-dialog" id="reasonDialog" aria-labelledby="reasonDialogTitle">
+      <form id="reasonForm" method="dialog" novalidate>
+        <h2 id="reasonDialogTitle">Confirm</h2>
+        <p class="dialog-note" id="reasonDialogSummary"></p>
+        <label>Reason<textarea id="reasonInput" rows="3" maxlength="2000"></textarea></label>
+        <p class="dialog-status" id="reasonFormStatus" role="alert"></p>
+        <div class="dialog-actions"><button class="command secondary" id="reasonCancelButton" type="button">Cancel</button><button class="command" id="reasonSubmitButton" type="submit">Confirm</button></div>
+      </form>
+    </dialog>
+  </main>
+  <script id="reportData" type="application/json">__REPORT_DATA__</script>
+  <script src="vendor/msal-browser.min.js"></script>
+  <script src="vendor/msal-redirect-bridge.min.js"></script>
+  <script type="module" src="bootstrap.js?v=20261012-1"></script>
+</body>
+</html>

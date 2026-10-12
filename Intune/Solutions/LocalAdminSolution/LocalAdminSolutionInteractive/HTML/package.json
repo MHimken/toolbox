@@ -1,0 +1,12 @@
+{
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@azure/msal-browser": "5.23.0"
+  },
+  "scripts": {
+    "vendor:msal": "node scripts/copy-msal.mjs",
+    "postinstall": "npm run vendor:msal",
+    "test": "node --test tests/*.test.js"
+  }
+}

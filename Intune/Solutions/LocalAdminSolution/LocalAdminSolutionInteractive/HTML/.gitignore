@@ -1,0 +1,7 @@
+LocalAdminResolved.html
+LocalAdminResolved-*.html
+config.json
+config.private.json
+*.secrets.json
+local.settings.json
+node_modules/

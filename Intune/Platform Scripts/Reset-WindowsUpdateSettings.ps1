@@ -9,6 +9,8 @@ This is to clean a computer completely of any Windows Update related keys. Very 
 * Will delete GPCache folder to get rid of stuck policies (SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy\GPCache)
 * Will do gpupdate (if applicable) and Intune sync
 * Will do ConfigMgr machine policy and software update scan actions (if applicable)
+* Defers the reset while Windows Update installation/uninstallation or an exclusive Windows servicing (CBS) session is active, or their activity cannot be verified
+* Terminates wuauserv directly only when its svchost process hosts no other services
 Should get rid of most of your problems when dealing with sticky policies.
 #################################################
 DO NOT RUN THIS ON A REGULAR BASIS. This script is a cannonball, not a bullet.
@@ -18,9 +20,9 @@ Enables or disables the reset of the local .pol file for machine settings as thi
 .PARAMETER BackupDisabled
 ##NOT RECOMMENDED## Disables all backups
 .PARAMETER GPUpdateTimeout
-Defines how long the script should wait for the gpupdate
+Defines how long the script should wait for gpupdate. Exceeding this process limit is a warning; remediation continues.
 .PARAMETER IntuneSyncTimeout
-Defines the maximum number of seconds allowed for each DeviceEnroller process
+Defines the maximum number of seconds allowed for each DeviceEnroller process. Exceeding this process limit is a warning; remediation continues.
 .PARAMETER WorkingDirectory
 Specifies the working directory where the script will be executed. The default value is "C:\RWU\".
 .PARAMETER LogDirectory
@@ -41,12 +43,14 @@ This will also prevent the deletion of the .pol file which hold the machines pol
 
 .\Reset-WindowsUpdateSettings.ps1 -ResetLocalPolicies:$False -GPUpdateTimeout 120
 .NOTES
-Version: 1.6
+Version: 1.8
 Author: Martin Himken
 Original script name: Reset-WindowsUpdateSettings.ps1
 Initial creation date: 10.03.25
-Last change: 30.08.26
-Exit codes: 0 = success, 1 = operation failed, 2 = timeout, 3 = restore failed, 4 = timestamp failed
+Last change: 12.10.26
+Exit codes: 0 = success, 1 = operation failed, 2 = overall timeout, 3 = restore failed, 4 = timestamp failed, 5 = deferred
+Overall timeout errors also report earlier gpupdate/DeviceEnroller process timeouts.
+Deferred runs do not write a success timestamp. Idle TrustedInstaller/TiWorker processes do not defer the reset.
 .LINK
 changelog.md
 #>
@@ -69,6 +73,10 @@ param(
 $Script:ExitCode = 0
 $Script:DeadlineExpired = $false
 $Script:RemediationErrors = [System.Collections.Generic.List[string]]::new()
+$Script:TimeoutWarnings = [System.Collections.Generic.List[string]]::new()
+$Script:RemediationStarted = $false
+$Script:WindowsUpdateNeedsRestart = $false
+$Script:ClientBrokerWasRunning = $false
 $Script:Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $Script:MaximumRuntimeSeconds = [Math]::Min(3000, $ScriptTimeoutSeconds + $GPUpdateTimeout + $IntuneSyncTimeout)
 $Script:WorkDeadlineSeconds = [Math]::Max(1, $Script:MaximumRuntimeSeconds - 5)
@@ -84,7 +92,7 @@ function Assert-WorkTimeRemaining {
     )
     if ((Get-RemainingWorkMilliseconds) -le 0) {
         $Script:DeadlineExpired = $true
-        throw [System.TimeoutException]::new("Script deadline reached before $Operation")
+        throw [System.TimeoutException]::new("Timeout: script work deadline ($($Script:WorkDeadlineSeconds)s; elapsed $([Math]::Round($Script:Stopwatch.Elapsed.TotalSeconds, 1))s) reached before $Operation")
     }
 }
 function Invoke-BoundedProcess {
@@ -99,17 +107,25 @@ function Invoke-BoundedProcess {
     )
     Assert-WorkTimeRemaining -Operation $Operation
     $RemainingMilliseconds = Get-RemainingWorkMilliseconds
+    $LimitedByScriptDeadline = $true
     if ($MaximumSeconds -gt 0) {
+        $LimitedByScriptDeadline = $RemainingMilliseconds -le ($MaximumSeconds * 1000)
         $RemainingMilliseconds = [Math]::Min($RemainingMilliseconds, $MaximumSeconds * 1000)
     }
     $Process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -PassThru -WindowStyle Hidden -ErrorAction Stop
     if (-not($Process.WaitForExit($RemainingMilliseconds))) {
-        try { $Process.Kill() } catch { }
-        $Script:DeadlineExpired = (Get-RemainingWorkMilliseconds) -le 0
-        if ($Script:DeadlineExpired) {
-            throw [System.TimeoutException]::new("Script deadline reached while waiting for $Operation")
+        try {
+            $Process.Kill()
+        } catch {
+            Write-Log "Could not terminate timed-out $Operation process (PID $($Process.Id)): $($_.Exception.Message)" -Component 'BoundedProcess' -Type 2
         }
-        throw "$Operation exceeded its allowed runtime"
+        $Script:DeadlineExpired = $LimitedByScriptDeadline
+        if ($Script:DeadlineExpired) {
+            throw [System.TimeoutException]::new("Timeout: script work deadline ($($Script:WorkDeadlineSeconds)s; elapsed $([Math]::Round($Script:Stopwatch.Elapsed.TotalSeconds, 1))s) reached while waiting for $Operation")
+        }
+        $TimeoutMessage = "Timeout: $Operation process limit ($($MaximumSeconds)s) exceeded"
+        $Script:TimeoutWarnings.Add($TimeoutMessage)
+        throw $TimeoutMessage
     }
     return $Process.ExitCode
 }
@@ -292,12 +308,12 @@ function Start-IMESync {
     $Shell.open("intunemanagementextension://syncapp") | Out-Null
     $GUIDs = (Get-ChildItem -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Provisioning\OMADM\Accounts' -ErrorAction SilentlyContinue).PSChildName
     foreach ($GUID in $GUIDs) {
-        Assert-WorkTimeRemaining -Operation 'DeviceEnroller refresh'
+        Assert-WorkTimeRemaining -Operation "DeviceEnroller refresh (enrollment $GUID)"
         $IsIntuneGUID = (Get-ItemPropertyValue -LiteralPath "HKLM:\SOFTWARE\Microsoft\Enrollments\$GUID" -Name AADResourceID -ErrorAction SilentlyContinue) -eq "https://checkin.dm.microsoft.com"
         if ($IsIntuneGUID) {
             $DeviceEnrollerPath = Join-Path -Path $Env:SystemRoot -ChildPath 'System32\DeviceEnroller.exe'
             try {
-                $DeviceEnrollerExitCode = Invoke-BoundedProcess -FilePath $DeviceEnrollerPath -ArgumentList @('/o', $GUID, '/c', '/b') -Operation 'DeviceEnroller' -MaximumSeconds $IntuneSyncTimeout
+                $DeviceEnrollerExitCode = Invoke-BoundedProcess -FilePath $DeviceEnrollerPath -ArgumentList @('/o', $GUID, '/c', '/b') -Operation "DeviceEnroller (enrollment $GUID)" -MaximumSeconds $IntuneSyncTimeout
                 if ($DeviceEnrollerExitCode -ne 0) {
                     Write-Log "DeviceEnroller returned exit code $DeviceEnrollerExitCode" -Component 'StartSync' -Type 2
                 }
@@ -356,43 +372,88 @@ function Reset-KnownRWURegistryPaths {
     }
     return $true
 }
-function Stop-UpdateServices {
-    Assert-WorkTimeRemaining -Operation 'service stop'
-    $WindowsUpdateService = Get-Service wuauserv -ErrorAction SilentlyContinue
-    $Script:WindowsUpdateNeedsRestart = $null -ne $WindowsUpdateService -and $WindowsUpdateService.Status -ne 'Stopped'
-    $ClientBrokerService = Get-Service ClientBrokerUpgrader -ErrorAction SilentlyContinue
-    $Script:HasLegacyClientBroker = $null -ne $ClientBrokerService
-    $Script:ClientBrokerWasRunning = $null -ne $ClientBrokerService -and $ClientBrokerService.Status -eq 'Running'
-    if ($Script:ClientBrokerWasRunning) {
-        Write-Log 'Stopping the legacy Autopatch ClientBrokerUpgrader service' -Component 'StopUpdateServices'
-        $ClientBrokerService | Stop-Service -Force -ErrorAction Stop
+function Assert-WindowsUpdateIdle {
+    Assert-WorkTimeRemaining -Operation 'Windows Update activity check'
+    $UpdateInstaller = $null
+    try {
+        $UpdateInstaller = New-Object -ComObject Microsoft.Update.Installer -ErrorAction Stop
+        $InstallerBusy = $UpdateInstaller.IsBusy
+        if ($null -eq $InstallerBusy) {
+            throw 'Windows Update installer did not return an activity status'
+        }
+        if ($InstallerBusy) {
+            throw [System.OperationCanceledException]::new('Deferred: Windows Update installation or uninstallation is in progress')
+        }
+        Assert-WorkTimeRemaining -Operation 'Windows servicing activity check'
+        # TrustedInstaller/TiWorker stay alive idle after any servicing task, so only an exclusive CBS session counts as active.
+        $SessionsPendingPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\SessionsPending'
+        $ExclusiveSession = (Get-ItemProperty -LiteralPath $SessionsPendingPath -ErrorAction SilentlyContinue).Exclusive
+        if ($ExclusiveSession -and [int]$ExclusiveSession -ne 0) {
+            throw [System.OperationCanceledException]::new("Deferred: Windows servicing session in progress (CBS Exclusive=$ExclusiveSession)")
+        }
+    } catch [System.TimeoutException] {
+        throw
+    } catch [System.OperationCanceledException] {
+        throw
+    } catch {
+        Assert-WorkTimeRemaining -Operation 'Windows Update activity verification'
+        throw [System.OperationCanceledException]::new("Deferred: could not verify Windows Update activity: $($_.Exception.Message)", $_.Exception)
+    } finally {
+        if ($null -ne $UpdateInstaller -and [System.Runtime.InteropServices.Marshal]::IsComObject($UpdateInstaller)) {
+            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($UpdateInstaller) | Out-Null
+        }
     }
+}
+function Stop-UpdateServices {
+    Assert-WindowsUpdateIdle
+    $WindowsUpdateService = Get-Service wuauserv -ErrorAction SilentlyContinue
     if ($null -eq $WindowsUpdateService) {
         Write-Log 'Windows Update service was not found; continuing' -Component 'StopUpdateServices' -Type 2
-        return
-    }
-    if ($Script:WindowsUpdateNeedsRestart) {
-        $MaximumAttempts = 3
-        for ($Attempt = 1; $Attempt -le $MaximumAttempts; $Attempt++) {
-            try {
-                Assert-WorkTimeRemaining -Operation "Windows Update service stop attempt $Attempt"
-                Write-Log "Stopping the Windows Update service (attempt $Attempt of $MaximumAttempts)" -Component 'StopUpdateServices'
-                Stop-Service -Name wuauserv -Force -ErrorAction Stop
-                if ((Get-Service wuauserv -ErrorAction Stop).Status -eq 'Stopped') {
-                    return
-                }
-                throw 'Windows Update service still reports a non-stopped state'
-            } catch [System.TimeoutException] {
-                throw
-            } catch {
-                if ($Attempt -eq $MaximumAttempts) {
-                    Write-Log "Windows Update service could not be stopped after $MaximumAttempts attempts; continuing: $($_.Exception.Message)" -Component 'StopUpdateServices' -Type 2
-                } else {
-                    Write-Log "Windows Update service stop attempt $Attempt failed; retrying: $($_.Exception.Message)" -Component 'StopUpdateServices' -Type 2
-                    Start-Sleep -Seconds 2
-                }
-            }
+    } elseif ($WindowsUpdateService.Status -ne 'Stopped') {
+        Assert-WorkTimeRemaining -Operation 'wuauserv process lookup'
+        $CimTimeoutSeconds = [Math]::Max(1, [Math]::Min(15, [Math]::Ceiling((Get-RemainingWorkMilliseconds) / 1000)))
+        $Service = Get-CimInstance -ClassName Win32_Service -Filter "Name = 'wuauserv'" -OperationTimeoutSec $CimTimeoutSeconds -ErrorAction Stop
+        $ServiceProcessId = $Service.ProcessId
+        if ($null -eq $Service -or $ServiceProcessId -le 4 -or $ServiceProcessId -eq $PID) {
+            throw [System.OperationCanceledException]::new('Deferred: wuauserv has no safe process ID to terminate')
         }
+        $ServiceProcess = Get-Process -Id $ServiceProcessId -ErrorAction Stop
+        # Keep the original process handle alive through the ownership checks to prevent PID reuse.
+        $ServiceProcess.Handle | Out-Null
+        if ($ServiceProcess.ProcessName -ne 'svchost') {
+            throw [System.OperationCanceledException]::new("Deferred: wuauserv PID $ServiceProcessId is not a svchost process")
+        }
+        Assert-WindowsUpdateIdle
+        Assert-WorkTimeRemaining -Operation 'wuauserv process ownership check'
+        $CimTimeoutSeconds = [Math]::Max(1, [Math]::Min(15, [Math]::Ceiling((Get-RemainingWorkMilliseconds) / 1000)))
+        $HostedServices = @(Get-CimInstance -ClassName Win32_Service -Filter "ProcessId = $ServiceProcessId" -OperationTimeoutSec $CimTimeoutSeconds -ErrorAction Stop)
+        if ($HostedServices.Count -ne 1 -or $HostedServices[0].Name -ne 'wuauserv') {
+            $HostedNames = ($HostedServices.Name | Select-Object -Unique) -join ', '
+            throw [System.OperationCanceledException]::new("Deferred: wuauserv PID $ServiceProcessId is not a dedicated service host ($HostedNames)")
+        }
+        Assert-WorkTimeRemaining -Operation "wuauserv process termination (PID $ServiceProcessId)"
+        if ($ServiceProcess.HasExited) {
+            throw [System.OperationCanceledException]::new("Deferred: wuauserv PID $ServiceProcessId exited during the safety checks")
+        }
+        Write-Log "Terminating the dedicated wuauserv process (PID $ServiceProcessId)" -Component 'StopUpdateServices'
+        $Script:WindowsUpdateNeedsRestart = $true
+        Stop-Process -Id $ServiceProcessId -Force -ErrorAction Stop
+        $StopWait = [System.Diagnostics.Stopwatch]::StartNew()
+        while ((Get-Service wuauserv -ErrorAction Stop).Status -ne 'Stopped') {
+            Assert-WorkTimeRemaining -Operation "wuauserv stop confirmation after terminating PID $ServiceProcessId"
+            if ($StopWait.Elapsed.TotalSeconds -ge 15) {
+                throw "wuauserv did not report Stopped within 15s after terminating PID $ServiceProcessId; reset aborted"
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    $ClientBrokerService = Get-Service ClientBrokerUpgrader -ErrorAction SilentlyContinue
+    $Script:HasLegacyClientBroker = $null -ne $ClientBrokerService
+    if ($null -ne $ClientBrokerService -and $ClientBrokerService.Status -eq 'Running') {
+        Assert-WorkTimeRemaining -Operation 'legacy Autopatch ClientBrokerUpgrader service stop'
+        $Script:ClientBrokerWasRunning = $true
+        Write-Log 'Stopping the legacy Autopatch ClientBrokerUpgrader service' -Component 'StopUpdateServices'
+        $ClientBrokerService | Stop-Service -Force -ErrorAction Stop
     }
 }
 function Start-UpdateServices {
@@ -451,6 +512,7 @@ $Script:CurrentLocation = Get-Location
 try {
     Initialize-Script
     Stop-UpdateServices
+    $Script:RemediationStarted = $true
     Reset-KnownRWURegistryPaths -path "SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" | Out-Null
     Reset-KnownRWURegistryPaths -path "SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy\GPCache" | Out-Null
     $CSPUpdatePath = Reset-KnownRWURegistryPaths -path "SOFTWARE\Microsoft\PolicyManager\current\device\Update"
@@ -472,31 +534,39 @@ try {
     }
     Start-ConfigMgrActions
     Start-GroupPolicyRefresh
+    Assert-WorkTimeRemaining -Operation 'remediation completion'
 } catch [System.TimeoutException] {
-    $Script:DeadlineExpired = $true
     $Script:ExitCode = 2
-    Write-Log $_.Exception.Message -Component 'ErrorHandling' -Type 3 -ReportMessage 'Timeout'
+    Write-Log $_.Exception.Message -Component 'ErrorHandling' -Type 3
+    foreach ($TimeoutWarning in $Script:TimeoutWarnings) {
+        Write-Log "Earlier $TimeoutWarning" -Component 'ErrorHandling' -Type 3
+    }
+} catch [System.OperationCanceledException] {
+    $Script:ExitCode = 5
+    Write-Log $_.Exception.Message -Component 'ErrorHandling' -Type 3
 } catch {
     $Script:ExitCode = 1
     Write-Log "Something went wrong: $($_.Exception.Message)" -Component 'ErrorHandling' -Type 3 -ReportMessage "Failed: $($_.Exception.Message)"
 } finally {
     try {
-        Restore-ConfigMgrUpdateUrl
+        if ($Script:RemediationStarted) {
+            Restore-ConfigMgrUpdateUrl
+        }
     } catch {
         Write-Log "ConfigMgr URL restoration failed: $($_.Exception.Message)" -Component 'ErrorHandling' -Type 3 -ReportMessage "URL restore: $($_.Exception.Message)"
-        if (-not($Script:DeadlineExpired)) { $Script:ExitCode = 3 }
+        if ($Script:ExitCode -ne 2) { $Script:ExitCode = 3 }
     }
     try {
         Start-UpdateServices
     } catch {
         Write-Log "Service restoration failed: $($_.Exception.Message)" -Component 'ErrorHandling' -Type 3 -ReportMessage "Service restore: $($_.Exception.Message)"
-        if (-not($Script:DeadlineExpired)) { $Script:ExitCode = 3 }
+        if ($Script:ExitCode -ne 2) { $Script:ExitCode = 3 }
     }
     try {
         Set-Location -LiteralPath $Script:CurrentLocation.Path -ErrorAction Stop
     } catch {
         Write-Log "Could not restore the original location: $($_.Exception.Message)" -Component 'ErrorHandling' -Type 3 -ReportMessage "Path restore: $($_.Exception.Message)"
-        if (-not($Script:DeadlineExpired)) { $Script:ExitCode = 0 }
+        if ($Script:ExitCode -ne 2) { $Script:ExitCode = 3 }
     }
 }
 if ($Script:ExitCode -eq 0) {

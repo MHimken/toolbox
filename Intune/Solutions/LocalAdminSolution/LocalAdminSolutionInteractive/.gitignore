@@ -1,0 +1,4 @@
+# Generated diagnostics and local dependency restores
+*.log
+node_modules/
+

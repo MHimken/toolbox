@@ -1,0 +1,6 @@
+node_modules
+src
+test
+local.settings.json
+*.log
+tsconfig.json

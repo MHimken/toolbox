@@ -1,0 +1,24 @@
+{
+  "name": "local-admin-solution-bff",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/functions/*.js",
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc",
+    "test": "node --test --import tsx \"test/**/*.test.ts\"",
+    "check": "npm run build && npm test"
+  },
+  "dependencies": {
+    "@azure/data-tables": "13.3.2",
+    "@azure/functions": "4.16.5",
+    "@azure/identity": "4.13.3",
+    "jose": "6.2.12"
+  },
+  "devDependencies": {
+    "@types/node": "24.7.0",
+    "tsx": "4.20.6",
+    "typescript": "7.0.2"
+  }
+}

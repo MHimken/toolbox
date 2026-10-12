@@ -2,6 +2,17 @@
 
 ## 2026
 
+### 12th of October
+
+* Fix: Reset-WindowsUpdateSettings.ps1 - remediation timeout errors now identify the operation, elapsed time and script work deadline, or the process time limit. DeviceEnroller timeouts also include the enrollment GUID.
+* Change: Reset-WindowsUpdateSettings.ps1 - exceeding `GPUpdateTimeout` or `IntuneSyncTimeout` remains a warning and remediation continues. If the overall deadline later expires, its error includes those earlier process timeouts.
+* Change: Reset-WindowsUpdateSettings.ps1 - checks Windows Update installer activity (`IsBusy`) and exclusive CBS servicing sessions (`SessionsPending\Exclusive`) before touching update settings and again before terminating wuauserv. Active or unverifiable update activity defers remediation with exit code 5 and no success timestamp.
+* Fix: Reset-WindowsUpdateSettings.ps1 - terminates wuauserv by its verified process ID instead of waiting for a graceful stop. Shared service hosts are left untouched, stop confirmation is bounded to 15 seconds and the service is restored during cleanup.
+
+### 6th of October
+
+* Add: Test-IntunePlatformScriptStress.ps1 - added a platform-script stress test that creates unassigned scripts, measures the limit against the tenant-wide platform-script total so brownfield tenants are handled correctly, and supports cleanup of generated scripts.
+
 ### 6th of September
 
 * Add: Set-VBATimestampSettings.ps1 - added a SYSTEM-context platform script that configures VBA timestamp settings in all cloud-only Entra profile hives.
