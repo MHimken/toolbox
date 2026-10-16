@@ -160,17 +160,18 @@
 ### 7th of August
 
 * Initial release: Remediate-LocalAdminSolution.ps1 - added the local Administrators collection remediation.
-# 2026-09-24
 
-- Started the fresh-deployment interactive implementation in an isolated solution copy.
-- Added `LocalAdminDevices`, collector heartbeat and deterministic inventory hashing.
-- Added paged Entra or Intune device synchronization to the reconciliation runbook.
-- Split the maintained report into HTML, CSS, application, connection, data service, and storage modules.
-- Added Stale devices, Review, Governance, Settings, and Usage guidance surfaces.
-- Separated governance tables into a dedicated Storage account to protect them from the endpoint account SAS.
-- Updated the exporter to assemble a self-contained snapshot from split source assets.
-- Added fresh deployment resources and Graph permissions for Entra and Intune device observations.
-- Replaced the device-source toggle with independent Entra, Intune, and collector observations.
-- Added source-owned `E_`, `I_`, and `C_` rows and report correlation through Entra device ID.
-- Separated Entra registration, Intune management, and collector freshness states in the report.
-- Added managed-identity token role validation and refresh retries for newly granted Graph permissions.
+### 24th of September
+
+* Started the fresh-deployment interactive implementation in an isolated solution copy.
+* Added `LocalAdminDevices`, collector heartbeat and deterministic inventory hashing.
+* Added paged Entra or Intune device synchronization to the reconciliation runbook.
+* Split the maintained report into HTML, CSS, application, connection, data service, and storage modules.
+* Added Stale devices, Review, Governance, Settings, and Usage guidance surfaces.
+* Separated governance tables into a dedicated Storage account to protect them from the endpoint account SAS.
+* Updated the exporter to assemble a self-contained snapshot from split source assets.
+* Added fresh deployment resources and Graph permissions for Entra and Intune device observations.
+* Replaced the device-source toggle with independent Entra, Intune, and collector observations.
+* Added source-owned `E_`, `I_`, and `C_` rows and report correlation through Entra device ID.
+* Separated Entra registration, Intune management, and collector freshness states in the report.
+* Added managed-identity token role validation and refresh retries for newly granted Graph permissions.

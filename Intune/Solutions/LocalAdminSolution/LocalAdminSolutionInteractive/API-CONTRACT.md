@@ -21,7 +21,7 @@ The initial BFF accepts either `Authorization: Bearer <API-token>` or `x-recover
 An administrator may explicitly configure wildcard BFF CORS for controlled testing or broad hosting. This is less restrictive than exact origins and must be surfaced as a deployment warning. The API uses explicit headers rather than cookie authentication. An IIS same-origin reverse proxy is preferred when the report is hosted on IIS.
 
 | Method and path | Purpose | Required authorization |
-|---|---|---|
+| --- | --- | --- |
 | `GET /profile` | Read the caller's settings/profile | Authenticated Entra identity or valid recovery credential |
 | `PUT /profile` | Create or replace caller-owned settings | Owner; `If-None-Match: *` for create or `If-Match` for replace |
 | `POST /profile/recovery/rotate` | Rotate the recovery credential and invalidate the old digest | Current owner proof |
