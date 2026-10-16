@@ -487,7 +487,7 @@ function New-NetworkChangeTaskXml {
     <EventTrigger><Enabled>true</Enabled><Subscription>$EscapedSubscription</Subscription></EventTrigger>
     <BootTrigger><Enabled>true</Enabled><Delay>PT15S</Delay></BootTrigger>
   </Triggers>
-  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Principals><Principal id="Author"><UserId>SYSTEM</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>

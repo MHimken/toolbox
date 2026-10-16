@@ -12,6 +12,7 @@
 - Add: Set-GSAInternalNetworkState.ps1 - installs a single-instance event-triggered task to detect internal networks and control GSA services.
 - Update: Documented implementation choices, static validation, and remaining test-device validation in Set-GSAInternalNetworkState.plan.md.
 - Update: Excluded Set-GSAInternalNetworkState.plan.md from source control via the repository .gitignore.
+- Fix: Use the SYSTEM account name in the scheduled-task XML principal to avoid rejecting the service-account logon principal during installation.
 
 ## 2025
 
