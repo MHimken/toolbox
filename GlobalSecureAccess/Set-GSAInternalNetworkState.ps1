@@ -42,13 +42,45 @@ uses the protected ProgramData Logs directory.
 Optional log filename, without a directory path. When omitted, a timestamped
 filename is generated.
 
+.EXAMPLE
+.\Set-GSAInternalNetworkState.ps1 -Mode Install -TargetIPAddress '192.0.2.10' -ExpectedDnsName 'internal.contoso.com'
+
+Installs the SYSTEM scheduled task and immediately evaluates the network using
+the connected interfaces' DNS servers. Replace the example IP and PTR hostname
+with values that identify your internal network.
+
+.EXAMPLE
+.\Set-GSAInternalNetworkState.ps1 -Mode Install -TargetIPAddress '192.0.2.10' -ExpectedDnsName 'internal.contoso.com' -DnsServer '192.0.2.53'
+
+Installs or updates the task with an explicit DNS server. The detection settings
+are saved for subsequent scheduled and manual evaluations.
+
+.EXAMPLE
+.\Set-GSAInternalNetworkState.ps1 -Mode Evaluate
+
+Evaluates the network using the installed configuration and stops or starts the
+GSA services accordingly. This changes service states; it is not a detection-only
+or dry-run mode.
+
+.EXAMPLE
+.\Set-GSAInternalNetworkState.ps1 -Mode Evaluate -TargetIPAddress '192.0.2.10' -ExpectedDnsName 'internal.contoso.com'
+
+Evaluates the network with the supplied detection values without installing a
+task or saving these values. GSA service states are updated.
+
+.EXAMPLE
+.\Set-GSAInternalNetworkState.ps1 -Mode Uninstall
+
+Removes the owned scheduled task, restores the GSA services to Running, and
+removes the deployed script and configuration. Existing log files are retained.
+
 .NOTES
 Version: 1.0
 Author: Martin Himken
 Original script name: Set-GSAInternalNetworkState.ps1
 Initial creation date: 2026-10-16
 Last change: 2026-10-16
-Changes: Correct the event provider name and preserve event-query failures.
+Changes: Correct the event provider name, preserve event-query failures, and add usage examples.
 
 Exit codes:
 0  Operation completed and services converged to the requested state.

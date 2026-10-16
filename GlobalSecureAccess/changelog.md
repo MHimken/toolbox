@@ -16,6 +16,7 @@
 - Update: Build and register the GSA scheduled task with ScheduledTasks cmdlet parameters and a CIM event trigger instead of a hand-written task XML definition or a prebuilt task object.
 - Fix: Preserve the original PowerShell error record on failures so installation diagnostics identify the failing command and line.
 - Fix: Use the provider name Microsoft-Windows-NetworkProfile in event queries and the task subscription; suppress only missing-event results instead of hiding query errors.
+- Update: Added comment-based help examples for installation, explicit DNS configuration, evaluation, and uninstallation.
 
 ## 2025
 
