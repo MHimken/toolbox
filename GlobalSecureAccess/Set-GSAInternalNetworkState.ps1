@@ -48,7 +48,7 @@ Author: Martin Himken
 Original script name: Set-GSAInternalNetworkState.ps1
 Initial creation date: 2026-10-16
 Last change: 2026-10-16
-Changes: Initial implementation of event-triggered GSA service control.
+Changes: Register the scheduled task using ScheduledTasks cmdlets and a CIM event trigger.
 
 Exit codes:
 0  Operation completed and services converged to the requested state.
@@ -467,7 +467,7 @@ function Assert-Prerequisites {
     }
 }
 
-function New-NetworkChangeTaskXml {
+function New-NetworkChangeTask {
     param(
         [Parameter(Mandatory = $true)][pscustomobject]$Paths,
         [Parameter(Mandatory = $true)][string]$RegisteredTaskName
@@ -475,32 +475,21 @@ function New-NetworkChangeTaskXml {
 
     $PowerShellPath = Join-Path -Path $env:SystemRoot -ChildPath 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $TaskArguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Mode Evaluate -TaskName {1} -LogPath "{2}"' -f $Paths.ScriptPath, $RegisteredTaskName, $Paths.LogPath
-    $EscapedExecutable = [System.Security.SecurityElement]::Escape($PowerShellPath)
-    $EscapedArguments = [System.Security.SecurityElement]::Escape($TaskArguments)
     $EventSubscription = '<QueryList><Query Id="0" Path="Microsoft-Windows-NetworkProfile/Operational"><Select Path="Microsoft-Windows-NetworkProfile/Operational">*[System[Provider[@Name=''NetworkProfile''] and EventID=4004]]</Select></Query></QueryList>'
-    $EscapedSubscription = [System.Security.SecurityElement]::Escape($EventSubscription)
-    return @"
-<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Author>Global Secure Access network state controller</Author><Description>Controls GSA services after NetworkProfile event 4004.</Description></RegistrationInfo>
-  <Triggers>
-    <EventTrigger><Enabled>true</Enabled><Subscription>$EscapedSubscription</Subscription></EventTrigger>
-    <BootTrigger><Enabled>true</Enabled><Delay>PT15S</Delay></BootTrigger>
-  </Triggers>
-  <Principals><Principal id="Author"><UserId>SYSTEM</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <AllowHardTerminate>true</AllowHardTerminate>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <ExecutionTimeLimit>PT15M</ExecutionTimeLimit>
-    <Enabled>true</Enabled>
-  </Settings>
-  <Actions Context="Author"><Exec><Command>$EscapedExecutable</Command><Arguments>$EscapedArguments</Arguments><WorkingDirectory>$([System.Security.SecurityElement]::Escape($Paths.BasePath))</WorkingDirectory></Exec></Actions>
-</Task>
-"@
+    # New-ScheduledTaskTrigger does not expose event triggers.
+    $EventTriggerClass = Get-CimClass -Namespace 'Root\Microsoft\Windows\TaskScheduler' -ClassName 'MSFT_TaskEventTrigger' -ErrorAction Stop
+    $EventTrigger = New-CimInstance -CimClass $EventTriggerClass -ClientOnly -Property @{
+        Enabled = $true
+        Subscription = $EventSubscription
+    } -ErrorAction Stop
+    $StartupTrigger = New-ScheduledTaskTrigger -AtStartup -ErrorAction Stop
+    $StartupTrigger.Delay = 'PT15S'
+    $TaskAction = New-ScheduledTaskAction -Execute $PowerShellPath -Argument $TaskArguments -WorkingDirectory $Paths.BasePath -ErrorAction Stop
+    $TaskPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest -ErrorAction Stop
+    $TaskSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -ErrorAction Stop
+    $TaskDefinition = New-ScheduledTask -Action $TaskAction -Trigger @($EventTrigger, $StartupTrigger) -Principal $TaskPrincipal -Settings $TaskSettings -Description 'Controls GSA services after NetworkProfile event 4004.' -ErrorAction Stop
+    $TaskDefinition.Author = 'Global Secure Access network state controller'
+    return $TaskDefinition
 }
 
 function Test-OwnedNetworkChangeTask {
@@ -531,8 +520,10 @@ function Install-NetworkChangeTask {
         throw 'Install mode requires an elevated administrator session.'
     }
     Assert-Prerequisites
-    if (-not (Get-Command -Name 'Export-ScheduledTask' -ErrorAction SilentlyContinue)) {
-        throw 'Required command is unavailable: Export-ScheduledTask'
+    foreach ($CommandName in @('Export-ScheduledTask', 'Get-CimClass', 'New-CimInstance', 'New-ScheduledTask', 'New-ScheduledTaskAction', 'New-ScheduledTaskTrigger', 'New-ScheduledTaskPrincipal', 'New-ScheduledTaskSettingsSet')) {
+        if (-not (Get-Command -Name $CommandName -ErrorAction SilentlyContinue)) {
+            throw "Required command is unavailable: $CommandName"
+        }
     }
     foreach ($ManagedServiceName in @(
         'GlobalSecureAccessClientManagerService'
@@ -570,8 +561,8 @@ function Install-NetworkChangeTask {
     Set-ProtectedFileAcl -Path $DeploymentPaths.ConfigPath
     Set-ProtectedFileAcl -Path $DeploymentPaths.ScriptPath
 
-    $TaskXml = New-NetworkChangeTaskXml -Paths $DeploymentPaths -RegisteredTaskName $TaskName
-    Register-ScheduledTask -TaskName $TaskName -TaskPath '\' -Xml $TaskXml -Force -ErrorAction Stop | Out-Null
+    $TaskDefinition = New-NetworkChangeTask -Paths $DeploymentPaths -RegisteredTaskName $TaskName
+    Register-ScheduledTask -TaskName $TaskName -TaskPath '\' -InputObject $TaskDefinition -Force -ErrorAction Stop | Out-Null
     $RegisteredTask = Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
     [xml]$RegisteredTaskXml = Export-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
     $TaskNamespaceManager = New-Object System.Xml.XmlNamespaceManager($RegisteredTaskXml.NameTable)
