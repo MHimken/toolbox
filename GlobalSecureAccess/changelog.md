@@ -13,7 +13,9 @@
 - Update: Documented implementation choices, static validation, and remaining test-device validation in Set-GSAInternalNetworkState.plan.md.
 - Update: Excluded Set-GSAInternalNetworkState.plan.md from source control via the repository .gitignore.
 - Fix: Use the SYSTEM account name in the scheduled-task XML principal to avoid rejecting the service-account logon principal during installation.
-- Update: Build and register the GSA scheduled task with ScheduledTasks cmdlets and a CIM event trigger instead of a hand-written task XML definition.
+- Update: Build and register the GSA scheduled task with ScheduledTasks cmdlet parameters and a CIM event trigger instead of a hand-written task XML definition or a prebuilt task object.
+- Fix: Preserve the original PowerShell error record on failures so installation diagnostics identify the failing command and line.
+- Fix: Use the provider name Microsoft-Windows-NetworkProfile in event queries and the task subscription; suppress only missing-event results instead of hiding query errors.
 
 ## 2025
 

@@ -48,7 +48,7 @@ Author: Martin Himken
 Original script name: Set-GSAInternalNetworkState.ps1
 Initial creation date: 2026-10-16
 Last change: 2026-10-16
-Changes: Register the scheduled task using ScheduledTasks cmdlets and a CIM event trigger.
+Changes: Correct the event provider name and preserve event-query failures.
 
 Exit codes:
 0  Operation completed and services converged to the requested state.
@@ -301,15 +301,19 @@ function Resolve-InternalNetwork {
 }
 
 function Get-LatestNetworkChangeRecordId {
-    $LatestEvent = Get-WinEvent -FilterHashtable @{
-        LogName      = 'Microsoft-Windows-NetworkProfile/Operational'
-        ProviderName = 'NetworkProfile'
-        Id           = 4004
-    } -MaxEvents 1 -ErrorAction SilentlyContinue
-    if ($LatestEvent) {
+    try {
+        $LatestEvent = Get-WinEvent -FilterHashtable @{
+            LogName      = 'Microsoft-Windows-NetworkProfile/Operational'
+            ProviderName = 'Microsoft-Windows-NetworkProfile'
+            Id           = 4004
+        } -MaxEvents 1 -ErrorAction Stop
         return [long]$LatestEvent.RecordId
+    } catch {
+        if ($_.FullyQualifiedErrorId.Split(',')[0] -eq 'NoMatchingEventsFound') {
+            return [long]0
+        }
+        throw
     }
-    return [long]0
 }
 
 function Get-OrderedManagedServices {
@@ -475,21 +479,24 @@ function New-NetworkChangeTask {
 
     $PowerShellPath = Join-Path -Path $env:SystemRoot -ChildPath 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $TaskArguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Mode Evaluate -TaskName {1} -LogPath "{2}"' -f $Paths.ScriptPath, $RegisteredTaskName, $Paths.LogPath
-    $EventSubscription = '<QueryList><Query Id="0" Path="Microsoft-Windows-NetworkProfile/Operational"><Select Path="Microsoft-Windows-NetworkProfile/Operational">*[System[Provider[@Name=''NetworkProfile''] and EventID=4004]]</Select></Query></QueryList>'
+    $EventSubscription = '<QueryList><Query Id="0" Path="Microsoft-Windows-NetworkProfile/Operational"><Select Path="Microsoft-Windows-NetworkProfile/Operational">*[System[Provider[@Name=''Microsoft-Windows-NetworkProfile''] and EventID=4004]]</Select></Query></QueryList>'
     # New-ScheduledTaskTrigger does not expose event triggers.
     $EventTriggerClass = Get-CimClass -Namespace 'Root\Microsoft\Windows\TaskScheduler' -ClassName 'MSFT_TaskEventTrigger' -ErrorAction Stop
-    $EventTrigger = New-CimInstance -CimClass $EventTriggerClass -ClientOnly -Property @{
-        Enabled = $true
-        Subscription = $EventSubscription
-    } -ErrorAction Stop
+    $EventTrigger = New-CimInstance -CimClass $EventTriggerClass -ClientOnly -ErrorAction Stop
+    $EventTrigger.Enabled = $true
+    $EventTrigger.Subscription = $EventSubscription
     $StartupTrigger = New-ScheduledTaskTrigger -AtStartup -ErrorAction Stop
     $StartupTrigger.Delay = 'PT15S'
     $TaskAction = New-ScheduledTaskAction -Execute $PowerShellPath -Argument $TaskArguments -WorkingDirectory $Paths.BasePath -ErrorAction Stop
     $TaskPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest -ErrorAction Stop
     $TaskSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -ErrorAction Stop
-    $TaskDefinition = New-ScheduledTask -Action $TaskAction -Trigger @($EventTrigger, $StartupTrigger) -Principal $TaskPrincipal -Settings $TaskSettings -Description 'Controls GSA services after NetworkProfile event 4004.' -ErrorAction Stop
-    $TaskDefinition.Author = 'Global Secure Access network state controller'
-    return $TaskDefinition
+    return [pscustomobject]@{
+        Action = $TaskAction
+        Trigger = @($EventTrigger, $StartupTrigger)
+        Principal = $TaskPrincipal
+        Settings = $TaskSettings
+        Description = 'Controls GSA services after NetworkProfile event 4004.'
+    }
 }
 
 function Test-OwnedNetworkChangeTask {
@@ -500,13 +507,13 @@ function Test-OwnedNetworkChangeTask {
     [xml]$ExistingTaskXml = Export-ScheduledTask -TaskName $RegisteredTaskName -TaskPath '\' -ErrorAction Stop
     $TaskNamespaceManager = New-Object System.Xml.XmlNamespaceManager($ExistingTaskXml.NameTable)
     $TaskNamespaceManager.AddNamespace('task', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
-    $TaskAuthor = $ExistingTaskXml.SelectSingleNode('//task:RegistrationInfo/task:Author', $TaskNamespaceManager)
+    $TaskDescription = $ExistingTaskXml.SelectSingleNode('//task:RegistrationInfo/task:Description', $TaskNamespaceManager)
     $TaskCommand = $ExistingTaskXml.SelectSingleNode('//task:Actions/task:Exec/task:Command', $TaskNamespaceManager)
     $TaskArguments = $ExistingTaskXml.SelectSingleNode('//task:Actions/task:Exec/task:Arguments', $TaskNamespaceManager)
     $ExpectedScriptPath = (Get-DeploymentPaths).ScriptPath
     $ExpectedPowerShellPath = Join-Path -Path $env:SystemRoot -ChildPath 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    return ($TaskAuthor -and
-        $TaskAuthor.InnerText -eq 'Global Secure Access network state controller' -and
+    return ($TaskDescription -and
+        $TaskDescription.InnerText -eq 'Controls GSA services after NetworkProfile event 4004.' -and
         $TaskCommand -and
         $TaskCommand.InnerText.Equals($ExpectedPowerShellPath, [StringComparison]::OrdinalIgnoreCase) -and
         $TaskArguments -and
@@ -520,7 +527,7 @@ function Install-NetworkChangeTask {
         throw 'Install mode requires an elevated administrator session.'
     }
     Assert-Prerequisites
-    foreach ($CommandName in @('Export-ScheduledTask', 'Get-CimClass', 'New-CimInstance', 'New-ScheduledTask', 'New-ScheduledTaskAction', 'New-ScheduledTaskTrigger', 'New-ScheduledTaskPrincipal', 'New-ScheduledTaskSettingsSet')) {
+    foreach ($CommandName in @('Export-ScheduledTask', 'Get-CimClass', 'New-CimInstance', 'New-ScheduledTaskAction', 'New-ScheduledTaskTrigger', 'New-ScheduledTaskPrincipal', 'New-ScheduledTaskSettingsSet')) {
         if (-not (Get-Command -Name $CommandName -ErrorAction SilentlyContinue)) {
             throw "Required command is unavailable: $CommandName"
         }
@@ -562,7 +569,7 @@ function Install-NetworkChangeTask {
     Set-ProtectedFileAcl -Path $DeploymentPaths.ScriptPath
 
     $TaskDefinition = New-NetworkChangeTask -Paths $DeploymentPaths -RegisteredTaskName $TaskName
-    Register-ScheduledTask -TaskName $TaskName -TaskPath '\' -InputObject $TaskDefinition -Force -ErrorAction Stop | Out-Null
+    Register-ScheduledTask -TaskName $TaskName -TaskPath '\' -Action $TaskDefinition.Action -Trigger $TaskDefinition.Trigger -Principal $TaskDefinition.Principal -Settings $TaskDefinition.Settings -Description $TaskDefinition.Description -Force -ErrorAction Stop | Out-Null
     $RegisteredTask = Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
     [xml]$RegisteredTaskXml = Export-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction Stop
     $TaskNamespaceManager = New-Object System.Xml.XmlNamespaceManager($RegisteredTaskXml.NameTable)
@@ -576,7 +583,7 @@ function Install-NetworkChangeTask {
         $RegisteredTask.Settings.MultipleInstances -ne 'IgnoreNew' -or
         -not $EventTriggerNode -or
         -not $EventTriggerNode.InnerText.Contains('Microsoft-Windows-NetworkProfile/Operational') -or
-        -not $EventTriggerNode.InnerText.Contains("Provider[@Name='NetworkProfile']") -or
+        -not $EventTriggerNode.InnerText.Contains("Provider[@Name='Microsoft-Windows-NetworkProfile']") -or
         -not $EventTriggerNode.InnerText.Contains('EventID=4004') -or
         -not $StartupTriggerNode -or
         -not $ActionCommandNode -or
@@ -754,7 +761,7 @@ try {
     }
     exit 0
 } catch {
-    Write-Log -Message "$Mode mode failed. $($_.Exception.Message)" -Component 'Main' -Type 3
-    Write-Error $_.Exception.Message
+    Write-Log -Message "$Mode mode failed. $($_.Exception.Message) ErrorId=$($_.FullyQualifiedErrorId)" -Component 'Main' -Type 3
+    Write-Error -ErrorRecord $_
     exit 1
 }
