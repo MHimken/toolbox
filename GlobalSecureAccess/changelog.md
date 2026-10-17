@@ -2,6 +2,10 @@
 
 ## 2026
 
+### 17th of October
+
+- Add: Set-GSAInternalNetworkState.ps1 - added `-LogRetentionDays` (default 90), persisted in scheduled-task arguments. Install and Evaluate remove expired script-generated timestamped logs based on last write time; current logs, custom-named logs, unrelated files, subdirectories, and reparse points are preserved. Individual deletion failures are logged as warnings without interrupting service control. Uninstall continues to preserve logs.
+
 ### 16th of October
 
 - Plan: Added Set-GSAInternalNetworkState.plan.md for event 4004 network detection, IP-to-DNS validation, GSA service control, and a persistent single-instance scheduled task.

@@ -10,6 +10,7 @@ the script and configuration under ProgramData and registers one SYSTEM task for
 NetworkProfile event 4004 plus system startup. Evaluate mode also coalesces
 events that arrive during service transitions. Uninstall mode removes the owned
 task and configuration and attempts to start all managed services.
+Install and Evaluate remove this script's expired timestamped logs from LogPath.
 
 This script intentionally targets Windows PowerShell 5.1 because PowerShell 7
 cannot be assumed on target devices. It remains compatible with PowerShell 7.
@@ -42,6 +43,13 @@ uses the protected ProgramData Logs directory.
 Optional log filename, without a directory path. When omitted, a timestamped
 filename is generated.
 
+.PARAMETER LogRetentionDays
+Number of days to retain timestamped logs, based on their last write time.
+Defaults to 90; accepts 1 through 36500. Install saves this setting in the
+scheduled task arguments. Manual runs default to 90 unless explicitly supplied.
+Cleanup runs during Install and Evaluate, not Uninstall. The current log,
+custom-named logs, subdirectories, and unrelated files are never removed.
+
 .EXAMPLE
 .\Set-GSAInternalNetworkState.ps1 -Mode Install -TargetIPAddress '192.0.2.10' -ExpectedDnsName 'internal.contoso.com'
 
@@ -54,6 +62,12 @@ with values that identify your internal network.
 
 Installs or updates the task with an explicit DNS server. The detection settings
 are saved for subsequent scheduled and manual evaluations.
+
+.EXAMPLE
+.\Set-GSAInternalNetworkState.ps1 -Mode Install -TargetIPAddress '192.0.2.10' -ExpectedDnsName 'internal.contoso.com' -LogRetentionDays 30
+
+Installs or updates the task to remove this script's timestamped logs older than
+30 days from the protected ProgramData Logs directory on each scheduled run.
 
 .EXAMPLE
 .\Set-GSAInternalNetworkState.ps1 -Mode Evaluate
@@ -75,12 +89,12 @@ Removes the owned scheduled task, restores the GSA services to Running, and
 removes the deployed script and configuration. Existing log files are retained.
 
 .NOTES
-Version: 1.0
+Version: 1.1
 Author: Martin Himken
 Original script name: Set-GSAInternalNetworkState.ps1
 Initial creation date: 2026-10-16
-Last change: 2026-10-16
-Changes: Correct the event provider name, preserve event-query failures, and add usage examples.
+Last change: 2026-10-17
+Changes: Add configurable timestamped log retention with a 90-day default.
 
 Exit codes:
 0  Operation completed and services converged to the requested state.
@@ -108,7 +122,10 @@ param(
 
     [string]$LogPath = (Get-Location).Path,
 
-    [string]$LogFile = $null
+    [string]$LogFile = $null,
+
+    [ValidateRange(1, 36500)]
+    [int]$LogRetentionDays = 90
 )
 
 if ($PSVersionTable.PSVersion -lt [version]'5.1') {
@@ -177,6 +194,28 @@ function Test-IsAdministrator {
     }
     $Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
     return $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Remove-ExpiredLogs {
+    $CutoffUtc = [DateTime]::UtcNow.AddDays(-$LogRetentionDays)
+    $CurrentLogPath = [System.IO.Path]::GetFullPath($Script:LogFile)
+    $LogDirectory = [System.IO.Path]::GetDirectoryName($CurrentLogPath)
+    $ExpiredLogs = Get-ChildItem -LiteralPath $LogDirectory -Filter 'Set-GSAInternalNetworkState_*.log' -File -ErrorAction Stop |
+        Where-Object {
+            $_.Name -match '^Set-GSAInternalNetworkState_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.log$' -and
+            $_.LastWriteTimeUtc -lt $CutoffUtc -and
+            -not $_.FullName.Equals($CurrentLogPath, [StringComparison]::OrdinalIgnoreCase) -and
+            -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+        }
+    foreach ($ExpiredLog in $ExpiredLogs) {
+        try {
+            Remove-Item -LiteralPath $ExpiredLog.FullName -ErrorAction Stop
+        } catch {
+            Write-Log -Message "Failed to remove expired log $($ExpiredLog.FullName): $($_.Exception.Message)" -Component 'LogCleanup' -Type 2
+            continue
+        }
+        Write-Log -Message "Removed expired log $($ExpiredLog.FullName) (retention: $LogRetentionDays days)." -Component 'LogCleanup' -Type 1
+    }
 }
 
 function Get-DeploymentPaths {
@@ -510,7 +549,7 @@ function New-NetworkChangeTask {
     )
 
     $PowerShellPath = Join-Path -Path $env:SystemRoot -ChildPath 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $TaskArguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Mode Evaluate -TaskName {1} -LogPath "{2}"' -f $Paths.ScriptPath, $RegisteredTaskName, $Paths.LogPath
+    $TaskArguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Mode Evaluate -TaskName {1} -LogPath "{2}" -LogRetentionDays {3}' -f $Paths.ScriptPath, $RegisteredTaskName, $Paths.LogPath, $LogRetentionDays
     $EventSubscription = '<QueryList><Query Id="0" Path="Microsoft-Windows-NetworkProfile/Operational"><Select Path="Microsoft-Windows-NetworkProfile/Operational">*[System[Provider[@Name=''Microsoft-Windows-NetworkProfile''] and EventID=4004]]</Select></Query></QueryList>'
     # New-ScheduledTaskTrigger does not expose event triggers.
     $EventTriggerClass = Get-CimClass -Namespace 'Root\Microsoft\Windows\TaskScheduler' -ClassName 'MSFT_TaskEventTrigger' -ErrorAction Stop
@@ -764,6 +803,9 @@ Initialize-Script
 
 try {
     Write-Log -Message "Starting in $Mode mode." -Component 'Main' -Type 1
+    if ($Mode -ne 'Uninstall') {
+        Remove-ExpiredLogs
+    }
     switch ($Mode) {
         'Install' {
             if (-not $TargetIPAddress -or -not $ExpectedDnsName) {
