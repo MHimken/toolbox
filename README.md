@@ -19,7 +19,9 @@ Multi-file solutions with dedicated documentation and supporting assets.
 | Solution | Scripts | Description | Status | Last updated |
 | --- | --- | --- | --- | --- |
 | [Broken Autopilot Device Cleanup](Autopilot/Solutions/README.md) | [Cleanup script](Autopilot/Solutions/BrokenAutopilotDeviceCleanup.ps1) | Identifies duplicate or stale Autopilot, Intune, and Entra device records and optionally cleans them up. | **Unfinished** | 2026-08-30 |
-| [Local Administrator Solution](Intune/Solutions/LocalAdminSolution/README.md) | [Detect](Intune/Solutions/LocalAdminSolution/Remediation/Detect-LocalAdminSolution.ps1) / [Remediate](Intune/Solutions/LocalAdminSolution/Remediation/Remediate-LocalAdminSolution.ps1) / [HTML export](Intune/Solutions/LocalAdminSolution/HTML/Export-LocalAdminResolvedHtml.ps1) / [Stress-test data](Intune/Solutions/LocalAdminSolution/New-LocalAdminSolutionStressTestData.ps1) | Inventories local administrators through Intune remediation, Azure Table Storage, Excel, and HTML reporting. | Finished | 2026-08-30 |
+| [Local Administrator Solution](Intune/Solutions/LocalAdminSolution/README.md) | [Detect](Intune/Solutions/LocalAdminSolution/Remediation/Detect-LocalAdminSolution.ps1) / [Remediate](Intune/Solutions/LocalAdminSolution/Remediation/Remediate-LocalAdminSolution.ps1) / [Deployment](Intune/Solutions/LocalAdminSolution/Deployment/Deploy-LocalAdminReporting.ps1) / [Lookup runbook](Intune/Solutions/LocalAdminSolution/Runbooks/Resolve-LocalAdminLookupNames.ps1) / [HTML export](Intune/Solutions/LocalAdminSolution/HTML/Export-LocalAdminResolvedHtml.ps1) / [Stress-test data](Intune/Solutions/LocalAdminSolution/New-LocalAdminSolutionStressTestData.ps1) | Inventories local administrators through Intune remediation, Azure Table Storage, an Azure Automation lookup runbook, Excel, and HTML reporting. | Finished | 2026-09-09 |
+| [Local Administrator Solution (Interactive)](Intune/Solutions/LocalAdminSolution/LocalAdminSolutionInteractive/README.md) | [Detect](Intune/Solutions/LocalAdminSolution/LocalAdminSolutionInteractive/Remediation/Detect-LocalAdminSolution.ps1) / [Remediate](Intune/Solutions/LocalAdminSolution/LocalAdminSolutionInteractive/Remediation/Remediate-LocalAdminSolution.ps1) / [Deployment](Intune/Solutions/LocalAdminSolution/LocalAdminSolutionInteractive/Deployment/Deploy-LocalAdminReporting.ps1) / [Lookup runbook](Intune/Solutions/LocalAdminSolution/LocalAdminSolutionInteractive/Runbooks/Resolve-LocalAdminLookupNames.ps1) / [HTML export](Intune/Solutions/LocalAdminSolution/LocalAdminSolutionInteractive/HTML/Export-LocalAdminResolvedHtml.ps1) / [Backend](Intune/Solutions/LocalAdminSolution/LocalAdminSolutionInteractive/Backend/README.md) | Fresh-deployment variant with an interactive live report, Azure Functions backend, governance rules, and Conditional Access-protected Admin mode. | **Unfinished** | 2026-10-16 |
+| [Repair Primary User](Intune/Solutions/Repair-PrimaryUser/README.md) | [Deployment](Intune/Solutions/Repair-PrimaryUser/Deployment/Deploy-RepairPrimaryUser.ps1) / [Daily collection](Intune/Solutions/Repair-PrimaryUser/Runbooks/Collect-PrimaryUserSignInData.ps1) / [Weekly repair](Intune/Solutions/Repair-PrimaryUser/Runbooks/Repair-PrimaryUserAssignments.ps1) | Repairs Intune primary-user assignments from 28 days of aggregated Windows sign-ins using Azure Automation and Azure Tables. | Finished | 2026-09-07 |
 
 ## Intune remediations
 
@@ -35,7 +37,8 @@ Each entry links to its detection script. The remediation script is linked separ
 | New Outlook user setting | [Detect](Intune/Remediations/Detect-NewOutlookUSER.ps1) / [Remediate](Intune/Remediations/Remediate-NewOutlookUSER.ps1) | Finished | 2025-02-19 |
 | Print to PDF and XPS | [Detect](Intune/Remediations/Detect-PrintToPDFandXPS.ps1) / [Remediate](Intune/Remediations/Remediate-PrintToPDFandXPS.ps1) | Finished | 2025-02-19 |
 | SSO prompt administrator control | [Detect](Intune/Remediations/Detect-SSOPromptAdminControl.ps1) / [Remediate](Intune/Remediations/Remediate-SSOPromptAdminControl.ps1) | Finished | 2026-08-30 |
-| Reset Windows Update settings | [Detect](Intune/Platform%20Scripts/Detect-ResetWindowsUpdateSettings.ps1) / [Remediate](Intune/Platform%20Scripts/Reset-WindowsUpdateSettings.ps1) | Finished | 2026-08-30 |
+| VBA timestamp settings | [Detect](Intune/Remediations/Detect-VBATimestampSettings.ps1) / [Remediate](Intune/Remediations/Remediate-VBATimestampSettings.ps1) | Finished | 2026-09-07 |
+| Reset Windows Update settings | [Detect](Intune/Platform%20Scripts/Detect-ResetWindowsUpdateSettings.ps1) / [Remediate](Intune/Platform%20Scripts/Reset-WindowsUpdateSettings.ps1) | Finished | 2026-10-12 |
 
 See the [Intune remediation changelog](Intune/Remediations/changelog.md) for detailed changes.
 
@@ -75,6 +78,7 @@ See the [Intune remediation changelog](Intune/Remediations/changelog.md) for det
 | --- | --- | --- | --- |
 | [Get-GSAPolicyRuleIDandName.ps1](GlobalSecureAccess/Get-GSAPolicyRuleIDandName.ps1) | Lists Global Secure Access policy rule IDs and names. | Finished | 2025-08-29 |
 | [Script-ShowSignOutAndDisablePrivateAccessButton.ps1](GlobalSecureAccess/Script-ShowSignOutAndDisablePrivateAccessButton.ps1) | Configures Global Secure Access client sign-out and Private Access controls. | Finished | 2024-10-01 |
+| [Set-GSAInternalNetworkState.ps1](GlobalSecureAccess/Set-GSAInternalNetworkState.ps1) | Installs an event-triggered scheduled task that stops Global Secure Access services on the internal network, detected through reverse DNS, and starts them elsewhere. | Finished | 2026-10-16 |
 
 ### [Other](Other/README.md)
 
@@ -113,6 +117,8 @@ See the [Intune remediation changelog](Intune/Remediations/changelog.md) for det
 | [Set-BackgroundWallpaperAsUser.ps1](Intune/Platform%20Scripts/Set-BackgroundWallpaperAsUser.ps1) | Sets the desktop background in the user context. | Finished | 2025-08-05 |
 | [Set-DisableClipSVCSubscription.ps1](Intune/Platform%20Scripts/Set-DisableClipSVCSubscription.ps1) | Configures the ClipSVC subscription setting. | Finished | 2026-08-30 |
 | [Set-TimeZoneUsingAzureMaps.ps1](Intune/Platform%20Scripts/Set-TimeZoneUsingAzureMaps.ps1) | Sets the device time zone using location data and Azure Maps. | Finished | 2025-08-29 |
+| [Set-VBATimestampSettings.ps1](Intune/Platform%20Scripts/Set-VBATimestampSettings.ps1) | Configures VBA digital signature timestamp settings in all cloud-only Entra user profile hives. | Finished | 2026-09-07 |
+| [Test-IntunePlatformScriptStress.ps1](Intune/Platform%20Scripts/Test-IntunePlatformScriptStress.ps1) | Creates or removes unassigned Intune platform scripts to stress-test the tenant platform-script limit. | Finished | 2026-10-12 |
 
 ### Intune: Runbooks
 
@@ -123,7 +129,7 @@ See the [Intune remediation changelog](Intune/Remediations/changelog.md) for det
 | [Add-InfoToEntraDeviceExtensions.ps1](Intune/Runbooks/Add-InfoToEntraDeviceExtensions.ps1) | Writes primary-user and Intune information to Entra device extension attributes. | Finished | 2025-12-11 |
 | [BrokenAutopilotDeviceCleanup-Runbook.ps1](Intune/Runbooks/BrokenAutopilotDeviceCleanup-Runbook.ps1) | Runs analysis or cleanup of stale Autopilot-related device records in Azure Automation. | Finished | 2026-08-30 |
 | [Delete-DevicesOlderThanDays.ps1](Intune/Runbooks/Delete-DevicesOlderThanDays.ps1) | Deletes devices older than a configured age. | Finished | 2026-05-01 |
-| [Repair-PrimaryUser.ps1](Intune/Runbooks/Repair-PrimaryUser.ps1) | Repairs Intune primary-user assignments. | **Unfinished** | 2026-08-30 |
+| [Repair-PrimaryUser.ps1](Intune/Runbooks/Repair-PrimaryUser.ps1) | Repairs Intune primary-user assignments; superseded by the [Repair Primary User](Intune/Solutions/Repair-PrimaryUser/README.md) solution. | **Unfinished** | 2026-08-30 |
 
 Additional setup guidance is available in the [runbook README](Intune/Runbooks/README.md).
 
