@@ -72,3 +72,18 @@ test('profile client binds browser fetch to the global object', async () => {
   await client.getProfile({ type: 'entra', getAccessToken: async () => 'token-value' });
   assert.equal(receiver, globalThis);
 });
+
+test('cancelled identity searches pass their abort signal through the authenticated BFF client', async () => {
+  const controller = new AbortController();
+  const client = new ProfileClient('/v1', async (url, options) => {
+    assert.equal(options.signal, controller.signal);
+    options.signal.throwIfAborted();
+    return response(200, { identities: [] });
+  });
+  controller.abort();
+  await assert.rejects(
+    client.request('GET', '/identities/lookup?type=User&q=example',
+      { type: 'entra', getAccessToken: async () => 'token-value' }, { signal: controller.signal }),
+    error => error.name === 'AbortError'
+  );
+});

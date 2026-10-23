@@ -9,6 +9,7 @@ import { ActionService } from './actionService.js';
 import { AdminSessionService } from './adminSessionService.js';
 import { RuleService } from './ruleService.js';
 import type { RuleTransition } from './ruleModels.js';
+import type { DirectoryLookupService } from './directoryService.js';
 
 export interface AppDependencies {
   config: AppConfig;
@@ -17,6 +18,7 @@ export interface AppDependencies {
   actions: ActionService;
   rules: RuleService;
   adminSessions: AdminSessionService;
+  directory: Pick<DirectoryLookupService, 'lookup'>;
 }
 
 async function jsonBody(request: HttpRequest, optional = false): Promise<unknown> {
@@ -47,6 +49,13 @@ export function createProfileHandlers(dependencies: AppDependencies) {
   };
 
   return {
+    lookupIdentities: async (request: HttpRequest, context: InvocationContext) =>
+      execute(request, context, async id => {
+        const identity = await authenticate(request, dependencies.verifier);
+        const result = await dependencies.directory.lookup(identity, request.query.get('type') || '', request.query.get('q') || '');
+        return response(200, result, request, dependencies.config, id);
+      }),
+
     options: async (request: HttpRequest, context: InvocationContext) =>
       execute(request, context, async id => response(204, null, request, dependencies.config, id)),
 

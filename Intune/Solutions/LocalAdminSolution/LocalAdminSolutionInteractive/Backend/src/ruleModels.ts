@@ -22,6 +22,8 @@ export interface GovernanceProposal {
   PrincipalType: 'User' | 'Group';
   MatchType: 'SID';
   PrincipalValue: string;
+  PrincipalDisplayName?: string;
+  PrincipalUserPrincipalName?: string;
   PrincipalSource: 'Local' | 'Entra' | 'AD' | 'Any';
   MembershipScope: 'Direct' | 'Transitive' | 'Any';
   AssignedThroughGroupSid?: string;
@@ -106,11 +108,15 @@ export function validateGovernanceProposal(value: unknown, now: Date): Governanc
   if (reason.length < 10 || reason.length > 2000) throw new Error('reason must contain between 10 and 2000 characters.');
   const ticketReference = optionalText(input.ticketReference, 'ticketReference', 100);
   const owner = optionalText(input.owner, 'owner', 200);
+  const displayName = optionalText(input.principalDisplayName, 'principalDisplayName', 256);
+  const userPrincipalName = optionalText(input.principalUserPrincipalName, 'principalUserPrincipalName', 1024);
   return {
     Effect: choice(input.effect, 'effect', ['Allow', 'Deny'] as const),
     PrincipalType: choice(input.principalType, 'principalType', ['User', 'Group'] as const),
     MatchType: 'SID',
     PrincipalValue: principalValue,
+    ...(displayName ? { PrincipalDisplayName: displayName } : {}),
+    ...(userPrincipalName ? { PrincipalUserPrincipalName: userPrincipalName } : {}),
     PrincipalSource: choice(input.principalSource, 'principalSource', ['Local', 'Entra', 'AD', 'Any'] as const, 'Any'),
     MembershipScope: membershipScope,
     ...(assignedThroughGroupSid ? { AssignedThroughGroupSid: assignedThroughGroupSid } : {}),

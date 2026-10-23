@@ -1,3 +1,4 @@
 LocalAdminReporting-Secrets_*.txt
 *.log
 .localadmin-deployment-state.json
+LocalAdminReporting-DeploymentReport_*

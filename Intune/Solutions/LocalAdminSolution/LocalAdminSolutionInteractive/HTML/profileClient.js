@@ -37,7 +37,7 @@ export class ProfileClient {
     throw new Error('A Microsoft Entra or recovery identity is required.');
   }
 
-  async request(method, path, authentication, { body, etag, create = false, idempotencyKey = '' } = {}) {
+  async request(method, path, authentication, { body, etag, create = false, idempotencyKey = '', signal } = {}) {
     const requestCorrelation = correlationId();
     const headers = {
       Accept: 'application/json',
@@ -51,6 +51,7 @@ export class ProfileClient {
       method,
       headers,
       cache: 'no-store',
+      ...(signal ? { signal } : {}),
       ...(body !== undefined ? { body: JSON.stringify(body) } : {})
     });
     const payload = response.status === 204 ? null : await response.json().catch(() => null);

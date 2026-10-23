@@ -1,6 +1,7 @@
 export interface AppConfig {
   tenantId: string;
   clientId: string;
+  spaClientId: string;
   governanceTableEndpoint: string;
   allowedOrigins: ReadonlySet<string>;
   adminAuthContextId: string;
@@ -18,9 +19,11 @@ function required(name: string, values: NodeJS.ProcessEnv): string {
 export function loadConfig(values: NodeJS.ProcessEnv = process.env): AppConfig {
   const tenantId = required('TENANT_ID', values).toLowerCase();
   const clientId = required('API_CLIENT_ID', values).toLowerCase();
+  const spaClientId = required('SPA_CLIENT_ID', values).toLowerCase();
   const governanceTableEndpoint = required('GOVERNANCE_TABLE_ENDPOINT', values).replace(/\/+$/, '');
   if (!guidPattern.test(tenantId)) throw new Error('TENANT_ID must be a GUID.');
   if (!guidPattern.test(clientId)) throw new Error('API_CLIENT_ID must be a GUID.');
+  if (!guidPattern.test(spaClientId)) throw new Error('SPA_CLIENT_ID must be a GUID.');
   if (!/^https:\/\/[a-z0-9]{3,24}\.table\.core\.windows\.net$/i.test(governanceTableEndpoint)) {
     throw new Error('GOVERNANCE_TABLE_ENDPOINT must be an HTTPS Azure Table endpoint.');
   }
@@ -41,5 +44,5 @@ export function loadConfig(values: NodeJS.ProcessEnv = process.env): AppConfig {
   if (!Number.isInteger(adminSessionMaxMinutes) || adminSessionMaxMinutes < 5 || adminSessionMaxMinutes > 240) {
     throw new Error('ADMIN_SESSION_MAX_MINUTES must be a whole number from 5 to 240.');
   }
-  return { tenantId, clientId, governanceTableEndpoint, allowedOrigins, adminAuthContextId, adminSessionMaxMinutes };
+  return { tenantId, clientId, spaClientId, governanceTableEndpoint, allowedOrigins, adminAuthContextId, adminSessionMaxMinutes };
 }

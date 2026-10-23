@@ -28,3 +28,24 @@ test('authorization responses are relayed through the MSAL redirect bridge', asy
   );
   assert.equal(relayed, true);
 });
+
+test('state-only sign-out callbacks are relayed instead of starting another report', async () => {
+  for (const location of [
+    { search: '?state=logout-request-state', hash: '' },
+    { search: '', hash: '#state=logout-request-state' }
+  ]) {
+    assert.equal(isAuthenticationResponse(location), true);
+    let relayed = false;
+    await bootstrapBrowser(location, {
+      async broadcastResponseToMainFrame() { relayed = true; }
+    });
+    assert.equal(relayed, true);
+  }
+});
+
+test('sign-out callback reports a missing redirect bridge', async () => {
+  await assert.rejects(
+    bootstrapBrowser({ search: '?state=logout-request-state', hash: '' }, {}),
+    /redirect bridge could not be loaded/
+  );
+});

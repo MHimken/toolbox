@@ -266,6 +266,141 @@ function ConvertTo-GroupDetails {
     })
 }
 
+function Get-JavaScriptModuleImports {
+    param([string]$Source, [string]$ModuleName)
+    $pattern = '(?ms)^import\s*\{(?<names>[^}]*)\}\s*from\s*''\./(?<module>[A-Za-z0-9_.-]+?\.js)(?:\?[^'']*)?'';[ \t]*\r?\n?'
+    $imports = foreach ($match in [regex]::Matches($Source, $pattern)) {
+        $bindings = foreach ($part in ($match.Groups['names'].Value -split ',')) {
+            $binding = $part.Trim()
+            if (-not $binding) { continue }
+            if ($binding -notmatch '^(?<name>[A-Za-z_][A-Za-z0-9_]*)(?:\s+as\s+(?<alias>[A-Za-z_][A-Za-z0-9_]*))?$') {
+                throw "Unsupported import binding '$binding' in $ModuleName."
+            }
+            [pscustomobject]@{ Name = $Matches['name']; Alias = if ($Matches['alias']) { $Matches['alias'] } else { $Matches['name'] } }
+        }
+        [pscustomobject]@{ Module = $match.Groups['module'].Value; Bindings = @($bindings); Text = $match.Value }
+    }
+    $remaining = $Source
+    foreach ($import in $imports) { $remaining = $remaining.Replace($import.Text, '') }
+    if ($remaining -match '(?m)^\s*import[\s{*]' -or $remaining -match '\bimport\s*\(') {
+        throw "$ModuleName contains an import form that the snapshot bundler does not support."
+    }
+    return @($imports)
+}
+
+function ConvertTo-SnapshotModuleScript {
+    param(
+        [Parameter(Mandatory)][string]$ModuleName,
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][hashtable]$AvailableExports,
+        [switch]$Entry
+    )
+    if ($Source -match '(?m)^\s*export\s*(\{|default\b|\*)') {
+        throw "$ModuleName uses an export form that the snapshot bundler does not support."
+    }
+    $body = $Source
+    $prelude = foreach ($import in (Get-JavaScriptModuleImports -Source $Source -ModuleName $ModuleName)) {
+        if (-not $AvailableExports.ContainsKey($import.Module)) {
+            throw "$ModuleName imports $($import.Module), which is neither inlined nor stubbed in the snapshot."
+        }
+        $missing = @($import.Bindings | Where-Object { $AvailableExports[$import.Module] -notcontains $_.Name } | ForEach-Object Name)
+        if ($missing.Count) {
+            throw "$ModuleName imports $($missing -join ', ') from $($import.Module), which the snapshot does not provide."
+        }
+        $body = $body.Replace($import.Text, '')
+        $names = $import.Bindings | ForEach-Object { if ($_.Name -eq $_.Alias) { $_.Name } else { "$($_.Name): $($_.Alias)" } }
+        "const { $($names -join ', ') } = __snapshotModules['$($import.Module)'];"
+    }
+    $exports = @([regex]::Matches($Source, '(?m)^export\s+(?:async\s+)?(?:function\*?|const|let|class)\s+([A-Za-z_][A-Za-z0-9_]*)') | ForEach-Object { $_.Groups[1].Value })
+    $AvailableExports[$ModuleName] = $exports
+    $body = $body -replace '(?m)^export\s+', ''
+    $preludeText = @($prelude) -join "`n"
+    if ($Entry) {
+        return "(async () => {`n$preludeText`n$body`n})().catch(error => { console.error(error); });"
+    }
+    return "__snapshotModules['$ModuleName'] = (() => {`n$preludeText`n$body`nreturn { $($exports -join ', ') };`n})();"
+}
+
+function New-LocalAdminSnapshotHtml {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$ReportData,
+        [string]$SourceRoot = $PSScriptRoot
+    )
+    $readSource = { param($Name) Get-Content -LiteralPath (Join-Path -Path $SourceRoot -ChildPath $Name) -Raw -Encoding UTF8 }
+    # Modules that are safe offline are inlined; live, profile, and Admin-mode modules are replaced by inert stubs.
+    $stubs = [ordered]@{
+        'storage.js'       = [ordered]@{
+            loadConnection          = 'loadConnection() { return null; }'
+            loadLastSuccessfulRun   = 'loadLastSuccessfulRun() { return null; }'
+            loadPreferences         = 'loadPreferences() { return { version: 1, staleThresholdDays: 90, reviewWindowDays: 90, pageSize: 50, defaultView: ''summary'', groupByComputer: true, timeDisplay: ''local'', csvFilenamePrefix: ''LocalAdmin'', tableLayouts: {} }; }'
+            loadRecoveryProfile     = 'loadRecoveryProfile() { return null; }'
+            removeConnection        = 'removeConnection() { return true; }'
+            removeRecoveryProfile   = 'removeRecoveryProfile() { return false; }'
+            saveConnection          = 'saveConnection() { return false; }'
+            saveLastSuccessfulRun   = 'saveLastSuccessfulRun() { return false; }'
+            savePreferences         = 'savePreferences() { return false; }'
+            saveRecoveryProfile     = 'saveRecoveryProfile() { return false; }'
+            generateRecoveryProfile = 'async generateRecoveryProfile() { throw new Error(''Recovery profiles are unavailable in generated snapshots.''); }'
+            importRecoveryProfile   = 'async importRecoveryProfile() { throw new Error(''Recovery profiles are unavailable in generated snapshots.''); }'
+        }
+        'auth.js'          = [ordered]@{
+            hasCompleteEntraConfig = 'hasCompleteEntraConfig() { return false; }'
+            EntraAuthClient        = 'EntraAuthClient: class {}'
+        }
+        'profileClient.js' = [ordered]@{
+            ProfileApiError = 'ProfileApiError: class extends Error {}'
+            ProfileClient   = 'ProfileClient: class {}'
+        }
+        'adminMode.js'     = [ordered]@{
+            AdminClient             = 'AdminClient: class {}'
+            AdminModeController     = 'AdminModeController: class {}'
+            adminIdleTimeoutMinutes = 'adminIdleTimeoutMinutes: 15'
+            isAdminSessionError     = 'isAdminSessionError() { return false; }'
+            normalizeSidInput       = 'normalizeSidInput(value) { return String(value ?? '''').trim(); }'
+            previewRuleFromProposal = 'previewRuleFromProposal() { return {}; }'
+            previewRuleMatches      = 'previewRuleMatches() { return { rows: 0, computers: 0, entries: [] }; }'
+            proposalFromReviewRow   = 'proposalFromReviewRow() { return {}; }'
+            validateProposalDraft   = 'validateProposalDraft() { return [''Governance proposals are unavailable in generated snapshots.'']; }'
+        }
+    }
+    $available = @{}
+    $scripts = [System.Collections.Generic.List[string]]::new()
+    $scripts.Add("'use strict';`nconst __snapshotModules = Object.create(null);")
+    foreach ($module in $stubs.Keys) {
+        $available[$module] = @($stubs[$module].Keys)
+        $scripts.Add("__snapshotModules['$module'] = Object.freeze({ $(@($stubs[$module].Values) -join ', ') });")
+    }
+    foreach ($module in @('apiContract.js', 'dataService.js', 'connection.js', 'tableLayout.js', 'identityLookup.js')) {
+        $scripts.Add((ConvertTo-SnapshotModuleScript -ModuleName $module -Source (& $readSource $module) -AvailableExports $available))
+    }
+    $scripts.Add((ConvertTo-SnapshotModuleScript -ModuleName 'app.js' -Source (& $readSource 'app.js') -AvailableExports $available -Entry))
+    $bundle = $scripts -join "`n"
+    if ($bundle -match '(?i)</script') {
+        throw 'The snapshot JavaScript contains a closing script tag and cannot be embedded safely.'
+    }
+
+    $json = ($ReportData | ConvertTo-Json -Depth 8 -Compress).Replace('<', '\u003c')
+    $styles = & $readSource 'styles.css'
+    $html = & $readSource 'index.html'
+    $requiredReplacements = [ordered]@{
+        '__REPORT_DATA__'                                         = $json
+        '<link rel="stylesheet" href="styles.css">'               = "<style>`n$styles`n</style>"
+        '  <script src="vendor/msal-browser.min.js"></script>'    = ''
+        '  <script src="vendor/msal-redirect-bridge.min.js"></script>' = ''
+    }
+    foreach ($marker in $requiredReplacements.Keys) {
+        if (-not $html.Contains($marker)) { throw "The HTML template no longer contains '$marker'." }
+        $html = $html.Replace($marker, $requiredReplacements[$marker])
+    }
+    $bootstrap = [regex]::Match($html, '<script type="module" src="bootstrap\.js(?:\?[^"]*)?"></script>')
+    if (-not $bootstrap.Success) { throw 'The HTML template no longer contains the bootstrap.js module script.' }
+    $html = $html.Remove($bootstrap.Index, $bootstrap.Length).Insert($bootstrap.Index, "<script>`n$bundle`n</script>")
+    if ($html -match '(?i)<(script|link|img|iframe)\b[^>]*\b(src|href)\s*=') {
+        throw 'The generated snapshot still references an external resource.'
+    }
+    return $html
+}
+
 try {
     Initialize-Script
     if ([string]::IsNullOrWhiteSpace($StorageAccountName) -or $StorageAccountName -eq '<storage-account-name>') {
@@ -304,42 +439,7 @@ try {
     if (-not (Test-Path -LiteralPath $templatePath)) {
         throw "The HTML template was not found at $templatePath."
     }
-    $json = ($reportData | ConvertTo-Json -Depth 8 -Compress).Replace('<', '\u003c')
-    $styles = Get-Content -LiteralPath (Join-Path -Path $PSScriptRoot -ChildPath 'styles.css') -Raw
-    $apiContract = (Get-Content -LiteralPath (Join-Path -Path $PSScriptRoot -ChildPath 'apiContract.js') -Raw) -replace '(?m)^export\s+', ''
-    $dataService = (Get-Content -LiteralPath (Join-Path -Path $PSScriptRoot -ChildPath 'dataService.js') -Raw) -replace '(?m)^import .*\r?\n', '' -replace '(?m)^export\s+', ''
-    $connection = (Get-Content -LiteralPath (Join-Path -Path $PSScriptRoot -ChildPath 'connection.js') -Raw) -replace '(?m)^import .*\r?\n', '' -replace '(?m)^export\s+', ''
-    $application = (Get-Content -LiteralPath (Join-Path -Path $PSScriptRoot -ChildPath 'app.js') -Raw) -replace '(?ms)^import .*?;\r?\n', ''
-    $snapshotStorage = @'
-function loadConnection() { return null; }
-function loadLastSuccessfulRun() { return null; }
-function loadPreferences() { return { version: 1, staleThresholdDays: 90, reviewWindowDays: 90, pageSize: 50, defaultView: 'summary', groupByComputer: true, timeDisplay: 'local', csvFilenamePrefix: 'LocalAdmin' }; }
-function loadRecoveryProfile() { return null; }
-function removeConnection() { return true; }
-function removeRecoveryProfile() { return false; }
-function saveConnection() { return false; }
-function saveLastSuccessfulRun() { return false; }
-function savePreferences() { return false; }
-async function generateRecoveryProfile() { throw new Error('Recovery profiles are unavailable in generated snapshots.'); }
-async function importRecoveryProfile() { throw new Error('Recovery profiles are unavailable in generated snapshots.'); }
-function hasCompleteEntraConfig() { return false; }
-class EntraAuthClient {}
-class ProfileApiError extends Error {}
-class ProfileClient {}
-class AdminClient {}
-class AdminModeController {}
-const adminIdleTimeoutMinutes = 15;
-function isAdminSessionError() { return false; }
-function previewMatches() { return { rows: 0, computers: 0 }; }
-function proposalFromReviewRow() { return {}; }
-function validateProposalDraft() { return ['Governance proposals are unavailable in generated snapshots.']; }
-'@
-    $html = Get-Content -LiteralPath $templatePath -Raw
-    $html = $html.Replace('__REPORT_DATA__', $json)
-    $html = $html.Replace('<link rel="stylesheet" href="styles.css">', "<style>`n$styles`n</style>")
-    $html = $html.Replace('  <script src="vendor/msal-browser.min.js"></script>', '')
-    $html = $html.Replace('  <script src="vendor/msal-redirect-bridge.min.js"></script>', '')
-    $html = $html.Replace('<script type="module" src="bootstrap.js?v=20261012-1"></script>', "<script>`n$apiContract`n$dataService`n$connection`n$snapshotStorage`n$application`n</script>")
+    $html = New-LocalAdminSnapshotHtml -ReportData $reportData
     $outputDirectory = Split-Path -Path $OutputPath -Parent
     if ($outputDirectory -and -not (Test-Path -LiteralPath $outputDirectory)) {
         $null = New-Item -Path $outputDirectory -ItemType Directory -Force

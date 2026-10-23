@@ -7,6 +7,10 @@ export const adminSessionExpiryCodes = Object.freeze(['admin_auth_context_requir
 const sidPattern = /^S-\d(?:-\d+)+$/i;
 const deviceValuePattern = /^[A-Za-z0-9._-]{1,64}$/;
 
+export function normalizeSidInput(value) {
+  return String(value || '').trim().replace(/[\u2010\u2011]/g, '-').toUpperCase();
+}
+
 function newIdempotencyKey() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   throw new Error('This browser cannot create a secure request identifier.');
@@ -19,11 +23,11 @@ export class AdminClient {
   }
 
   async enterSession(authentication) {
-    return (await this.client.request('POST', '/admin/session', authentication, { body: {} })).payload;
+    return (await this.client.request('POST', '/sessions/admin', authentication, { body: {} })).payload;
   }
 
   async exitSession(authentication, reason = 'user') {
-    await this.client.request('DELETE', `/admin/session?reason=${encodeURIComponent(reason)}`, authentication);
+    await this.client.request('DELETE', `/sessions/admin?reason=${encodeURIComponent(reason)}`, authentication);
   }
 
   async listRules(authentication, scope = 'governance') {
@@ -70,6 +74,7 @@ export class AdminModeController {
     client,
     auth,
     onChange = () => {},
+    onCountdown = () => {},
     now = () => Date.now(),
     setTimer = globalThis.setTimeout?.bind(globalThis),
     clearTimer = globalThis.clearTimeout?.bind(globalThis),
@@ -78,6 +83,7 @@ export class AdminModeController {
     this.client = client;
     this.auth = auth;
     this.onChange = onChange;
+    this.onCountdown = onCountdown;
     this.now = now;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
@@ -87,6 +93,8 @@ export class AdminModeController {
     this.accountId = '';
     this.idleTimer = null;
     this.expiryTimer = null;
+    this.countdownTimer = null;
+    this.idleExpiresAt = 0;
   }
 
   get active() {
@@ -131,7 +139,21 @@ export class AdminModeController {
   touch() {
     if (!this.session) return;
     if (this.idleTimer) this.clearTimer(this.idleTimer);
+    this.idleExpiresAt = this.now() + this.idleTimeoutMs;
     this.idleTimer = this.setTimer(() => { void this.exit('idle'); }, this.idleTimeoutMs);
+    this.updateCountdown();
+  }
+
+  updateCountdown() {
+    if (this.countdownTimer) this.clearTimer(this.countdownTimer);
+    this.countdownTimer = null;
+    const now = this.now();
+    const remaining = Math.max(0, this.idleExpiresAt - now);
+    const totalRemaining = this.session ? Math.max(0, Date.parse(this.session.expiresAtUtc) - now) : 0;
+    this.onCountdown(remaining, totalRemaining);
+    if (this.session && remaining > 0 && totalRemaining > 0) {
+      this.countdownTimer = this.setTimer(() => this.updateCountdown(), Math.min(1000, remaining, totalRemaining));
+    }
   }
 
   scheduleExpiry() {
@@ -151,10 +173,14 @@ export class AdminModeController {
     const session = this.session;
     if (this.idleTimer) this.clearTimer(this.idleTimer);
     if (this.expiryTimer) this.clearTimer(this.expiryTimer);
+    if (this.countdownTimer) this.clearTimer(this.countdownTimer);
     this.idleTimer = this.expiryTimer = null;
+    this.countdownTimer = null;
+    this.idleExpiresAt = 0;
     this.session = null;
     this.token = '';
     this.accountId = '';
+    this.onCountdown(0, 0);
     this.onChange({ active: false, reason, session });
     try {
       await this.client.exitSession({ type: 'entra', getAccessToken: async () => token }, reason);
@@ -183,6 +209,8 @@ export function proposalFromReviewRow(row) {
     effect: 'Allow',
     principalType: row?.PrincipalType === 'Group' ? 'Group' : 'User',
     principalSid: String(row?.PrincipalID || row?.SID || ''),
+    principalDisplayName: String(row?.PrincipalName || row?.UserName || row?.GroupName || ''),
+    principalUserPrincipalName: String(row?.UserPrincipalName || ''),
     principalSource: ['Local', 'Entra', 'AD'].includes(source) ? source : 'Any',
     membershipScope: groupSid ? 'Transitive' : (['Direct', 'Transitive'].includes(membership) ? membership : 'Any'),
     ...(groupSid ? { assignedThroughGroupSid: groupSid } : {}),
@@ -199,8 +227,8 @@ export function validateProposalDraft(proposal, now = new Date()) {
   const errors = [];
   if (!['Allow', 'Deny'].includes(proposal.effect)) errors.push('Choose Allow or Deny.');
   if (!['User', 'Group'].includes(proposal.principalType)) errors.push('Choose a principal type.');
-  if (!sidPattern.test(String(proposal.principalSid || '').trim())) errors.push('Principal SID must be a valid SID (S-1-...).');
-  if (proposal.assignedThroughGroupSid && !sidPattern.test(proposal.assignedThroughGroupSid)) errors.push('Assigned-through group must be a valid SID.');
+  if (!sidPattern.test(normalizeSidInput(proposal.principalSid))) errors.push('Principal SID must be a valid SID (S-1-...).');
+  if (proposal.assignedThroughGroupSid && !sidPattern.test(normalizeSidInput(proposal.assignedThroughGroupSid))) errors.push('Assigned-through group must be a valid SID.');
   if (proposal.assignedThroughGroupSid && proposal.membershipScope !== 'Transitive') errors.push('An assigned-through group requires Transitive membership.');
   if (proposal.deviceScopeType !== 'Any' && !deviceValuePattern.test(String(proposal.deviceScopeValue || ''))) {
     errors.push('Device value must contain 1 to 64 letters, numbers, dots, underscores, or hyphens (no wildcards).');
@@ -223,12 +251,13 @@ export function validateProposalDraft(proposal, now = new Date()) {
 
 export function previewRuleFromProposal(proposal) {
   return {
+    Effect: proposal.effect,
     PrincipalType: proposal.principalType,
     MatchType: 'SID',
-    PrincipalValue: String(proposal.principalSid || '').trim().toUpperCase(),
+    PrincipalValue: normalizeSidInput(proposal.principalSid),
     PrincipalSource: proposal.principalSource || 'Any',
     MembershipScope: proposal.membershipScope || 'Any',
-    AssignedThroughGroupSid: proposal.assignedThroughGroupSid || '',
+    AssignedThroughGroupSid: normalizeSidInput(proposal.assignedThroughGroupSid),
     DeviceScopeType: proposal.deviceScopeType || 'Any',
     DeviceScopeValue: proposal.deviceScopeValue || '',
     AllowedEntraJoined: proposal.allowedEntraJoined === true,
@@ -239,10 +268,15 @@ export function previewRuleFromProposal(proposal) {
 }
 
 export function previewMatches(proposal, reviewRows) {
-  const rule = previewRuleFromProposal(proposal);
-  const matches = (reviewRows || []).filter(row => ruleMatches(rule, row));
+  const { rows, computers } = previewRuleMatches(previewRuleFromProposal(proposal), reviewRows);
+  return { rows, computers };
+}
+
+export function previewRuleMatches(rule, reviewRows) {
+  const entries = (reviewRows || []).filter(row => ruleMatches(rule, row));
   return {
-    rows: matches.length,
-    computers: new Set(matches.map(row => String(row.ComputerName || '').toLowerCase())).size
+    rows: entries.length,
+    computers: new Set(entries.map(row => String(row.ComputerName || '').toLowerCase())).size,
+    entries
   };
 }

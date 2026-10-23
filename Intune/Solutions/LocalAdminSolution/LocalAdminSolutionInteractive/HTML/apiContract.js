@@ -73,9 +73,9 @@ function parsedDate(value) {
 
 export function normalizedSource(value) {
   const source = valueText(value).toLowerCase();
-  if (source.includes('entra') || source === 'azuread') return 'Entra';
-  if (source === 'ad' || source.includes('active directory')) return 'AD';
-  if (source === 'local') return 'Local';
+  if (source === 'e' || source.includes('entra') || source === 'azuread') return 'Entra';
+  if (source === 'a' || source === 'ad' || source.includes('active directory')) return 'AD';
+  if (source === 'l' || source === 'local') return 'Local';
   return source ? valueText(value) : '';
 }
 

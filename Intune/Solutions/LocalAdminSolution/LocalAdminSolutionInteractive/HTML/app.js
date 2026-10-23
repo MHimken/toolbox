@@ -1,8 +1,9 @@
 import { loadRuntimeConfig, runtimeConfigDefaults, validateSasConnection } from './connection.js';
 import { EntraAuthClient, hasCompleteEntraConfig } from './auth.js';
-import { AdminClient, AdminModeController, adminIdleTimeoutMinutes, isAdminSessionError, previewMatches, proposalFromReviewRow, validateProposalDraft } from './adminMode.js';
-import { calculateReportingState, getAzureTableEntities, resolveAzureData, resolveReviewData, text } from './dataService.js';
+import { AdminClient, AdminModeController, adminIdleTimeoutMinutes, isAdminSessionError, normalizeSidInput, previewRuleFromProposal, previewRuleMatches, proposalFromReviewRow, validateProposalDraft } from './adminMode.js';
+import { buildCsv, calculateReportingState, getAzureTableEntities, resolveAzureData, resolveReviewData, text } from './dataService.js';
 import { ProfileApiError, ProfileClient } from './profileClient.js';
+import { identityUsage, LocalFirstIdentityLookup, searchLocalIdentities } from './identityLookup.js';
 import {
   createDefaultColumnLayout,
   defaultColumnWidth,
@@ -66,7 +67,7 @@ import {
       groups: { rows: REPORT.groups, columns: [['GroupID', 'Group ID'], ['GroupName', 'Group name'], ['LocalOrEntraOrAD', 'Source'], ['ObservedAt', 'Observed'], ['ResolutionState', 'Resolution state'], ['Timestamp', 'Azure timestamp']] },
       devices: { rows: REPORT.devices, columns: [['ComputerName', 'Computer name'], ['EntraDisplayName', 'Entra display name'], ['EntraDeviceId', 'Entra device ID'], ['EntraState', 'Entra state'], ['AccountEnabled', 'Entra enabled'], ['IntuneState', 'Intune state'], ['IntuneManagedDeviceId', 'Intune managed-device ID'], ['IntuneLastSyncUtc', 'Intune last sync'], ['ComplianceState', 'Compliance'], ['IntuneRecordCount', 'Intune records'], ['OperatingSystem', 'Operating system'], ['ComputerSid', 'Computer SID'], ['LastReportUtc', 'Collector last report'], ['DaysSinceLastReport', 'Days since report'], ['ReportingState', 'Collector reporting'], ['JoinState', 'Join state'], ['ActiveAdminEntries', 'Active entries'], ['RemovedEntries', 'Removed entries'], ['ReviewStatus', 'Review status']] },
       review: { rows: REPORT.review, columns: [['ComputerName', 'Computer name'], ['PrincipalID', 'Principal SID'], ['PrincipalType', 'Principal type'], ['PrincipalName', 'Principal name'], ['PrincipalSource', 'Principal source'], ['MembershipType', 'Membership type'], ['AddedThroughGroupName', 'Added through group'], ['JoinState', 'Join state'], ['EntraState', 'Entra state'], ['IntuneState', 'Intune state'], ['LastReportUtc', 'Last report'], ['PolicyStatus', 'Policy status'], ['ReviewStatus', 'Review status'], ['MatchingRuleIds', 'Matching rule IDs'], ['DecisiveRuleIds', 'Decisive rule IDs'], ['CorrelationId', 'Correlation ID']] },
-      governance: { rows: REPORT.governance, columns: [['PartitionKey', 'Owner / scope'], ['RowKey', 'Rule ID'], ['RuleScope', 'Rule scope'], ['Effect', 'Effect'], ['PrincipalType', 'Principal type'], ['MatchType', 'Match type'], ['PrincipalValue', 'Principal value'], ['PrincipalSource', 'Principal source'], ['MembershipScope', 'Membership scope'], ['DeviceScopeType', 'Device scope'], ['DeviceScopeValue', 'Device value'], ['ValidFromUtc', 'Valid from'], ['ValidUntilUtc', 'Valid until'], ['Status', 'Status'], ['Owner', 'Owner'], ['Reason', 'Reason'], ['TicketReference', 'Ticket'], ['SchemaVersion', 'Schema version']] }
+      governance: { rows: REPORT.governance, columns: [['PartitionKey', 'Owner / scope'], ['RowKey', 'Rule ID'], ['RuleScope', 'Rule scope'], ['Effect', 'Effect'], ['PrincipalType', 'Principal type'], ['MatchType', 'Match type'], ['PrincipalValue', 'Principal value'], ['PrincipalDisplayName', 'Principal name (informational)'], ['PrincipalUserPrincipalName', 'Principal UPN (informational)'], ['PrincipalSource', 'Principal source'], ['MembershipScope', 'Membership scope'], ['DeviceScopeType', 'Device scope'], ['DeviceScopeValue', 'Device value'], ['ValidFromUtc', 'Valid from'], ['ValidUntilUtc', 'Valid until'], ['Status', 'Status'], ['Owner', 'Owner'], ['Reason', 'Reason'], ['TicketReference', 'Ticket'], ['SchemaVersion', 'Schema version']] }
     };
     function defaultColumnLayoutForView(view) {
       return createDefaultColumnLayout(views[view]?.columns);
@@ -78,8 +79,40 @@ import {
       return normalizeSavedTableLayouts(views, layouts);
     }
     const state = { view: preferences.defaultView, defaultView: preferences.defaultView, query: '', join: '', removed: '', grouped: preferences.groupByComputer, expandedComputers: [], expandedGroups: [], sortRules: [{ key: 'ComputerName', direction: 1 }], page: 1, size: preferences.pageSize, linked: false, staleThresholdDays: preferences.staleThresholdDays, reviewWindowDays: preferences.reviewWindowDays, timeDisplay: preferences.timeDisplay, csvFilenamePrefix: preferences.csvFilenamePrefix, tableLayouts: normalizeTableLayouts(preferences.tableLayouts || {}) };
-    const elements = Object.fromEntries(['generatedAt','headerCount','visibleCount','totalMain','totalRemoved','totalComputers','totalUsers','totalGroups','adminModeButton','adminModeStatus','connectionPanel','storageAccountName','sasToken','governanceStorageAccountName','governanceSasToken','rememberConnection','forgetConnection','refreshButton','refreshWarning','hostConfigStatus','refreshStatus','governanceTab','backButton','search','joinField','joinFilter','removedField','removedFilter','groupField','groupToggle','staleField','staleThreshold','pageSize','resetButton','resetTableLayoutButton','exportButton','tableHead','tableBody','emptyState','pageInfo','firstPage','previousPage','nextPage','lastPage','settingsPanel','guidancePanel','defaultViewSetting','pageSizeSetting','timeDisplaySetting','staleThresholdSetting','reviewWindowSetting','csvPrefixSetting','groupByComputerSetting','saveSettingsButton','settingsStatus','cloudProfileStatus','signInButton','syncProfileButton','signOutButton','profileStatus','recoveryCodeInput','rememberRecoveryProfile','generateRecoveryButton','importRecoveryButton','forgetRecoveryButton',    'recoveryResult','recoveryCodeOutput','proposeRuleButton','ruleDialog','ruleForm','ruleEffect','rulePrincipalType','rulePrincipalSid','rulePrincipalSource','ruleMembershipScope','ruleAssignedThroughGroupSid','ruleDeviceScopeType','ruleDeviceScopeValue','ruleAllowedEntraJoined','ruleAllowedHybridJoined','ruleAllowedDomainJoined','ruleMaxDeviceAgeDays','ruleValidFrom','ruleValidUntil','ruleTicketReference','ruleReason','rulePreview','ruleFormStatus','ruleCancelButton','ruleSubmitButton','reasonDialog','reasonForm','reasonDialogTitle','reasonDialogSummary','reasonInput','reasonFormStatus','reasonCancelButton','reasonSubmitButton'].map(id => [id, document.getElementById(id)]));
+    const elements = Object.fromEntries(['generatedAt','headerCount','visibleCount','totalMain','totalRemoved','totalComputers','totalUsers','totalGroups','adminModeButton','adminModeStatus','adminIdleCountdown','adminIdleRemaining','adminTotalRemaining','connectionPanel','storageAccountName','sasToken','governanceStorageAccountName','governanceSasToken','rememberConnection','forgetConnection','refreshButton','refreshWarning','hostConfigStatus','refreshStatus','governanceTab','backButton','search','joinField','joinFilter','removedField','removedFilter','groupField','groupToggle','staleField','staleThreshold','pageSize','resetButton','resetTableLayoutButton','exportButton','tableHead','tableBody','emptyState','pageInfo','firstPage','previousPage','nextPage','lastPage','settingsPanel','guidancePanel','defaultViewSetting','pageSizeSetting','timeDisplaySetting','staleThresholdSetting','reviewWindowSetting','csvPrefixSetting','groupByComputerSetting','saveSettingsButton','settingsStatus','cloudProfileStatus','signInButton','syncProfileButton','signOutButton','profileStatus','recoveryCodeInput','rememberRecoveryProfile','generateRecoveryButton','importRecoveryButton','forgetRecoveryButton',    'recoveryResult','recoveryCodeOutput','proposeRuleButton','ruleDialog','ruleForm','ruleEffect','rulePrincipalType','rulePrincipalSid','rulePrincipalSource','ruleMembershipScope','ruleAssignedThroughGroupSid','ruleDeviceScopeType','ruleDeviceScopeValue','ruleAllowedEntraJoined','ruleAllowedHybridJoined','ruleAllowedDomainJoined','ruleMaxDeviceAgeDays','ruleValidFrom','ruleValidUntil','ruleTicketReference','ruleReason','rulePreview','ruleFormStatus','ruleCancelButton','ruleSubmitButton','reasonDialog','reasonForm','reasonDialogTitle','reasonDialogSummary','reasonInput','reasonFormStatus','reasonCancelButton','reasonSubmitButton'].map(id => [id, document.getElementById(id)]));
     const formatter = new Intl.NumberFormat();
+    for (const id of ['reasonRulePreview', 'ruleMatchesDialog', 'ruleMatchesSummary', 'ruleMatchesHead', 'ruleMatchesBody', 'ruleMatchesEmpty', 'ruleMatchesCloseButton']) {
+      elements[id] = document.getElementById(id);
+    }
+    for (const id of ['ruleIdentityQuery', 'ruleIdentityResults', 'ruleIdentityStatus', 'ruleIdentitySummary', 'ruleGroupQuery', 'ruleGroupResults', 'ruleGroupStatus', 'identityUsageDialog', 'identityUsageSummary', 'identityUsageHead', 'identityUsageBody', 'identityRulesHead', 'identityRulesBody', 'identityUsageCloseButton']) {
+      elements[id] = document.getElementById(id);
+    }
+    let selectedPrincipal = null;
+    const identityPickers = [];
+    let pendingAdminStatusError = false;
+    function setSignInStatus(message, isError = false) {
+      const status = document.getElementById('signInStatus');
+      status.textContent = message;
+      status.dataset.error = String(isError);
+      if (isError) expandAuthStatus();
+    }
+    function setAdminModeStatus(message) {
+      const isError = pendingAdminStatusError;
+      pendingAdminStatusError = false;
+      const status = document.getElementById('adminModeStatus');
+      if (status.textContent !== message) status.dataset.error = 'false';
+      status.textContent = message;
+      if (isError) {
+        status.dataset.error = 'true';
+        expandAuthStatus();
+      }
+    }
+    function markAdminStatusError() {
+      pendingAdminStatusError = true;
+    }
+    function expandAuthStatus() {
+      document.getElementById('authStatusBox').open = true;
+    }
             let adminController = null;
         let adminBusy = false;
         let adminStatusMessage = '';
@@ -145,18 +178,26 @@ import {
       }
       if (!hasEmbeddedData && profileClient && hasCompleteEntraConfig(resolved)) {
         try {
-          entraAuthClient = new EntraAuthClient(resolved);
+          entraAuthClient = new EntraAuthClient(resolved, globalThis.msal, {
+            onPopupChange: pending => {
+              document.getElementById('retryAuthButton').hidden = !pending;
+              updateProfileControls();
+              updateCapabilityState();
+            }
+          });
           await entraAuthClient.initialize();
-          elements.cloudProfileStatus.textContent = 'Microsoft Entra sign-in is available. No OAuth token is persisted.';
+          setSignInStatus('Microsoft Entra sign-in is available. No OAuth token is persisted.');
+          elements.cloudProfileStatus.textContent = 'Sign in to synchronize your cloud profile.';
         } catch (error) {
           entraAuthClient = null;
-          elements.cloudProfileStatus.textContent = `Microsoft Entra sign-in could not initialize: ${error.message}`;
+          setSignInStatus(`Microsoft Entra sign-in could not initialize: ${error.message}`, true);
         }
         if (entraAuthClient) {
           adminController = new AdminModeController({
             client: new AdminClient(profileClient),
             auth: entraAuthClient,
-            onChange: handleAdminModeChange
+            onChange: handleAdminModeChange,
+            onCountdown: updateAdminCountdown
           });
         }
       } else if (!hasEmbeddedData && !profileClient) {
@@ -198,8 +239,8 @@ import {
             ? 'Admin mode requires a configured protected BFF URL.'
             : (!entraConfigured || !adminController
                 ? 'Admin mode requires Entra tenant, SPA client, and API scope configuration.'
-                : (!entraSignedIn ? 'Sign in with Microsoft Entra on the Settings tab before entering Admin mode.' : '')));
-      elements.adminModeButton.disabled = Boolean(unavailableReason) || adminBusy;
+                : (!entraSignedIn ? 'Sign in with Microsoft Entra before entering Admin mode.' : '')));
+      elements.adminModeButton.disabled = Boolean(unavailableReason) || adminBusy || Boolean(entraAuthClient?.popupPending);
       elements.adminModeButton.textContent = adminActive ? 'Exit Admin mode' : 'Enter Admin mode';
       elements.adminModeButton.setAttribute('aria-pressed', text(adminActive));
       elements.adminModeButton.classList.toggle('admin-active', adminActive);
@@ -210,11 +251,11 @@ import {
         const session = adminController.session;
         const capabilities = Object.entries({ approveRules: 'approve rules', selfApprove: 'self-approve', operateActions: 'operate actions' })
           .filter(([key]) => session.capabilities?.[key]).map(([, label]) => label);
-        elements.adminModeStatus.textContent = `Admin mode active until ${displayValue('ExpiresAtUtc', session.expiresAtUtc)} (ends after ${adminIdleTimeoutMinutes} minutes without activity). Capabilities: ${capabilities.join(', ') || 'read only'}.${adminStatusMessage ? ` ${adminStatusMessage}` : ''}`;
+        setAdminModeStatus(`Admin mode active until ${displayValue('ExpiresAtUtc', session.expiresAtUtc)} (ends after ${adminIdleTimeoutMinutes} minutes without activity). Capabilities: ${capabilities.join(', ') || 'read only'}.${adminStatusMessage ? ` ${adminStatusMessage}` : ''}`);
       } else {
-        elements.adminModeStatus.textContent = unavailableReason
+        setAdminModeStatus(unavailableReason
           ? `Admin mode unavailable: ${unavailableReason}`
-          : (adminStatusMessage || 'Admin mode is available. Entering it requires a fresh Conditional Access confirmation.');
+          : (adminStatusMessage || 'Admin mode is available. Entering it requires a fresh Conditional Access confirmation.'));
       }
       elements.proposeRuleButton.hidden = !['review', 'governance'].includes(state.view);
       const canPropose = !hasEmbeddedData && Boolean(adminController) && entraSignedIn;
@@ -505,7 +546,16 @@ import {
     }
     function renderCell(row, key) {
       const cell = document.createElement('td');
-      if (state.view === 'summary' && key === 'Removed') {
+      if ((state.view === 'users' && ['UserID', 'SamAccountName', 'UserPrincipalName'].includes(key)) ||
+          (state.view === 'groups' && ['GroupID', 'GroupName'].includes(key))) {
+        const button = document.createElement('button');
+        button.className = 'detail-link';
+        button.type = 'button';
+        button.textContent = displayValue(key, row[key]);
+        button.title = 'Show computers, membership paths and related rules from loaded data.';
+        button.addEventListener('click', () => openIdentityUsageDialog(row, state.view === 'users' ? 'User' : 'Group'));
+        cell.appendChild(button);
+      } else if (state.view === 'summary' && key === 'Removed') {
         const badge = document.createElement('span'); badge.className = `status ${Number(row.Removed) === 1 ? 'removed' : 'active'}`; badge.textContent = Number(row.Removed) === 1 ? 'Removed' : 'Active'; cell.appendChild(badge);
       } else if (state.view === 'summary' && key === 'UserName' && row._UserSID) {
         const button = document.createElement('button'); button.className = 'detail-link'; button.type = 'button'; button.textContent = text(row.UserName); button.title = `Open user details for ${row._UserSID}`; button.addEventListener('click', () => openDetail('user', row._UserSID)); cell.appendChild(button);
@@ -744,9 +794,9 @@ import {
       elements.lastPage.title = state.page === pages ? 'Already on the last page' : 'Last page';
     }
     function exportCsv() {
-      const columns = getVisibleColumns(); const quote = value => `"${text(value).replaceAll('"', '""')}"`;
-      const lines = [columns.map(([, label]) => quote(label)).join(','), ...sortedRows(filteredRows()).map(row => columns.map(([key]) => quote(key === 'Removed' ? (Number(row[key]) === 1 ? 'Removed' : 'Active') : row[key])).join(','))];
-      const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `${state.csvFilenamePrefix}-${state.view}.csv`; link.click(); URL.revokeObjectURL(link.href);
+      const csv = buildCsv(getVisibleColumns(), sortedRows(filteredRows()), (key, value) => key === 'Removed' ? (Number(value) === 1 ? 'Removed' : 'Active') : value);
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `${state.csvFilenamePrefix}-${state.view}.csv`; link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 0);
     }
     function persistPreferences() {
       return savePreferences({
@@ -824,9 +874,14 @@ import {
     }
     function updateProfileControls() {
       const entraSignedIn = Boolean(entraAuthClient?.getAccount());
-      elements.signInButton.disabled = hasEmbeddedData || !entraAuthClient || entraSignedIn;
-      elements.signOutButton.disabled = hasEmbeddedData || !entraSignedIn;
-      elements.syncProfileButton.disabled = hasEmbeddedData || !profileClient || !profileSession;
+      const popupPending = Boolean(entraAuthClient?.popupPending);
+      elements.signInButton.disabled = hasEmbeddedData || !entraAuthClient || entraSignedIn || popupPending;
+      elements.signOutButton.hidden = hasEmbeddedData || !entraSignedIn;
+      elements.signOutButton.disabled = hasEmbeddedData || !entraSignedIn || popupPending;
+      elements.syncProfileButton.disabled = hasEmbeddedData || !profileClient || !profileSession || popupPending;
+      if (!entraAuthClient && document.getElementById('signInStatus').dataset.error !== 'true') {
+        setSignInStatus(elements.cloudProfileStatus.textContent);
+      }
       elements.signInButton.title = hasEmbeddedData
         ? 'Microsoft Entra sign-in is unavailable in generated snapshots.'
         : (!entraAuthClient
@@ -1005,6 +1060,13 @@ import {
       ];
       refreshGovernanceViews();
     }
+    function updateAdminCountdown(remainingMs, totalRemainingMs) {
+      for (const [element, milliseconds] of [[elements.adminIdleRemaining, remainingMs], [elements.adminTotalRemaining, totalRemainingMs]]) {
+        const seconds = Math.ceil(milliseconds / 1000);
+        element.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+      }
+      elements.adminIdleCountdown.hidden = !adminController?.active;
+    }
     function handleAdminModeChange(change) {
       adminStatusMessage = change.active ? '' : ({
         idle: `Admin mode ended after ${adminIdleTimeoutMinutes} minutes without activity.`,
@@ -1051,10 +1113,12 @@ import {
             : ''));
       const rejectReason = baseReason || (status !== 'PendingApproval' ? `Only pending proposals can be rejected. Current status: ${status || 'unknown'}.` : '');
       const revokeReason = baseReason || (!['Active', 'PendingApproval'].includes(status) ? `Only active or pending rules can be revoked. Current status: ${status || 'unknown'}.` : '');
-      const ruleLabel = `${text(row.Effect)} ${text(row.PrincipalType).toLowerCase()} ${text(row.PrincipalValue)} (${text(row.DeviceScopeType)}${row.DeviceScopeValue ? ` ${text(row.DeviceScopeValue)}` : ''})`;
+      const principalContext = [text(row.PrincipalDisplayName), text(row.PrincipalUserPrincipalName)].filter(Boolean).join(' / ');
+      const ruleLabel = `${text(row.Effect)} ${text(row.PrincipalType).toLowerCase()} ${principalContext ? `${principalContext} (informational), ` : ''}${text(row.PrincipalValue)} (${text(row.DeviceScopeType)}${row.DeviceScopeValue ? ` ${text(row.DeviceScopeValue)}` : ''})`;
       const transition = (operation, title, required, submitLabel) => () => openReasonDialog({
         title,
         summary: `${ruleLabel}. Rule ID ${text(row.RowKey)}.${operation === 'approve' && ownProposal ? ' You proposed this rule; the approval is recorded as self-approved.' : ''}`,
+        rule: row,
         required,
         submitLabel,
         onSubmit: async reason => {
@@ -1069,12 +1133,18 @@ import {
         adminActionButton('Reject', rejectReason, transition('reject', 'Reject governance proposal', true, 'Reject'), true),
         adminActionButton('Revoke', revokeReason, transition('revoke', 'Revoke governance rule', true, 'Revoke'), true)
       );
+      const preview = document.createElement('p');
+      preview.className = 'dialog-preview governance-preview';
+      renderRulePreview(preview, row);
+      cell.appendChild(preview);
       return cell;
     }
-    function openReasonDialog({ title, summary, required, submitLabel, onSubmit }) {
+    function openReasonDialog({ title, summary, rule, required, submitLabel, onSubmit }) {
       pendingReasonAction = { required, onSubmit };
       elements.reasonDialogTitle.textContent = title;
       elements.reasonDialogSummary.textContent = summary;
+      elements.reasonRulePreview.hidden = !rule;
+      if (rule) renderRulePreview(elements.reasonRulePreview, rule);
       elements.reasonInput.value = '';
       elements.reasonInput.placeholder = required ? 'Required: at least 10 characters for the audit record.' : 'Optional comment for the audit record.';
       elements.reasonFormStatus.textContent = '';
@@ -1100,6 +1170,20 @@ import {
       elements.ruleValidUntil.value = '';
       elements.ruleTicketReference.value = '';
       elements.ruleReason.value = draft.reason || '';
+      for (const picker of identityPickers) picker.cancel();
+      for (const id of ['ruleIdentityQuery', 'ruleGroupQuery', 'ruleIdentityStatus', 'ruleGroupStatus']) {
+        if ('value' in elements[id]) elements[id].value = '';
+        else elements[id].textContent = '';
+      }
+      elements.ruleIdentityResults.replaceChildren();
+      elements.ruleGroupResults.replaceChildren();
+      selectedPrincipal = searchLocalIdentities(REPORT, elements.rulePrincipalType.value, draft.principalSid)
+        .identities.find(item => item.sid === normalizeSidInput(draft.principalSid)) || null;
+      if (!selectedPrincipal && draft.principalDisplayName) {
+        selectedPrincipal = { sid: normalizeSidInput(draft.principalSid), principalType: elements.rulePrincipalType.value,
+          displayName: draft.principalDisplayName, userPrincipalName: draft.principalUserPrincipalName || '' };
+      }
+      updateSelectedIdentity();
     }
     function readRuleForm() {
       const isoValue = value => {
@@ -1110,7 +1194,7 @@ import {
       const proposal = {
         effect: elements.ruleEffect.value,
         principalType: elements.rulePrincipalType.value,
-        principalSid: elements.rulePrincipalSid.value.trim(),
+        principalSid: normalizeSidInput(elements.rulePrincipalSid.value),
         principalSource: elements.rulePrincipalSource.value,
         membershipScope: elements.ruleMembershipScope.value,
         deviceScopeType: elements.ruleDeviceScopeType.value,
@@ -1119,11 +1203,15 @@ import {
         allowedDomainJoined: elements.ruleAllowedDomainJoined.checked,
         reason: elements.ruleReason.value.trim()
       };
-      const groupSid = elements.ruleAssignedThroughGroupSid.value.trim();
+      const groupSid = normalizeSidInput(elements.ruleAssignedThroughGroupSid.value);
       const maxAge = elements.ruleMaxDeviceAgeDays.value.trim();
       const validFrom = isoValue(elements.ruleValidFrom.value);
       const validUntil = isoValue(elements.ruleValidUntil.value);
       const ticket = elements.ruleTicketReference.value.trim();
+      if (selectedPrincipal?.sid === proposal.principalSid && selectedPrincipal.principalType === proposal.principalType) {
+        if (selectedPrincipal.displayName) proposal.principalDisplayName = selectedPrincipal.displayName;
+        if (selectedPrincipal.userPrincipalName) proposal.principalUserPrincipalName = selectedPrincipal.userPrincipalName;
+      }
       if (groupSid) proposal.assignedThroughGroupSid = groupSid;
       if (proposal.deviceScopeType !== 'Any') proposal.deviceScopeValue = elements.ruleDeviceScopeValue.value.trim();
       if (maxAge) proposal.maxDeviceAgeDays = Number(maxAge);
@@ -1132,20 +1220,174 @@ import {
       if (ticket) proposal.ticketReference = ticket;
       return proposal;
     }
+    function updateSelectedIdentity() {
+      elements.ruleIdentitySummary.textContent = selectedPrincipal
+        ? `Selected: ${selectedPrincipal.displayName}${selectedPrincipal.userPrincipalName ? ` (${selectedPrincipal.userPrincipalName})` : ''}. SID: ${selectedPrincipal.sid}. Names are informational, not matching criteria.`
+        : "The selected SID is the rule's matching value. Names are informational only.";
+    }
+    function lookupAccountId() {
+      return !hasEmbeddedData && profileClient ? entraAuthClient?.getAccount()?.homeAccountId || '' : '';
+    }
+    function createIdentityPicker(groupOnly) {
+      const input = groupOnly ? elements.ruleGroupQuery : elements.ruleIdentityQuery;
+      const results = groupOnly ? elements.ruleGroupResults : elements.ruleIdentityResults;
+      const status = groupOnly ? elements.ruleGroupStatus : elements.ruleIdentityStatus;
+      const sidInput = groupOnly ? elements.ruleAssignedThroughGroupSid : elements.rulePrincipalSid;
+      const picker = new LocalFirstIdentityLookup({
+        localSearch: (type, query) => searchLocalIdentities(REPORT, type, query),
+        remoteSearch: async (type, query, accountId, signal) => {
+          if (lookupAccountId() !== accountId) throw new Error('The signed-in account changed. Search again.');
+          const authentication = { type: 'entra', getAccessToken: () => entraAuthClient.getAccessToken() };
+          const { payload } = await profileClient.request('GET', `/identities/lookup?${new URLSearchParams({ type, q: query })}`, authentication, { signal });
+          if (lookupAccountId() !== accountId) throw new Error('The signed-in account changed. Search again.');
+          return payload;
+        },
+        onChange: result => {
+          status.textContent = `${result.message}${result.truncated ? ' More results exist; narrow your search.' : ''}`;
+          results.replaceChildren();
+          for (const identity of result.identities) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'detail-link identity-result';
+            button.textContent = `${identity.displayName}${identity.userPrincipalName ? ` (${identity.userPrincipalName})` : ''} | ${identity.source} | ${identity.sid} | ${identity.origin === 'inventory' ? 'Loaded inventory' : 'Entra directory'}`;
+            button.addEventListener('click', () => {
+              picker.cancel();
+              sidInput.value = identity.sid;
+              if (groupOnly) {
+                elements.ruleMembershipScope.value = 'Transitive';
+              } else {
+                selectedPrincipal = identity;
+                elements.rulePrincipalSource.value = ['Local', 'Entra', 'AD'].includes(identity.source) ? identity.source : 'Any';
+                updateSelectedIdentity();
+              }
+              results.replaceChildren();
+              status.textContent = `Selected ${identity.sid}.`;
+              updateRulePreview();
+            });
+            results.appendChild(button);
+          }
+        }
+      });
+      const search = () => {
+        sidInput.value = '';
+        if (!groupOnly) { selectedPrincipal = null; updateSelectedIdentity(); }
+        picker.search(input.value, groupOnly ? 'Group' : elements.rulePrincipalType.value, lookupAccountId());
+        updateRulePreview();
+      };
+      input.addEventListener('input', search);
+      input.addEventListener('keydown', event => {
+        if (event.key === 'Enter') event.preventDefault();
+      });
+      sidInput.addEventListener('input', () => {
+        picker.cancel();
+        input.value = '';
+        results.replaceChildren();
+        status.textContent = '';
+        if (!groupOnly) { selectedPrincipal = null; updateSelectedIdentity(); }
+      });
+      if (!groupOnly) elements.rulePrincipalType.addEventListener('change', search);
+      return picker;
+    }
+    function renderIdentityTable(head, body, columns, rows) {
+      const header = document.createElement('tr');
+      for (const [, label] of columns) {
+        const cell = document.createElement('th');
+        cell.scope = 'col';
+        cell.textContent = label;
+        header.appendChild(cell);
+      }
+      head.replaceChildren(header);
+      body.replaceChildren(...rows.slice(0, 250).map(entry => {
+        const row = document.createElement('tr');
+        for (const [key] of columns) {
+          const cell = document.createElement('td');
+          cell.textContent = key === 'Removed' ? (Number(entry[key]) === 1 ? 'Removed' : 'Active') : displayValue(key, entry[key]);
+          row.appendChild(cell);
+        }
+        return row;
+      }));
+    }
+    function openIdentityUsageDialog(row, principalType) {
+      const sid = text(principalType === 'User' ? row.UserID : row.GroupID);
+      const usage = identityUsage(REPORT, principalType, sid);
+      elements.identityUsageSummary.textContent = `${text(row.UserPrincipalName || row.SamAccountName || row.GroupName)} (${sid}): ${formatter.format(usage.entries.length)} access paths on ${formatter.format(usage.computers)} computers; ${formatter.format(usage.rules.length)} related loaded rules.`;
+      renderIdentityTable(elements.identityUsageHead, elements.identityUsageBody, [
+        ['ComputerName', 'Computer'], ['PrincipalName', 'Principal'], ['PrincipalID', 'Principal SID'],
+        ['MembershipType', 'Membership'], ['AddedThroughGroupName', 'Through group'],
+        ['AssignedThroughGroupSid', 'Through group SID'], ['JoinState', 'Join state'], ['Removed', 'Status']
+      ], usage.entries);
+      renderIdentityTable(elements.identityRulesHead, elements.identityRulesBody, [
+        ['RowKey', 'Rule ID'], ['Status', 'Status'], ['Effect', 'Effect'], ['PrincipalType', 'Principal type'],
+        ['PrincipalDisplayName', 'Name (informational)'], ['PrincipalValue', 'SID'],
+        ['AssignedThroughGroupSid', 'Through group SID'], ['DeviceScopeType', 'Device scope'], ['DeviceScopeValue', 'Device value']
+      ], usage.rules);
+      elements.identityUsageDialog.showModal();
+    }
     function updateRulePreview() {
       elements.ruleDeviceScopeValue.disabled = elements.ruleDeviceScopeType.value === 'Any';
       elements.ruleDeviceScopeValue.title = elements.ruleDeviceScopeValue.disabled ? 'Choose an exact computer or name prefix scope first.' : 'Exact computer name or name prefix. Wildcards are not supported.';
+      const proposal = readRuleForm();
       if (!REPORT.review.length) {
-        elements.rulePreview.textContent = 'Load inventory data to preview which access entries this rule would match.';
+        renderRulePreview(elements.rulePreview, previewRuleFromProposal(proposal));
         return;
       }
-      const proposal = readRuleForm();
       if (!/^S-\d(?:-\d+)+$/i.test(proposal.principalSid)) {
         elements.rulePreview.textContent = 'Enter a valid principal SID to preview matches.';
         return;
       }
-      const preview = previewMatches(proposal, REPORT.review);
-      elements.rulePreview.textContent = `Preview: matches ${formatter.format(preview.rows)} loaded review ${preview.rows === 1 ? 'entry' : 'entries'} on ${formatter.format(preview.computers)} ${preview.computers === 1 ? 'computer' : 'computers'}.`;
+      renderRulePreview(elements.rulePreview, previewRuleFromProposal(proposal));
+    }
+    function rulePreviewSummary(preview) {
+      return `Preview: matches ${formatter.format(preview.rows)} loaded review ${preview.rows === 1 ? 'entry' : 'entries'} on ${formatter.format(preview.computers)} ${preview.computers === 1 ? 'computer' : 'computers'}.`;
+    }
+    function renderRulePreview(container, rule) {
+      container.replaceChildren();
+      if (!REPORT.review.length) {
+        container.textContent = 'Load inventory data to preview which access entries this rule would match.';
+        return;
+      }
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'rule-preview-link';
+      button.textContent = rulePreviewSummary(previewRuleMatches(rule, REPORT.review));
+      button.setAttribute('aria-haspopup', 'dialog');
+      button.setAttribute('aria-controls', 'ruleMatchesDialog');
+      button.addEventListener('click', () => openRuleMatchesDialog(rule));
+      container.appendChild(button);
+    }
+    function openRuleMatchesDialog(rule) {
+      const preview = previewRuleMatches(rule, REPORT.review);
+      elements.ruleMatchesSummary.textContent = `${text(rule.Effect)} ${text(rule.PrincipalType)} ${text(rule.PrincipalValue)}. ${rulePreviewSummary(preview)}`;
+      const columns = [
+        ['ComputerName', 'Computer name'], ['PrincipalName', 'Principal name'],
+        ['PrincipalID', 'Principal SID'], ['PrincipalType', 'Principal type'],
+        ['PrincipalSource', 'Principal source'], ['MembershipType', 'Membership type'],
+        ['AddedThroughGroupName', 'Added through group'], ['AssignedThroughGroupSid', 'Assigned-through group SID'],
+        ['JoinState', 'Join state'], ['LastReportUtc', 'Last report'],
+        ['PolicyStatus', 'Current policy status'], ['ReviewStatus', 'Current review status']
+      ];
+      const header = document.createElement('tr');
+      for (const [, label] of columns) {
+        const cell = document.createElement('th');
+        cell.scope = 'col';
+        cell.textContent = label;
+        header.appendChild(cell);
+      }
+      elements.ruleMatchesHead.replaceChildren(header);
+      const rows = preview.entries.map(entry => {
+        const row = document.createElement('tr');
+        for (const [key] of columns) {
+          const cell = document.createElement('td');
+          cell.textContent = displayValue(key, key === 'AssignedThroughGroupSid'
+            ? entry.AssignedThroughGroupSid || entry._AssignedThroughGroupSID
+            : entry[key]);
+          row.appendChild(cell);
+        }
+        return row;
+      });
+      elements.ruleMatchesBody.replaceChildren(...rows);
+      elements.ruleMatchesEmpty.hidden = preview.rows !== 0;
+      elements.ruleMatchesDialog.showModal();
     }
     function openRuleDialog(draft = proposalFromReviewRow({})) {
       if (!canProposeRules()) return;
@@ -1156,9 +1398,12 @@ import {
       elements.ruleSubmitButton.disabled = false;
       updateRulePreview();
       elements.ruleDialog.showModal();
-      (draft.principalSid ? elements.ruleReason : elements.rulePrincipalSid).focus();
+      (draft.principalSid ? elements.ruleReason : elements.ruleIdentityQuery).focus();
     }
 
+    identityPickers.push(createIdentityPicker(false), createIdentityPicker(true));
+    elements.ruleDialog.addEventListener('close', () => identityPickers.forEach(picker => picker.cancel()));
+    elements.identityUsageCloseButton.addEventListener('click', () => elements.identityUsageDialog.close());
     elements.connectionPanel.hidden = hasEmbeddedData;
     elements.groupToggle.checked = state.grouped;
     elements.pageSize.value = text(state.size);
@@ -1175,6 +1420,7 @@ import {
     restoreSavedConnection();
     void runtimeConfigPromise.then(applyRuntimeConfig).catch(error => {
       elements.cloudProfileStatus.textContent = `Runtime configuration could not be applied: ${error.message}`;
+      setSignInStatus(elements.cloudProfileStatus.textContent, true);
       return applyRuntimeConfig(runtimeConfigDefaults);
     });
     updateCapabilityState();
@@ -1207,6 +1453,7 @@ import {
       updateCurrentHistoryState();
     });
     elements.exportButton.addEventListener('click', exportCsv); elements.backButton.addEventListener('click', () => history.back());
+    elements.ruleMatchesCloseButton.addEventListener('click', () => elements.ruleMatchesDialog.close());
     elements.forgetConnection.addEventListener('click', () => {
       const removed = removeConnection();
       elements.storageAccountName.value = '';
@@ -1282,32 +1529,50 @@ import {
         }
       }
     });
+    document.getElementById('retryAuthButton').addEventListener('click', () => {
+      if (entraAuthClient?.popupPending) {
+        if (!entraAuthClient.getAccount()) setSignInStatus('Opening Microsoft Entra sign-in...');
+        entraAuthClient.retryPopup();
+      }
+    });
     elements.signInButton.addEventListener('click', async () => {
-      elements.cloudProfileStatus.textContent = 'Opening Microsoft Entra sign-in...';
+      setSignInStatus('Opening Microsoft Entra sign-in...');
       try {
         const account = await entraAuthClient.signIn();
+        identityPickers.forEach(picker => picker.reset());
+        setSignInStatus(`Signed in as ${account.username || account.name || 'Microsoft Entra user'}.`);
         if (adminController?.accountChanged(account)) await adminController.exit('account_changed');
         profileSession = { type: 'entra', etag: '', account };
         updateProfileControls();
         updateCapabilityState();
         if (views[state.view]) render();
-        await loadCloudProfile(`Microsoft Entra profile for ${account.username || account.name || 'signed-in user'}`);
+        try {
+          await loadCloudProfile(`Microsoft Entra profile for ${account.username || account.name || 'signed-in user'}`);
+        } catch (error) {
+          elements.cloudProfileStatus.textContent = profileErrorMessage(error);
+          setSignInStatus(`Signed in, but the cloud profile could not be loaded: ${profileErrorMessage(error)}`, true);
+        }
       } catch (error) {
-        elements.cloudProfileStatus.textContent = profileErrorMessage(error);
+        setSignInStatus(profileErrorMessage(error), true);
         updateProfileControls();
       }
     });
     elements.signOutButton.addEventListener('click', async () => {
+      identityPickers.forEach(picker => picker.reset());
+      elements.ruleIdentityResults.replaceChildren();
+      elements.ruleGroupResults.replaceChildren();
       await adminController?.exit('signout');
       try {
         await entraAuthClient.signOut();
       } catch (error) {
         elements.cloudProfileStatus.textContent = `Microsoft Entra sign-out did not complete: ${error.message}`;
+        setSignInStatus(elements.cloudProfileStatus.textContent, true);
         updateCapabilityState();
         return;
       }
       if (profileSession?.type === 'entra') profileSession = null;
       elements.cloudProfileStatus.textContent = 'Signed out. OAuth tokens and the Entra profile session were removed from browser memory.';
+      setSignInStatus('Signed out. Sign in with Microsoft Entra to continue.');
       updateProfileControls();
       updateCapabilityState();
       if (views[state.view]) render();
@@ -1320,17 +1585,19 @@ import {
         if (adminController.active) {
           await adminController.exit('user');
         } else {
-          elements.adminModeStatus.textContent = 'Confirming Admin mode with Microsoft Entra. Complete the sign-in prompt if one opens...';
+          setAdminModeStatus('Confirming Admin mode with Microsoft Entra. Complete the sign-in prompt if one opens...');
           await adminController.enter();
           try {
             const count = await loadGovernanceFromBackend();
             adminStatusMessage = `Loaded ${formatter.format(count)} governance rules from the protected backend.`;
           } catch (error) {
             adminStatusMessage = `Governance rules could not be loaded: ${await privilegedFailureMessage(error)}`;
+            markAdminStatusError();
           }
         }
       } catch (error) {
         adminStatusMessage = `Admin mode was not entered: ${adminErrorMessage(error)}`;
+        markAdminStatusError();
       } finally {
         adminBusy = false;
         updateCapabilityState();
@@ -1395,7 +1662,10 @@ import {
       } catch (error) {
         const message = await privilegedFailureMessage(error);
         if (elements.reasonDialog.open) elements.reasonFormStatus.textContent = message;
-        else adminStatusMessage = message;
+        else {
+          adminStatusMessage = message;
+          markAdminStatusError();
+        }
         updateCapabilityState();
       } finally {
         elements.reasonSubmitButton.disabled = false;

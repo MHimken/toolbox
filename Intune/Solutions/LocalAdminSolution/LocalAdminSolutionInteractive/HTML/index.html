@@ -9,24 +9,47 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header>
-    <div class="header-inner">
-      <div>
-        <h1>Local administrator inventory</h1>
-        <p class="generated" id="generatedAt"></p>
+  <div class="page-top">
+    <header>
+      <div class="header-inner">
+        <div>
+          <h1>Local administrator inventory</h1>
+          <p class="generated" id="generatedAt"></p>
+        </div>
+        <div class="header-auth" aria-label="Authentication and Admin mode">
+          <div class="header-auth-actions">
+            <button class="command secondary" id="signInButton" type="button" disabled>Sign in with Microsoft Entra</button>
+            <button class="command retry" id="retryAuthButton" type="button" title="Close any remaining authentication popups before retrying." hidden>Retry</button>
+            <button class="command retry" id="signOutButton" type="button" hidden disabled>Sign out</button>
+            <button class="command secondary" id="adminModeButton" type="button" aria-pressed="false" disabled>Enter Admin mode</button>
+          </div>
+          <details class="auth-status-box" id="authStatusBox">
+            <summary aria-label="Authentication and Admin-mode status">
+              <span class="admin-countdown" id="adminIdleCountdown" role="timer" aria-live="off" title="Admin mode ends when either timer reaches zero. Clicks, taps and key presses reset only the idle timeout, not the total timeout." hidden>
+                <span>Idle timeout: <strong id="adminIdleRemaining">15:00</strong></span>
+                <span>Total timeout: <strong id="adminTotalRemaining"></strong></span>
+              </span>
+              <svg class="status-arrow" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="m5 7 5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </summary>
+            <div class="auth-status-content">
+              <p class="sign-in-status" id="signInStatus" aria-live="polite">Microsoft Entra sign-in is not configured.</p>
+              <p class="admin-status" id="adminModeStatus" aria-live="polite"></p>
+            </div>
+          </details>
+        </div>
       </div>
-      <div class="header-count" id="headerCount"><strong id="visibleCount">0</strong><span>matching rows</span></div>
+    </header>
+    <div class="mode-panel">
+      <section class="mode-bar" aria-label="Report mode">
+        <div>
+          <strong>Report and personal review</strong>
+          <span>Governance approvals remain authoritative and separate from personal acknowledgement.</span>
+        </div>
+        <div class="header-count" id="headerCount"><strong id="visibleCount">0</strong><span>matching rows</span></div>
+      </section>
     </div>
-  </header>
+  </div>
   <main>
-    <section class="mode-bar" aria-label="Report mode">
-      <div>
-        <strong>Report and personal review</strong>
-        <span>Governance approvals remain authoritative and separate from personal acknowledgement.</span>
-      </div>
-      <button class="command secondary" id="adminModeButton" type="button" aria-pressed="false" disabled>Enter Admin mode</button>
-    </section>
-    <p class="admin-status" id="adminModeStatus" aria-live="polite"></p>
     <section class="connection" id="connectionPanel" aria-labelledby="connectionTitle" hidden>
       <div class="connection-grid">
         <label id="connectionTitle">Storage account name<input id="storageAccountName" type="text" placeholder="Example: storageaccount" autocomplete="off" spellcheck="false"></label>
@@ -115,12 +138,10 @@
       <p class="settings-status" id="settingsStatus" aria-live="polite"></p>
       <hr>
       <h3>Cloud profile</h3>
-      <p>Sign in with Microsoft Entra to synchronize these settings through the protected backend. OAuth access tokens remain in browser memory and are not written to browser storage.</p>
+      <p>Sign in or out with Microsoft Entra using the controls beside Admin mode. Sign-in synchronizes these settings through the protected backend. OAuth access tokens remain in browser memory and are not written to browser storage. Reloading or closing the page clears the report sign-in and Admin mode; it does not sign you out of Microsoft Entra itself.</p>
       <p class="profile-status" id="cloudProfileStatus" aria-live="polite">Cloud profile synchronization is not configured.</p>
       <div class="settings-actions">
-        <button class="command" id="signInButton" type="button" disabled>Sign in with Microsoft Entra</button>
         <button class="command secondary" id="syncProfileButton" type="button" disabled>Reload cloud profile</button>
-        <button class="command secondary" id="signOutButton" type="button" disabled>Sign out</button>
       </div>
       <hr>
       <h3>Recovery profile</h3>
@@ -160,9 +181,16 @@
         <div class="dialog-grid">
           <label>Effect<select id="ruleEffect"><option>Allow</option><option>Deny</option></select></label>
           <label>Principal type<select id="rulePrincipalType"><option>User</option><option>Group</option></select></label>
+          <label class="wide">Find principal by UPN, name, object ID or SID<input id="ruleIdentityQuery" type="text" maxlength="128" autocomplete="off" spellcheck="false" placeholder="Search loaded inventory first"></label>
+          <div class="wide identity-results" id="ruleIdentityResults" aria-label="Principal search results"></div>
+          <p class="wide dialog-note" id="ruleIdentityStatus" role="status"></p>
           <label class="wide">Principal SID<input id="rulePrincipalSid" type="text" placeholder="S-1-5-21-..." autocomplete="off" spellcheck="false"></label>
+          <p class="wide dialog-note" id="ruleIdentitySummary">The selected SID is the rule's matching value. Names are informational only.</p>
           <label>Principal source<select id="rulePrincipalSource"><option>Any</option><option>Local</option><option>Entra</option><option>AD</option></select></label>
           <label>Membership<select id="ruleMembershipScope"><option>Any</option><option>Direct</option><option>Transitive</option></select></label>
+          <label class="wide">Find assigned-through group, optional<input id="ruleGroupQuery" type="text" maxlength="128" autocomplete="off" spellcheck="false" placeholder="Group name, object ID or SID"></label>
+          <div class="wide identity-results" id="ruleGroupResults" aria-label="Assigned-through group search results"></div>
+          <p class="wide dialog-note" id="ruleGroupStatus" role="status"></p>
           <label class="wide">Assigned through group SID, optional<input id="ruleAssignedThroughGroupSid" type="text" placeholder="Requires Transitive membership" autocomplete="off" spellcheck="false"></label>
           <label>Device scope<select id="ruleDeviceScopeType"><option value="Any">Any device</option><option value="ExactComputer">Exact computer</option><option value="ComputerPrefix">Computer name prefix</option></select></label>
           <label>Device value<input id="ruleDeviceScopeValue" type="text" maxlength="64" autocomplete="off" spellcheck="false"></label>
@@ -178,14 +206,39 @@
         <div class="dialog-actions"><button class="command secondary" id="ruleCancelButton" type="button">Cancel</button><button class="command" id="ruleSubmitButton" type="submit">Submit proposal</button></div>
       </form>
     </dialog>
+    <dialog class="admin-dialog rule-matches-dialog" id="identityUsageDialog" aria-labelledby="identityUsageTitle">
+      <h2 id="identityUsageTitle">Where identity is used</h2>
+      <p class="dialog-preview" id="identityUsageSummary"></p>
+      <p class="dialog-note">Loaded data only, independent of report filters. Access paths include removed entries. Rules include direct SID references and scopes matching these paths, including inactive rules; this does not establish the final policy outcome. Each table shows up to 250 rows. Load governance data to include its rules.</p>
+      <h3>Computers and membership paths</h3>
+      <div class="table-frame" role="region" aria-label="Identity access paths" tabindex="0">
+        <table aria-label="Identity access paths"><thead id="identityUsageHead"></thead><tbody id="identityUsageBody"></tbody></table>
+      </div>
+      <h3>Related governance rules</h3>
+      <div class="table-frame" role="region" aria-label="Identity governance rules" tabindex="0">
+        <table aria-label="Identity governance rules"><thead id="identityRulesHead"></thead><tbody id="identityRulesBody"></tbody></table>
+      </div>
+      <div class="dialog-actions"><button class="command secondary" id="identityUsageCloseButton" type="button" autofocus>Close</button></div>
+    </dialog>
     <dialog class="admin-dialog" id="reasonDialog" aria-labelledby="reasonDialogTitle">
       <form id="reasonForm" method="dialog" novalidate>
         <h2 id="reasonDialogTitle">Confirm</h2>
         <p class="dialog-note" id="reasonDialogSummary"></p>
+        <p class="dialog-preview" id="reasonRulePreview" hidden></p>
         <label>Reason<textarea id="reasonInput" rows="3" maxlength="2000"></textarea></label>
         <p class="dialog-status" id="reasonFormStatus" role="alert"></p>
         <div class="dialog-actions"><button class="command secondary" id="reasonCancelButton" type="button">Cancel</button><button class="command" id="reasonSubmitButton" type="submit">Confirm</button></div>
       </form>
+    </dialog>
+    <dialog class="admin-dialog rule-matches-dialog" id="ruleMatchesDialog" aria-labelledby="ruleMatchesTitle">
+      <h2 id="ruleMatchesTitle">Rule match preview</h2>
+      <p class="dialog-preview" id="ruleMatchesSummary"></p>
+      <p class="dialog-note">Matches are based only on loaded inventory, regardless of report filters. This is a scope preview, not a prediction of policy changes: rule status, validity dates and other rules can affect the final outcome. Refresh inventory for an up-to-date view.</p>
+      <div class="table-frame" role="region" aria-label="Matching review entries" tabindex="0">
+        <table aria-label="Matching review entries"><thead id="ruleMatchesHead"></thead><tbody id="ruleMatchesBody"></tbody></table>
+      </div>
+      <p class="dialog-note" id="ruleMatchesEmpty" hidden>No loaded review entries match this rule.</p>
+      <div class="dialog-actions"><button class="command secondary" id="ruleMatchesCloseButton" type="button" autofocus>Close preview</button></div>
     </dialog>
   </main>
   <script id="reportData" type="application/json">__REPORT_DATA__</script>

@@ -56,7 +56,7 @@ The managed identity also retains `User.Read.All` and `Group.Read.All` for looku
 
 ## CSV export behavior
 
-CSV export uses the current view, search, filters, and sort order. It exports every matching underlying row, regardless of the current page or grouped expansion state. Every field is quoted, embedded quotation marks are doubled, and files use UTF-8 with a BOM and CRLF line endings.
+CSV export uses the current view, search, filters, and sort order. It exports every matching underlying row, regardless of the current page or grouped expansion state. Every field is quoted, embedded quotation marks are doubled, and files use UTF-8 with a BOM and CRLF line endings. Text values beginning with `=`, `+`, `-`, `@`, tab, or carriage return are prefixed with an apostrophe so spreadsheet applications do not evaluate endpoint- or proposer-supplied text as formulas. Only the view's defined columns are exported; SAS tokens, access tokens, and Admin-mode controls are never included.
 
 Exports never include SAS values, OAuth tokens, or recovery codes. Treat Review and Governance exports as protected operational and audit data.
 
@@ -105,22 +105,38 @@ The deployment creates:
 - A Table service CORS rule when the Live HTML frontend is selected.
 - A published PowerShell 7.2 reconciliation runbook and four-hour schedule by default.
 
-Run the deployment from PowerShell 7. The default Automation account name starts with `AA-`, and the reconciliation runbook name starts with `rb-`. Pass explicit names if the derived Automation account would exceed Azure's name limit:
+Run the deployment from PowerShell 7. Azure resource names follow the abbreviations from the [Azure Periodic Table](https://www.azureperiodictable.com/). Names you pass are used as given; derived names use these prefixes:
+
+| Component | Prefix | Example or derived name |
+| --- | --- | --- |
+| Resource group | `rg-` | `rg-localadmin-prod` (you provide it) |
+| Inventory Storage account | `st` | `stlocaladmininv<suffix>` (you provide it) |
+| Governance Storage account | `st` | `<inventory storage>gov` |
+| Automation account | `aa-` | `aa-<inventory storage without leading st>` |
+| Function App | `func-` | `func-localadmin-bff-<suffix>` (you provide it) |
+| Function host Storage account | `st` | `stlocaladminfunc<suffix>` (you provide it) |
+| App Service plan | `asp-` | `asp-<Function App name without func->` |
+| Application Insights | `appi-` | `appi-<Function App name without func->` |
+| Entra security groups | `sg-` | `sg-<resource group without rg->-<purpose>` |
+
+The reconciliation runbook name starts with `rb-`. Deployments resumed from an older checkpoint keep their recorded names, so existing resources are never renamed. When rerunning an older deployment with `-ForceRecreate`, pass its existing names with `-AutomationAccountName`, `-FunctionPlanName`, and `-ApplicationInsightsName`; otherwise new resources with the default names are created. Pass `-AutomationAccountName` if the derived Automation account name is outside Azure's 6–50 character limit:
 
 ```powershell
 pwsh.exe -NoProfile -File .\Deployment\Deploy-LocalAdminReporting.ps1 `
    -SubscriptionId '<subscription-id>' `
    -TenantId '<tenant-id>' `
-   -ResourceGroupName 'rg-local-admin-reporting' `
+   -ResourceGroupName 'rg-localadmin-prod' `
    -Location 'westeurope' `
-   -StorageAccountName '<globally-unique-storage-name>' `
+   -StorageAccountName 'stlocaladmininv<suffix>' `
    -InstallMissingModules `
    -InstallTemporaryBicep
 ```
 
 At startup, the script lists its prerequisite behavior. Missing PowerShell modules can be installed from PowerShell Gallery for the current user. If Bicep is unavailable on `PATH`, the script requests permission to download the official Microsoft-signed Windows executable to a unique directory under the current user's TEMP folder. `-InstallTemporaryBicep` provides that approval noninteractively. The temporary directory is added only to the deployment process `PATH` and is removed when the script finishes, including after an error.
 
-Current-user module installation and temporary Bicep download do not normally require administrator rights, so the script does not self-elevate. Azure and Microsoft Graph permissions are still required for cloud operations. Environments that block PowerShell Gallery, GitHub release downloads, TEMP execution, or Microsoft-signed application execution must have those controls adjusted by an administrator or provide the prerequisites centrally.
+With `-BackendMode AzureFunctions`, the script uses npm to build the TypeScript BFF and to bundle its production dependencies into the Function package. If npm is unavailable on `PATH`, the script requests permission to download the latest Node.js 22 LTS ZIP (matching the Function runtime) from nodejs.org, verifies it against the published `SHASUMS256.txt` and the OpenJS Foundation signature of `node.exe`, and uses it only for this process. `-InstallTemporaryNode` provides that approval noninteractively. The npm cache is kept in the same temporary directory, which is removed when the script finishes. Node.js is not needed when the BFF publish stage is already complete or no BFF is deployed.
+
+Current-user module installation and temporary Bicep and Node.js downloads do not normally require administrator rights, so the script does not self-elevate. Azure and Microsoft Graph permissions are still required for cloud operations. Environments that block PowerShell Gallery, GitHub release downloads, nodejs.org, the npm registry, TEMP execution, or Microsoft-signed application execution must have those controls adjusted by an administrator or provide the prerequisites centrally.
 
 `-ReportingFrontend LiveHtml` is the default and creates the required Table CORS rule. When `-AllowedCorsOrigins` is omitted, the rule allows `*`. For hosted reports, restrict it to the exact origin, for example `-AllowedCorsOrigins 'https://reports.contoso.com'`. Select `-ReportingFrontend GeneratedHtml` or `-ReportingFrontend Excel` to remove Table CORS because those frontends do not make browser requests to Azure Storage. Use `-SkipGraphPermissionGrant` only when `User.Read.All`, `Group.Read.All`, `Device.Read.All`, and `DeviceManagementManagedDevices.Read.All` will be assigned to the Automation managed identity separately.
 
@@ -140,22 +156,48 @@ These values are written to public `config.json`. To deploy the current profile 
 
 ```powershell
 -BackendMode AzureFunctions `
--FunctionAppName '<globally-unique-function-app>' `
--FunctionStorageAccountName '<globallyuniquefunctionstorage>' `
+-FunctionAppName 'func-localadmin-bff-<suffix>' `
+-FunctionStorageAccountName 'stlocaladminfunc<suffix>' `
 -AppRegistrationMode Create `
 -SpaRedirectUri 'https://reports.contoso.com/localadmin/index.html'
 ```
 
-This creates or reconciles dedicated API and SPA app registrations without client secrets, exposes the `access_as_user` delegated scope, pre-authorizes the SPA, deploys the Function App and Application Insights, grants its managed identity table-level access to `LocalAdminUserSettings` and `LocalAdminAuditRecords`, publishes the reviewed TypeScript package, checks that unauthenticated access is rejected, and writes the resulting public URL and identifiers to `config.json`.
+This creates or reconciles dedicated API and SPA app registrations without client secrets, exposes the `access_as_user` delegated scope and the four `LocalAdmin.*` app roles, pre-authorizes the SPA, deploys the Function App and Application Insights, grants its managed identity table-level access to `LocalAdminUserSettings` and `LocalAdminAuditRecords`, publishes the reviewed TypeScript package, checks that unauthenticated access is rejected, and writes the resulting public URL and identifiers to `config.json`.
 
 The Linux Consumption Function runs from a ZIP in a private container in its host Storage account. The Function system-assigned managed identity receives `Storage Blob Data Reader` only on that package container; no package SAS is stored in configuration. The deployment uploads a uniquely named package, updates `WEBSITE_RUN_FROM_PACKAGE`, restarts the Function, synchronizes triggers, and waits for the protected endpoint to return the expected unauthenticated response.
 
-Use `-AppRegistrationMode Existing` with `-ApiClientId`, `-SpaClientId`, and `-BffApiScope` to retain separately managed registrations. `-UseExistingAzureContext` reuses a validated Az context. When Azure or Graph authentication is required, the script uses the normal interactive browser sign-in rather than forcing device-code authentication. `-ForceTokenOutput` acknowledges protected token-file creation for unattended deployment.
+With `-BackendMode AzureFunctions`, the deployment also creates four Admin-mode Entra security groups and assigns the API app roles to them:
+
+| Default group | App roles |
+| --- | --- |
+| `sg-<name>-governance-readers` | `LocalAdmin.Governance.Read` |
+| `sg-<name>-governance-approvers` | `LocalAdmin.Governance.Approve` |
+| `sg-<name>-governance-selfapprovers` | `LocalAdmin.Governance.Approve`, `LocalAdmin.Governance.SelfApprove` |
+| `sg-<name>-action-operators` | `LocalAdmin.Actions.Operate` |
+
+`<name>` is the resource group name without `rg-`. Use `-AdminGroupNamePrefix 'sg-localadmin'` to choose another prefix, or `-SkipAdminGroups` to manage role assignments yourself. An unrecorded group with a matching name is never adopted: deployment fails closed so a pre-created group cannot inherit privileged roles. Rename the collision, choose a unique prefix, or skip group creation and manage assignments yourself. Resumed deployment reuses only groups whose ID and deployment-created ownership are in the checkpoint. The groups have no members; add admins directly or make them eligible through PIM for Groups. Group-based app role assignment requires Microsoft Entra ID P1, and the deploying account needs the Microsoft Graph `Group.ReadWrite.All` permission (for example, the Groups Administrator role). Roles that are missing from an existing API registration are reported and retried on the next run; add them with `-ConfigureApiAppRoles`.
+
+Use `-AppRegistrationMode Existing` with explicitly verified `-ApiClientId`, `-SpaClientId`, and `-BffApiScope` to retain separately managed registrations. In `Create` mode, an unrecorded app registration matching either generated display name causes deployment to fail instead of being adopted; choose unique display names or use `Existing` mode with verified client IDs. The BFF accepts delegated API tokens only when their `azp` (or v1 `appid`) claim matches the configured SPA client ID. `-UseExistingAzureContext` reuses a validated Az context. When Azure or Graph authentication is required, the script uses the normal interactive browser sign-in rather than forcing device-code authentication. `-ForceTokenOutput` acknowledges protected token-file creation for unattended deployment.
 
 After every successful deployment stage, the script writes a non-secret checkpoint to `Deployment\.localadmin-deployment-state.json`. On a later run it restores the recorded configuration, authenticates to the recorded tenant and subscription, verifies that the resource group, Storage accounts, Automation account, and optional running Function App still exist, and asks before ignoring newly supplied deployment parameters. When approved, completed stages such as Bicep deployment, Graph grants, runbook publication, BFF publication, SAS generation, and `config.json` generation are skipped. The state file contains identifiers and configuration but no SAS values, account keys, OAuth tokens, or recovery secrets, and is excluded from Git. Use `-ForceRecreate` with a complete parameter set only when intentionally replacing the checkpoint and rerunning the deployment stages.
 
+At the end of every completed run, the script writes an after-deployment report to `Deployment\LocalAdminReporting-DeploymentReport_<timestamp>.md` with a matching `.json` file. Use `-DeploymentReportPath` to choose another folder. The report lists the tenant, subscription, deploying account, resource group, every deployed resource with its status, naming check and portal link, the tables, managed identities and their role assignments, runbook schedule, endpoints, CORS origins, app registrations, Admin-mode groups and assigned roles, local files, completed stages, and the remaining manual steps. It contains no SAS tokens, keys, connection strings, or OAuth tokens, and is excluded from Git. A failure while writing the report does not fail the deployment.
+
 The complete resource list, ownership rules, and teardown behavior are documented in
 [`Deployment\RESOURCE-INVENTORY.md`](Deployment/RESOURCE-INVENTORY.md).
+
+To publish backend code changes to an existing deployment without redeploying Azure resources, use
+`-RepublishBff`. With a valid checkpoint, completed infrastructure, group, SAS, and configuration
+stages remain skipped, and existing Function App settings (including `ADMIN_AUTH_CONTEXT_ID`) are
+preserved:
+
+```powershell
+pwsh.exe -NoProfile -File .\Deployment\Deploy-LocalAdminReporting.ps1 -RepublishBff -InstallTemporaryNode
+```
+
+Approve resuming the existing deployment when prompted. Publish the matching updated HTML files to
+your web server as well if the browser API contract changed. Deployment readiness checks require both
+the profile and Admin-mode session endpoints to return the BFF's unauthenticated `401` response.
 
 ## Remove an Azure deployment
 
@@ -274,7 +316,41 @@ Do not create a separate CORS rule for each continuation header. The single rule
 
 After **Refresh from Azure** is selected, the button is disabled and the page displays a warning while it follows every continuation page. Wait until the success or error message appears before trying again.
 
+## Identity lookup and where used
+
+The proposal dialog accepts a manually entered SID or a lookup by UPN, account/group name, or Entra object ID. Both the principal and optional assigned-through group picker search the **loaded inventory first**, regardless of whether inventory was loaded using SAS or Entra. Selecting an identity fills its SID; selecting an assigned-through group also selects Transitive membership.
+
+SAS-only users never make directory requests. If no local identity matches, a signed-in user with a governance API role can search Entra through the BFF. The browser waits for **800 ms without another input change**, requires 3-128 characters, and cancels superseded searches. Direct SID input does not trigger a directory search. Each search returns at most 20 directory objects; narrow the query if results are truncated. Security-group searches use name/mail prefixes, user searches use UPN/display-name prefixes, and an exact object ID is supported for either type. Synced identities offer separate **Entra** and **AD** SID choices; choose the one appropriate to the observed access path rather than assuming one SID works for all join states.
+
+Successful results, including no matches, are cached in browser memory for five minutes per account/query/type, with at most 100 cached searches. Sign-out clears this cache. The backend also has a five-minute bounded cache and a per-instance limit of ten requests per caller per minute; Microsoft Graph throttling and permission failures are shown explicitly. This reduces directory requests and Function invocations; it is not a promise of per-query Graph billing savings.
+
+Enable directory lookup by granting the **Function** managed identity `User.Read.All` and `Group.Read.All` Graph application permissions. The Automation identity's existing permissions do not grant the Function access. This is opt-in:
+
+```powershell
+pwsh.exe -NoProfile -File .\Deployment\Deploy-LocalAdminReporting.ps1 `
+    -RepublishBff `
+    -ConfigureBffDirectoryLookup `
+    -UseExistingAzureContext `
+    -InstallTemporaryNode
+```
+
+The switch works with the existing deployment checkpoint and records `BffDirectoryPermissionsGranted`; permission grants require an appropriately privileged deployment operator and may need time to propagate. It cannot be combined with `-SkipGraphPermissionGrant`. No SPA Graph permissions, client secrets, or new npm dependencies are needed. Publish `identityLookup.js` alongside the updated `app.js`, `adminMode.js`, `apiContract.js`, `dataService.js`, `profileClient.js`, `index.html`, and `styles.css`.
+
+Rules still store and match only the selected SID. Optional `PrincipalDisplayName` and `PrincipalUserPrincipalName` values are bounded, proposer-supplied snapshots for display, not directory-verified authorization claims or matching inputs. Governance tables/CSV and approval summaries show this context without changing rule precedence.
+
+In **Users** and **Groups**, click an identity's SID or name to open **Where identity is used**. The read-only panel shows loaded computers and membership paths (including removed entries), plus direct rule references and rules whose scopes match those paths. Inactive rules are included and each table displays up to 250 rows. Load governance data to include its rules; this is not a tenant-wide directory-membership search or a final policy evaluation. The drill-down also works offline in generated snapshots and makes no directory calls.
+
 ## Admin mode Conditional Access setup
+
+Microsoft Entra sign-in, **Enter Admin mode** and their status messages appear at the top right of the title bar. **Sign out** appears there once an account is signed in and exits Admin mode before signing out. The sign-out popup returns to the configured SPA redirect URI, where the MSAL redirect bridge relays its state-only response and closes the popup; the main report updates in place without reloading. Deploy `bootstrap.js` alongside `auth.js` so both sign-in and sign-out callbacks reach the bridge. Cloud profile reload remains in Settings. MSAL 5 cannot reliably detect a manually closed authentication popup because browser opener-isolation policies can sever its window connection. While a popup request is pending, a dark-red **Retry** button appears beside the disabled sign-in button. Close any remaining authentication popups before selecting it; this explicitly replaces the pending attempt without reloading the report. It works for normal sign-in and Admin-mode step-up. If you do not retry, the pending request eventually reports a timeout and leaves Admin mode inactive. Closing a popup is not itself evidence that the backend rejected authentication.
+
+Reloading or closing the page clears the report sign-in and Admin mode by design: MSAL accounts, OAuth tokens and the local Admin-mode state live only in memory, not local or session storage. This does not sign out the Microsoft Entra browser session or revoke an already-issued access token. Sign in and enter Admin mode again after a reload.
+
+Rule proposals accept pasted Unicode hyphens (`U+2010` and non-breaking `U+2011`) in the principal and assigned-through group SID fields. The browser converts these to ordinary ASCII hyphens before validation, match preview and submission; stored rules and backend SID validation remain unchanged.
+
+Proposers can click the **Preview: matches ...** summary in the proposal dialog to inspect the matching review entries and computers. Approvers get the same clickable summary beside the governance actions and inside the approval confirmation dialog. Closing the read-only preview preserves the underlying proposal or approval form. Load inventory first using the report connection; loading governance rules from the BFF alone does not load inventory. Previews use all loaded review entries, regardless of report filters, and apply the rule's principal, source, membership, group, device, join-state and device-age constraints. They show matching scope, not a final policy-change prediction: rule status, validity dates, precedence and competing rules still determine the outcome. Refresh inventory before relying on these counts.
+
+The page header and Admin-mode controls stay visible while scrolling. Only the current sign-in and Admin-mode messages appear in a collapsed status box, not a message history; select its arrow to expand or collapse it. Error lines are highlighted. Authentication and Admin-mode errors expand it automatically. The locally drawn arrow sits to the right of the timers, or by itself beneath the Admin-mode button when no timers are running, without a full-width bar. When Admin mode is active, an **Idle timeout** countdown shows the time remaining before 15 minutes of inactivity ends the session, and a **Total timeout** countdown shows the time until the backend's absolute session expiry. Clicks, taps, and key presses reset only the idle countdown. Admin mode ends when either countdown reaches zero; this does not sign you out of the report.
 
 Admin mode uses a Conditional Access **authentication context** to force a fresh sign-in. When **Enter Admin mode** is selected, the LiveHTML asks Entra for a token with the authentication context. Every privileged BFF request then checks three things:
 
@@ -319,7 +395,7 @@ Requirements:
 
 ### 3. Deploy the app roles and Admin-mode settings
 
-Rerun the deployment with the switch below. The switch adds the four app roles to the API app registration and keeps any roles that already exist.
+With `-AppRegistrationMode Create`, the deployment adds the four app roles automatically. For existing registrations, rerun the deployment with the switch below. The switch adds the four app roles to the API app registration and keeps any roles that already exist.
 
 ```powershell
 .\Deployment\Deploy-LocalAdminReporting.ps1 <your usual parameters> -ConfigureApiAppRoles -AdminAuthContextId c1 -AdminSessionMaxMinutes 30
@@ -329,7 +405,9 @@ The deployment writes `ADMIN_AUTH_CONTEXT_ID` and `ADMIN_SESSION_MAX_MINUTES` to
 
 ### 4. Assign the app roles
 
-Go to **Entra ID** > **Enterprise applications**, open the API application, and go to **Users and groups** > **Add user/group**. Assign the roles to groups where possible.
+The deployment creates the four `sg-<name>-*` security groups and assigns the roles to them (see [Automated Azure deployment](#automated-azure-deployment)). Add your admins as members of the matching group. The after-deployment report lists the group names and any role that could not be assigned.
+
+If you used `-SkipAdminGroups`, go to **Entra ID** > **Enterprise applications**, open the API application, and go to **Users and groups** > **Add user/group**. Assign the roles to groups where possible.
 
 | Role | Grants |
 | --- | --- |
@@ -338,7 +416,7 @@ Go to **Entra ID** > **Enterprise applications**, open the API application, and 
 | `LocalAdmin.Governance.SelfApprove` | Use with Approve. Lets you approve your own proposals, which suits small tenants. Each self-approval is audited. |
 | `LocalAdmin.Actions.Operate` | Cancel other users' requests. |
 
-To make the roles just-in-time, assign them to a role-assignable group and make admins *eligible* members of that group through **PIM for Groups**. App roles are only added to a token at sign-in. After activating PIM membership, sign out of the LiveHTML and sign in again, then enter Admin mode.
+To make the roles just-in-time, make admins *eligible* members of the group through **PIM for Groups** instead of permanent members. App roles are only added to a token at sign-in. After activating PIM membership, sign out of the LiveHTML and sign in again, then enter Admin mode.
 
 ### 5. Verify
 
@@ -384,7 +462,7 @@ Use `-OutputPath` to choose another report location and `-OpenReport` to open it
 pwsh.exe -NoProfile -File .\HTML\Export-LocalAdminResolvedHtml.ps1 -StorageAccountName '<storage-account-name>' -SasToken '<read-only-sas-token>' -OutputPath C:\Reports\LocalAdmins.html -OpenReport
 ```
 
-The generated report embeds inventory data but not either SAS token, hides the live connection controls, uses snapshot-safe no-op browser storage functions, and requires regeneration to obtain newer data. Protect the HTML according to the sensitivity of the reported device and account information.
+The generated report embeds inventory data but not either SAS token, hides the live connection controls, uses snapshot-safe no-op browser storage functions, and requires regeneration to obtain newer data. The exporter bundles each source module in its own scope and replaces sign-in, cloud-profile, recovery and Admin-mode modules with inert stubs. Export fails if a source module imports a name that the snapshot neither inlines nor stubs, if a template marker is missing, or if any external script, stylesheet, image or frame reference would remain. Protect the HTML according to the sensitivity of the reported device and account information.
 
 The hosted [Local administrator inventory demo](https://intune.best/LocalAdminResolvedDemo.html) is a publishable snapshot generated from 5,000 deterministic synthetic main rows. It contains no SAS token or real inventory data and can be opened without an Azure connection. The generated `HTML\LocalAdminResolvedDemo.html` file can be uploaded to replace the hosted version.
 

@@ -15,10 +15,13 @@ This Azure Functions TypeScript application is the protected backend-for-fronten
 | `POST` | `/v1/actions` | Submit an auditable governance-exception request |
 | `GET` | `/v1/actions?scope=mine\|all` | List own actions, or all actions with a governance role |
 | `POST` | `/v1/actions/{id}/cancel` | Cancel an own action, or another owner's action in Admin mode with `LocalAdmin.Actions.Operate` |
-| `POST`/`DELETE` | `/v1/admin/session` | Verify or end Admin mode (audited) |
+| `POST`/`DELETE` | `/v1/sessions/admin` | Verify or end Admin mode (audited) |
 | `GET` | `/v1/rules?scope=governance\|mine` | List governance rules (governance role) or own proposals |
 | `POST` | `/v1/rules` | Propose a governance rule (`Idempotency-Key` UUID required) |
 | `POST` | `/v1/rules/{id}/approve\|reject\|revoke` | Admin-mode rule transitions with `If-Match` |
+| `GET` | `/v1/identities/lookup?type=User\|Group&q=...` | Bounded Entra identity search; Entra identity plus a governance-reader API role |
+
+The Admin-mode route is `sessions/admin`, not `admin/session`: Azure Functions reserves routes beginning with `admin` or `runtime`, even when a custom route prefix is configured.
 
 Admin mode requires an Entra token containing an app role and the Conditional Access authentication context `ADMIN_AUTH_CONTEXT_ID` in `acrs`, issued within `ADMIN_SESSION_MAX_MINUTES`. Otherwise the API returns `401` with a `WWW-Authenticate` claims challenge and `details.claims`, which the browser passes to MSAL. Roles: `LocalAdmin.Governance.Read` (read/propose), `LocalAdmin.Governance.Approve` (approve/reject/revoke; four-eyes), `LocalAdmin.Governance.SelfApprove` (with Approve, permits approving own proposals), and `LocalAdmin.Actions.Operate` (cancel other owners' actions).
 
@@ -32,6 +35,8 @@ Copy `local.settings.example.json` to the git-ignored `local.settings.json` for 
 
 - `TENANT_ID` — the allowed tenant GUID.
 - `API_CLIENT_ID` — the exposed API application's client ID and required token audience.
+- `SPA_CLIENT_ID` — the only trusted SPA client application ID; the BFF checks the access token's `azp` (or v1 `appid`) claim against it.
+- `SPA_CLIENT_ID` — the explicitly trusted SPA client application ID; access tokens without a matching `azp` (or v1 `appid`) claim are rejected.
 - `GOVERNANCE_TABLE_ENDPOINT` — the governance account's HTTPS Table endpoint.
 - `ALLOWED_ORIGINS` — comma-separated exact HTTPS report origins. An explicit `*` is supported for controlled testing or intentionally broad hosting, but exact origins are strongly recommended.
 - `ADMIN_AUTH_CONTEXT_ID` — optional Conditional Access authentication context (`c1`–`c99`); defaults to `c1`.
@@ -45,6 +50,10 @@ The Function managed identity needs `Storage Table Data Contributor` on:
 - `LocalAdminAuditRecords`.
 
 The deployment creates these tables and grants the Function managed identity table-scoped contributor access.
+
+Directory lookup additionally requires `User.Read.All` and `Group.Read.All` Microsoft Graph application permissions on the **Function** managed identity. Grant them explicitly with `-ConfigureBffDirectoryLookup` on a deployment or resumed `-RepublishBff` run. Automation identity grants do not apply to the Function. Directory lookup is read-only, does not require Admin-mode step-up, rejects recovery/SAS credentials, and is restricted to the same API roles as governance reads. It uses the existing `DefaultAzureCredential` dependency, bounded five-minute in-memory caching and ten requests per caller per minute per Function instance. Browser and backend caches are not persistent; the per-instance rate limit is not a distributed gateway quota. Graph permission/throttling failures are returned explicitly rather than treated as no matches.
+
+Rule proposals optionally accept `principalDisplayName` (256 characters) and `principalUserPrincipalName` (1024 characters), persisted as informational PascalCase entity columns. Both reject control characters. Neither is trusted for identity verification, authorization, or matching; `principalSid` remains mandatory.
 
 ### Governance-exception requests
 

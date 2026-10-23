@@ -1,7 +1,7 @@
 export function isAuthenticationResponse(locationValue = globalThis.location) {
   if (!locationValue) return false;
   const response = `${locationValue.search || ''}${locationValue.hash || ''}`;
-  return /(?:[?#&])(code|error|error_description|error_subcode)=/i.test(response);
+  return /(?:[?#&])(code|error|error_description|error_subcode|state)=/i.test(response);
 }
 
 export async function bootstrapBrowser(

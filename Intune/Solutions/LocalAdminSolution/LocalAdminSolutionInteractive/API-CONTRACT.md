@@ -1,6 +1,6 @@
 # Local administrator governance API contract
 
-Contract version: `2026-10-01`
+Contract version: `2026-10-21`
 
 This contract defines the protected backend boundary for personal profiles, allow rules, review actions, Admin mode, and auditing. The browser report may evaluate read-only data for display, but the backend is authoritative for identity, ownership, authorization, state transitions, concurrency, and writes.
 
@@ -28,6 +28,7 @@ An administrator may explicitly configure wildcard BFF CORS for controlled testi
 | `POST /profile/recovery/revoke` | Revoke recovery access | Current owner proof |
 | `GET /rules?scope=mine` | Read caller-owned personal rules | Owner |
 | `GET /rules?scope=governance` | Read governance rules | Assigned governance reader |
+| `GET /identities/lookup?type=User\|Group&q=...` | Read-only Entra identity resolution | Entra identity and an assigned governance-reader API role |
 | `POST /rules` | Create a personal draft or governance proposal | Owner; governance proposals require Entra identity |
 | `PUT /rules/{ruleId}` | Update a mutable rule | Owner and matching ETag |
 | `POST /rules/{ruleId}/submit` | Move a draft to `PendingApproval` | Owner and matching ETag |
@@ -37,8 +38,8 @@ An administrator may explicitly configure wildcard BFF CORS for controlled testi
 | `GET /actions` | Read authorized action requests and outcomes | Owner for personal requests; assigned governance reader for the organization queue |
 | `POST /actions` | Create an idempotent action request | Authenticated identity; privileged action types require Admin mode |
 | `POST /actions/{actionId}/cancel` | Cancel an action before execution | Request owner or action operator |
-| `POST /admin/session` | Establish short-lived Admin mode after a claims challenge | Entra identity, required authentication context, and active API role |
-| `DELETE /admin/session` | End Admin mode | Authenticated identity |
+| `POST /sessions/admin` | Establish short-lived Admin mode after a claims challenge | Entra identity, required authentication context, and active API role |
+| `DELETE /sessions/admin` | End Admin mode | Authenticated identity |
 
 Errors use `{ "code", "message", "correlationId", "details" }`. Ownership failures return `404` rather than revealing that another owner's entity exists. ETag conflicts return `412`. Duplicate idempotency keys return the original action with `200`, not a second request.
 
@@ -51,6 +52,18 @@ Errors use `{ "code", "message", "correlationId", "details" }`. Ownership failur
 - `POST /actions/{actionId}/cancel` accepts `{ "reason", "ownerKey" }`; `ownerKey` is required when an operator cancels another owner's action.
 
 ## Allow-rule entity
+
+### Identity lookup and display metadata
+
+`GET /identities/lookup` accepts `type=User|Group` and a trimmed query of 3-128 characters with no control characters. User queries match UPN/display-name prefixes; group queries match security-group display-name/mail prefixes; either accepts an exact Entra object GUID. OData literals are escaped, the Graph endpoint and selected fields are fixed, and at most 20 directory objects are returned with `truncated=true` when more exist.
+
+The response is `{ identities: [{ sid, principalType, displayName, userPrincipalName, objectId, source, origin }], truncated }`. `source` is `Entra` or `AD`; `origin` is `directory`. Cloud SIDs are derived from immutable object GUIDs using Windows GUID byte order. Synced objects can return two choices: the Entra SID and `onPremisesSecurityIdentifier`. Clients must let the user choose; names must not become matching values.
+
+The endpoint rejects unauthenticated/recovery callers and callers without a governance-reader role. The Function identity needs Graph `User.Read.All` and `Group.Read.All`. Queries/results have a bounded five-minute process-memory cache; a per-instance caller limit returns `429 directory_rate_limited` after ten requests per minute. Graph `403` returns `503 directory_permissions_required`; upstream throttling returns `429`; other upstream HTTP failures return `502`, not empty results.
+
+`POST /rules` optionally accepts `principalDisplayName` (at most 256 characters) and `principalUserPrincipalName` (at most 1024), with no control characters. They are persisted as `PrincipalDisplayName` and `PrincipalUserPrincipalName`. These are unverified, informational snapshots supplied by the proposer, excluded from matching and security-relevant rule state hashes. The immutable SID remains mandatory in `principalSid` / `PrincipalValue`.
+
+### Stored fields
 
 `PartitionKey` is the authoritative owner key and `RowKey` is a random UUID. Required fields are:
 

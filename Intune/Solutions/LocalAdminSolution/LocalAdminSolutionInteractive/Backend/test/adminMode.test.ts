@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { app, HttpRequest, InvocationContext, type HttpFunctionOptions } from '@azure/functions';
 import { AppRoles, requireAdminMode } from '../src/adminMode.js';
 import { ActionService } from '../src/actionService.js';
 import { AdminSessionService } from '../src/adminSessionService.js';
@@ -13,6 +14,7 @@ const tenantId = '11111111-1111-4111-8111-111111111111';
 const config = loadConfig({
   TENANT_ID: tenantId,
   API_CLIENT_ID: '33333333-3333-4333-8333-333333333333',
+  SPA_CLIENT_ID: '44444444-4444-4444-8444-444444444444',
   GOVERNANCE_TABLE_ENDPOINT: 'https://example.table.core.windows.net',
   ADMIN_AUTH_CONTEXT_ID: 'c1',
   ADMIN_SESSION_MAX_MINUTES: '30'
@@ -57,10 +59,54 @@ function apiError(code: string, status?: number) {
   return (error: unknown) => error instanceof ApiError && error.code === code && (status === undefined || error.status === status);
 }
 
+test('HTTP registrations avoid reserved host routes and expose the protected Admin-mode entry point', async context => {
+  const registrations = new Map<string, HttpFunctionOptions>();
+  context.mock.method(app, 'http', (name: string, options: HttpFunctionOptions) => {
+    assert.doesNotMatch((options.route || name).replace(/^\/+/, ''), /^(admin|runtime)/i);
+    registrations.set(name, options);
+  });
+  const values = {
+    TENANT_ID: tenantId,
+    API_CLIENT_ID: '33333333-3333-4333-8333-333333333333',
+    SPA_CLIENT_ID: '44444444-4444-4444-8444-444444444444',
+    GOVERNANCE_TABLE_ENDPOINT: 'https://example.table.core.windows.net'
+  };
+  const originalValues = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, values);
+    await import('../src/functions/profile.js');
+  } finally {
+    for (const [key, value] of Object.entries(originalValues)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  const registration = registrations.get('AdminSessionEnter');
+  assert.ok(registration);
+  assert.equal(registration.route, 'sessions/admin');
+  assert.deepEqual(registration.methods, ['POST']);
+  const result = await registration.handler(
+    new HttpRequest({ url: 'https://example.test/v1/sessions/admin', method: 'POST' }),
+    new InvocationContext({ functionName: 'AdminSessionEnter' })
+  );
+  assert.equal(result?.status, 401);
+  assert.equal(result?.jsonBody.code, 'authentication_required');
+  const lookup = registrations.get('IdentityLookup');
+  assert.ok(lookup);
+  assert.equal(lookup.route, 'identities/lookup');
+  const lookupResult = await lookup.handler(
+    new HttpRequest({ url: 'https://example.test/v1/identities/lookup?type=User&q=example', method: 'GET' }),
+    new InvocationContext({ functionName: 'IdentityLookup' })
+  );
+  assert.equal(lookupResult?.status, 401);
+  assert.equal(lookupResult?.jsonBody.code, 'authentication_required');
+});
+
 test('configuration validates the authentication context and Admin-mode lifetime', () => {
   const base = {
     TENANT_ID: tenantId,
     API_CLIENT_ID: '33333333-3333-4333-8333-333333333333',
+    SPA_CLIENT_ID: '44444444-4444-4444-8444-444444444444',
     GOVERNANCE_TABLE_ENDPOINT: 'https://example.table.core.windows.net'
   };
   assert.equal(loadConfig(base).adminAuthContextId, 'c1');
@@ -145,6 +191,24 @@ test('governance proposals require a role, are idempotent, and start pending app
   await assert.rejects(() => service.list(identity('8', []), 'governance'), apiError('role_required', 403));
   assert.equal((await service.list(proposer, 'governance')).rules.length, 1);
   assert.equal((await service.list(identity('8', []), 'mine')).rules.length, 0);
+});
+
+test('proposal display metadata is bounded and does not change its SID matching value', async () => {
+  const service = new RuleService(new MemoryRepository(), config, clock);
+  const key = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  const result = await service.propose(proposer, {
+    ...proposal, principalDisplayName: '  Helpdesk  ', principalUserPrincipalName: 'helpdesk@contoso.test'
+  }, key, 'c-1');
+  assert.equal(result.rule.PrincipalValue, 'S-1-5-21-1-2-3-1001');
+  assert.equal(result.rule.MatchType, 'SID');
+  assert.equal(result.rule.PrincipalDisplayName, 'Helpdesk');
+  assert.equal(result.rule.PrincipalUserPrincipalName, 'helpdesk@contoso.test');
+  await assert.rejects(() => service.propose(proposer, {
+    ...proposal, principalDisplayName: 'x'.repeat(257)
+  }, key, 'c-2'), apiError('invalid_request', 400));
+  await assert.rejects(() => service.propose(proposer, {
+    ...proposal, principalUserPrincipalName: 'bad\nname'
+  }, key, 'c-3'), apiError('invalid_request', 400));
 });
 
 test('approval enforces Admin mode, ETags, transitions, and the four-eyes principle', async () => {

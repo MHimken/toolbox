@@ -111,3 +111,8 @@ output automationAccountName string = automationAccount.name
 output automationManagedIdentityPrincipalId string = automationAccount.identity.principalId
 output storageAccountName string = storageAccount.name
 output tableEndpoint string = storageAccount.properties.primaryEndpoints.table
+output tableRoleAssignmentIds array = [
+  dailyAggregatesContributor.id
+  workflowStateContributor.id
+  assignmentAuditContributor.id
+]

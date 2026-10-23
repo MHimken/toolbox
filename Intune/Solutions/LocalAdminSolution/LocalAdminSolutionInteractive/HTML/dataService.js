@@ -4,6 +4,21 @@ export function text(value) {
   return value === null || value === undefined ? '' : String(value);
 }
 
+// Endpoint- and proposer-supplied strings must not become spreadsheet formulas (OWASP CSV injection).
+export function csvCell(value) {
+  let cell = text(value);
+  if (typeof value !== 'number' && /^[=+\-@\t\r]/.test(cell)) cell = `'${cell}`;
+  return `"${cell.replaceAll('"', '""')}"`;
+}
+
+export function buildCsv(columns, rows, formatValue = (key, value) => value) {
+  const lines = [
+    columns.map(([, label]) => csvCell(label)).join(','),
+    ...rows.map(row => columns.map(([key]) => csvCell(formatValue(key, row[key]))).join(','))
+  ];
+  return '\uFEFF' + lines.join('\r\n');
+}
+
 export async function getAzureTableEntities(tableName, accountUrl, token) {
   const rows = [];
   let nextPartitionKey = '';
@@ -281,6 +296,7 @@ export function resolveReviewData(summary, allowRules, reviewActions, reviewWind
       PrincipalSource: row.PrincipalSource,
       MembershipType: row.MembershipType,
       AddedThroughGroupName: row.AddedThroughGroupName,
+      AssignedThroughGroupSid: row._AssignedThroughGroupSID || row.AssignedThroughGroupSid || '',
       JoinState: row.JoinState,
       EntraState: row.EntraState,
       IntuneState: row.IntuneState,

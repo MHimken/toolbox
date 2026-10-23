@@ -38,7 +38,9 @@ The deployment script can grant both permissions. The administrator running it n
 
 ## Deployment
 
-Run the deployment from PowerShell 7.2 on an administration workstation or Azure Cloud Shell. Bicep must be available through Azure PowerShell, Azure CLI, or a `bicep` executable.
+Run the deployment from PowerShell 7.2 on an administration workstation or Azure Cloud Shell. The script uses `bicep` from PATH if available. On Windows, if it is missing, the script asks to download a temporary Bicep executable from the official Azure Bicep release. Use `-InstallTemporaryBicep` to approve this download without a prompt.
+
+The downloaded executable must have a valid Microsoft Authenticode signature before it is run. It is added to PATH only for this deployment; the original PATH is restored and the temporary directory is removed on success or failure. No administrator rights are normally required. On other platforms, install Bicep on PATH before deploying.
 
 ```powershell
 pwsh.exe -NoProfile -File .\Deployment\Deploy-RepairPrimaryUser.ps1 `
@@ -47,7 +49,8 @@ pwsh.exe -NoProfile -File .\Deployment\Deploy-RepairPrimaryUser.ps1 `
     -ResourceGroupName 'rg-repair-primary-user' `
     -Location 'westeurope' `
     -StorageAccountName '<globally-unique-storage-name>' `
-    -InstallMissingModules
+    -InstallMissingModules `
+    -InstallTemporaryBicep
 ```
 
 Defaults:
@@ -61,6 +64,24 @@ Defaults:
 The weekly time must be at least one hour after the daily collection time. Override the defaults with `-CollectorStartTimeUtc`, `-AnalyzerStartTimeUtc`, and `-AnalyzerDayOfWeek`.
 
 Use `-SkipGraphPermissionGrant` only when both Graph application permissions will be assigned to the Automation Account managed identity separately.
+
+### Continuing an interrupted deployment
+
+The script saves deployment configuration, Azure resource IDs, the managed-identity principal ID, and completed stages in `Deployment\.repair-primary-user-deployment-state.json`. It writes a checkpoint before deployment starts and after each successful stage, and refreshes the resource inventory on failure. The file contains no credentials or access tokens and is excluded from Git.
+
+Run the script again to be prompted to continue, or approve resuming without the prompt:
+
+```powershell
+pwsh.exe -NoProfile -File .\Deployment\Deploy-RepairPrimaryUser.ps1 -Resume
+```
+
+Configuration is restored from the checkpoint, so subscription, resource names, and scheduling parameters can be omitted. Explicit configuration parameters must match the saved values. `-InstallMissingModules`, `-InstallTemporaryBicep`, and `-SkipGraphPermissionGrant` are per-invocation switches; supply them again when needed. A skipped Graph grant is not recorded as a completed permission stage.
+
+On continuation, the script verifies the recorded Azure resources and managed identity before skipping Bicep. It checks that checkpointed runbooks are still published and schedules are still linked, and preserves completed schedules rather than recreating them. Graph permissions are checked again and only missing assignments are added. Changed local Bicep or runbook files invalidate the corresponding checkpoint stage. A missing resource, runbook, or schedule is reconciled instead of being blindly skipped.
+
+If the failed deployment predates checkpoint support, rerun with the original parameters once. Bicep uses incremental deployment to reconcile the existing Storage and Automation accounts under the same names, without deleting their data, then continues with permissions, runbooks, and schedules.
+
+Use `-DeploymentStatePath '<path-to-json>'` to keep separate checkpoints for different deployments. Keep each checkpoint local and do not run concurrent deployments against the same checkpoint. To intentionally change saved configuration or start without a usable checkpoint, supply `-ForceRecreate` and all initial-deployment parameters. This replaces the checkpoint and reconciles every stage; it does not delete Azure resources or clean up resources under previous names. Existing schedules are recreated during this full reconciliation.
 
 ## Initial warm-up
 
@@ -101,6 +122,28 @@ Start-AzAutomationRunbook `
 
 Collection uses replacement semantics. An incomplete date partition is deleted and rebuilt, so restarting it does not double-count sign-ins. Completed dates are skipped unless `ForceRecollect` is supplied.
 
+`ForceRecollect` is a Boolean runbook input, defaulting to `false`. In the portal select `true` to rebuild completed dates. When invoking the script directly, use `-ForceRecollect $true`.
+
+For smaller environments, backfill an inclusive range in a single job by supplying `CollectionDate` and `CollectionEndDate`, both in `yyyy-MM-dd` format:
+
+```powershell
+Start-AzAutomationRunbook `
+    -ResourceGroupName 'rg-repair-primary-user' `
+    -AutomationAccountName '<automation-account>' `
+    -Name 'Collect-PrimaryUserSignInData' `
+    -Parameters @{
+        StorageAccountName = '<storage-account>'
+        CollectionDate = '2026-10-15'
+        CollectionEndDate = '2026-10-21'
+    }
+```
+
+This collects October 15 through October 21, oldest first, processing and retaining aggregates for only one day in memory at a time. `CollectionEndDate` requires `CollectionDate`; the end must be on or after the start, and all dates must be completed UTC days. Omitting both dates still collects only yesterday.
+
+Each day has its own completion state. If one day fails, the job stops; rerun the same range to skip completed dates and retry the failed and remaining dates. `ForceRecollect` rebuilds every date in the range, including completed dates. Keep ranges within your tenant's available sign-in log history and the Automation job runtime limit; use smaller ranges or separate jobs for larger environments. Do not overlap range jobs with another collector job for the same dates.
+
+After updating the local collector, rerun `Deployment\Deploy-RepairPrimaryUser.ps1 -Resume` to publish the changed runbook without recreating completed schedules.
+
 Partitions older than `RetentionDays` are removed after successful collection. Keep retention greater than the analysis window; 35 days provides seven days of recovery margin.
 
 ## Weekly analysis
@@ -119,6 +162,8 @@ Start-AzAutomationRunbook `
 ```
 
 Preview recommendations are written to `PrimaryUserAudit` and no Intune assignment request is submitted. The scheduled run omits `Preview` and therefore applies changes.
+
+`Preview` is a Boolean runbook input, defaulting to `false`. Select `true` in the portal to preview, or use `-Preview $true` when invoking the script directly. Republish updated runbooks with `Deployment\Deploy-RepairPrimaryUser.ps1 -Resume` before using the Boolean inputs in Azure.
 
 The analyzer:
 

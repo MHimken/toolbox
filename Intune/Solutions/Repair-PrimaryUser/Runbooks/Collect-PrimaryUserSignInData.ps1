@@ -2,18 +2,23 @@
 #Requires -Module Az.Accounts
 <#
 .SYNOPSIS
-    Collects one UTC day of Windows sign-in aggregates for primary-user analysis.
+    Collects Windows sign-in aggregates for one UTC day or an inclusive date range.
 .DESCRIPTION
     Runs in Azure Automation with a managed identity. The runbook streams Microsoft Graph sign-in
     pages, counts successful Windows Sign In events by device and user, and replaces the selected
-    date partition in Azure Table Storage. A separate state row prevents completed days from being
-    collected twice.
+    date partitions in Azure Table Storage one day at a time. A separate state row for each date
+    prevents completed days from being collected twice. A failed day stops the range; rerunning the
+    same range skips completed dates unless ForceRecollect is supplied.
 .PARAMETER StorageAccountName
     Storage account containing the solution tables.
 .PARAMETER CollectionDate
-    UTC date to collect in yyyy-MM-dd format. Defaults to the previous completed UTC day.
+    UTC date to collect, or the first date of a range, in yyyy-MM-dd format. Defaults to the previous
+    completed UTC day when CollectionEndDate is omitted.
+.PARAMETER CollectionEndDate
+    Optional inclusive last UTC date in yyyy-MM-dd format. Requires CollectionDate. Both dates must
+    identify completed UTC days and the end date must be on or after the start date.
 .PARAMETER ForceRecollect
-    Replaces a partition even when its state is Complete.
+    Set to true to replace a partition even when its state is Complete. Defaults to false.
 .NOTES
     Runtime: PowerShell 7.2
     Required module: Az.Accounts
@@ -30,6 +35,9 @@ param(
     [ValidatePattern('^\d{4}-\d{2}-\d{2}$')]
     [string]$CollectionDate,
 
+    [ValidatePattern('^\d{4}-\d{2}-\d{2}$')]
+    [string]$CollectionEndDate,
+
     [ValidatePattern('^[A-Za-z][A-Za-z0-9]{2,62}$')]
     [string]$AggregateTableName = 'PrimaryUserDaily',
 
@@ -44,10 +52,11 @@ param(
     [ValidateRange(29, 365)]
     [int]$RetentionDays = 35,
 
-    [switch]$ForceRecollect
+    [bool]$ForceRecollect = $false
 )
 
 Set-StrictMode -Version Latest
+$script:OriginalErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = 'Stop'
 $script:StorageBaseUri = 'https://{0}.table.core.windows.net' -f $StorageAccountName
 $script:StorageToken = $null
@@ -65,6 +74,60 @@ function ConvertFrom-SecureAccessToken {
     } finally {
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
     }
+}
+
+# StrictMode throws on missing properties, so optional response members are read through this helper.
+function Get-OptionalProperty {
+    param(
+        [AllowNull()][object]$InputObject,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if ($null -eq $InputObject) { return $null }
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Get-HttpStatusCode {
+    param([Parameter(Mandatory = $true)][Management.Automation.ErrorRecord]$ErrorRecord)
+
+    $response = Get-OptionalProperty -InputObject $ErrorRecord.Exception -Name 'Response'
+    if ($null -eq $response) { return 0 }
+    return [int]$response.StatusCode
+}
+
+function Test-RetryableError {
+    param([Parameter(Mandatory = $true)][Management.Automation.ErrorRecord]$ErrorRecord)
+
+    $statusCode = Get-HttpStatusCode -ErrorRecord $ErrorRecord
+    if ($statusCode -eq 429 -or $statusCode -ge 500) { return $true }
+    $exception = $ErrorRecord.Exception
+    return $statusCode -eq 0 -and (
+        $exception -is [Net.Http.HttpRequestException] -or
+        $exception -is [IO.IOException] -or
+        $exception -is [TimeoutException] -or
+        $exception -is [Threading.Tasks.TaskCanceledException])
+}
+
+function Get-RetryDelaySeconds {
+    param(
+        [Parameter(Mandatory = $true)][Management.Automation.ErrorRecord]$ErrorRecord,
+        [Parameter(Mandatory = $true)][int]$Attempt
+    )
+
+    $delay = 0
+    $response = Get-OptionalProperty -InputObject $ErrorRecord.Exception -Name 'Response'
+    if ($response -is [Net.Http.HttpResponseMessage] -and $null -ne $response.Headers.RetryAfter) {
+        $retryAfter = $response.Headers.RetryAfter
+        if ($null -ne $retryAfter.Delta) {
+            $delay = $retryAfter.Delta.TotalSeconds
+        } elseif ($null -ne $retryAfter.Date) {
+            $delay = ($retryAfter.Date - [DateTimeOffset]::UtcNow).TotalSeconds
+        }
+    }
+    if ($delay -le 0) { $delay = [math]::Min([math]::Pow(2, $Attempt), 30) }
+    return [int][math]::Ceiling($delay)
 }
 
 function Initialize-ManagedIdentity {
@@ -107,15 +170,8 @@ function Invoke-RestWithRetry {
             if ($null -ne $Body) { $parameters.Body = $Body }
             return Invoke-WebRequest @parameters
         } catch {
-            $response = $_.Exception.Response
-            $statusCode = if ($null -ne $response) { [int]$response.StatusCode } else { 0 }
-            if ($attempt -eq $MaximumRetryCount -or ($statusCode -ne 429 -and $statusCode -lt 500)) { throw }
-            $retryAfter = 0
-            if ($null -ne $response -and $null -ne $response.Headers) {
-                [void][int]::TryParse([string]$response.Headers['Retry-After'], [ref]$retryAfter)
-            }
-            if ($retryAfter -le 0) { $retryAfter = [math]::Min([math]::Pow(2, $attempt), 30) }
-            Start-Sleep -Seconds $retryAfter
+            if ($attempt -eq $MaximumRetryCount -or -not (Test-RetryableError -ErrorRecord $_)) { throw }
+            Start-Sleep -Seconds (Get-RetryDelaySeconds -ErrorRecord $_ -Attempt $attempt)
         }
     }
 }
@@ -152,8 +208,8 @@ function Get-TableEntitiesByPartition {
     $nextPartitionKey = $null
     $nextRowKey = $null
     do {
-        $filter = [uri]::EscapeDataString("PartitionKey eq '$($PartitionKey.Replace("'", "''"))'")
-        $uri = '{0}/{1}()?$filter={2}' -f $script:StorageBaseUri, $TableName, $filter
+        $partitionFilter = [uri]::EscapeDataString("PartitionKey eq '$($PartitionKey.Replace("'", "''"))'")
+        $uri = '{0}/{1}()?$filter={2}' -f $script:StorageBaseUri, $TableName, $partitionFilter
         if (-not [string]::IsNullOrWhiteSpace($nextPartitionKey)) {
             $uri += '&NextPartitionKey={0}&NextRowKey={1}' -f [uri]::EscapeDataString($nextPartitionKey), [uri]::EscapeDataString($nextRowKey)
         }
@@ -186,7 +242,7 @@ function Get-CollectionState {
         $response = Invoke-RestWithRetry -Method Get -Uri $uri -Headers (Get-StorageHeaders)
         return $response.Content | ConvertFrom-Json
     } catch {
-        if ($null -ne $_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) { return $null }
+        if ((Get-HttpStatusCode -ErrorRecord $_) -eq 404) { return $null }
         throw
     }
 }
@@ -198,15 +254,8 @@ function Invoke-GraphGet {
         try {
             return Invoke-RestMethod -Method Get -Uri $Uri -Headers @{ Authorization = "Bearer $script:GraphToken" } -ErrorAction Stop
         } catch {
-            $response = $_.Exception.Response
-            $statusCode = if ($null -ne $response) { [int]$response.StatusCode } else { 0 }
-            if ($attempt -eq $MaximumRetryCount -or ($statusCode -ne 429 -and $statusCode -lt 500)) { throw }
-            $retryAfter = 0
-            if ($null -ne $response -and $null -ne $response.Headers) {
-                [void][int]::TryParse([string]$response.Headers['Retry-After'], [ref]$retryAfter)
-            }
-            if ($retryAfter -le 0) { $retryAfter = [math]::Min([math]::Pow(2, $attempt), 30) }
-            Start-Sleep -Seconds $retryAfter
+            if ($attempt -eq $MaximumRetryCount -or -not (Test-RetryableError -ErrorRecord $_)) { throw }
+            Start-Sleep -Seconds (Get-RetryDelaySeconds -ErrorRecord $_ -Attempt $attempt)
         }
     }
 }
@@ -215,8 +264,8 @@ function Remove-ExpiredDailyPartitions {
     param([Parameter(Mandatory = $true)][datetime]$CurrentDate)
 
     $expiredDate = $CurrentDate.AddDays(-$RetentionDays).ToString('yyyyMMdd')
-    $filter = [uri]::EscapeDataString("PartitionKey eq 'Collection' and RowKey lt '$expiredDate' and Status eq 'Complete'")
-    $uri = '{0}/{1}()?$filter={2}' -f $script:StorageBaseUri, $StateTableName, $filter
+    $expiredStateFilter = [uri]::EscapeDataString("PartitionKey eq 'Collection' and RowKey lt '$expiredDate' and Status eq 'Complete'")
+    $uri = '{0}/{1}()?$filter={2}' -f $script:StorageBaseUri, $StateTableName, $expiredStateFilter
     $response = Invoke-RestWithRetry -Method Get -Uri $uri -Headers (Get-StorageHeaders)
     foreach ($state in @(($response.Content | ConvertFrom-Json).value)) {
         Remove-TablePartition -TableName $AggregateTableName -PartitionKey ([string]$state.RowKey)
@@ -228,93 +277,121 @@ function Remove-ExpiredDailyPartitions {
     }
 }
 
-Initialize-ManagedIdentity
+function Invoke-DailyCollection {
+    param([Parameter(Mandatory = $true)][datetime]$TargetDate)
 
-$targetDate = if ([string]::IsNullOrWhiteSpace($CollectionDate)) {
-    [datetime]::UtcNow.Date.AddDays(-1)
-} else {
-    [datetime]::ParseExact(
-        $CollectionDate,
-        'yyyy-MM-dd',
-        [Globalization.CultureInfo]::InvariantCulture,
-        [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
-    )
-}
-if ($targetDate -ge [datetime]::UtcNow.Date) {
-    throw 'CollectionDate must identify a completed UTC day.'
-}
+    $dateKey = $targetDate.ToString('yyyyMMdd')
+    $state = Get-CollectionState -DateKey $dateKey
+    if ($null -ne $state -and [string]$state.Status -eq 'Complete' -and -not $ForceRecollect) {
+        Write-Output "The $($targetDate.ToString('yyyy-MM-dd')) partition is already complete. Nothing to do."
+        return
+    }
 
-$dateKey = $targetDate.ToString('yyyyMMdd')
-$state = Get-CollectionState -DateKey $dateKey
-if ($null -ne $state -and [string]$state.Status -eq 'Complete' -and -not $ForceRecollect) {
-    Write-Output "The $($targetDate.ToString('yyyy-MM-dd')) partition is already complete. Nothing to do."
-    return
-}
+    $startedAt = [datetime]::UtcNow.ToString('o')
+    Set-TableEntity -TableName $StateTableName -Entity @{
+        PartitionKey = 'Collection'
+        RowKey       = $dateKey
+        Status       = 'Collecting'
+        StartedAt    = $startedAt
+        EventCount   = 0
+        AggregateRows = 0
+    }
+    Remove-TablePartition -TableName $AggregateTableName -PartitionKey $dateKey
 
-$startedAt = [datetime]::UtcNow.ToString('o')
-Set-TableEntity -TableName $StateTableName -Entity @{
-    PartitionKey = 'Collection'
-    RowKey       = $dateKey
-    Status       = 'Collecting'
-    StartedAt    = $startedAt
-    EventCount   = 0
-    AggregateRows = 0
-}
-Remove-TablePartition -TableName $AggregateTableName -PartitionKey $dateKey
+    $windowStart = $targetDate.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $windowEnd = $targetDate.AddDays(1).ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $signInFilter = "createdDateTime ge $windowStart and createdDateTime lt $windowEnd and appDisplayName eq 'Windows Sign In'"
+    $requestUri = 'https://graph.microsoft.com/beta/auditLogs/signIns?$filter={0}&$select=createdDateTime,userId,deviceDetail,status&$top=1000' -f [uri]::EscapeDataString($signInFilter)
+    $aggregates = @{}
+    $eventCount = 0
 
-$windowStart = $targetDate.ToString('yyyy-MM-ddTHH:mm:ssZ')
-$windowEnd = $targetDate.AddDays(1).ToString('yyyy-MM-ddTHH:mm:ssZ')
-$filter = "createdDateTime ge $windowStart and createdDateTime lt $windowEnd and appDisplayName eq 'Windows Sign In'"
-$requestUri = 'https://graph.microsoft.com/beta/auditLogs/signIns?$filter={0}&$select=createdDateTime,userId,deviceDetail,status&$top=1000' -f [uri]::EscapeDataString($filter)
-$aggregates = @{}
-$eventCount = 0
+    while (-not [string]::IsNullOrWhiteSpace($requestUri)) {
+        $page = Invoke-GraphGet -Uri $requestUri
+        if ($null -eq $page -or $null -eq $page.value) { throw 'Microsoft Graph returned an invalid sign-in page.' }
+        foreach ($signIn in @($page.value)) {
+            $deviceId = [string]$signIn.deviceDetail.deviceId
+            $userId = [string]$signIn.userId
+            $parsedDeviceId = [guid]::Empty
+            $parsedUserId = [guid]::Empty
+            if ($null -eq $signIn.status -or [int64]$signIn.status.errorCode -ne 0 -or
+                -not [guid]::TryParse($deviceId, [ref]$parsedDeviceId) -or
+                -not [guid]::TryParse($userId, [ref]$parsedUserId)) { continue }
 
-while (-not [string]::IsNullOrWhiteSpace($requestUri)) {
-    $page = Invoke-GraphGet -Uri $requestUri
-    if ($null -eq $page -or $null -eq $page.value) { throw 'Microsoft Graph returned an invalid sign-in page.' }
-    foreach ($signIn in @($page.value)) {
-        $deviceId = [string]$signIn.deviceDetail.deviceId
-        $userId = [string]$signIn.userId
-        $parsedDeviceId = [guid]::Empty
-        $parsedUserId = [guid]::Empty
-        if ($null -eq $signIn.status -or [int64]$signIn.status.errorCode -ne 0 -or
-            -not [guid]::TryParse($deviceId, [ref]$parsedDeviceId) -or
-            -not [guid]::TryParse($userId, [ref]$parsedUserId)) { continue }
-
-        $deviceId = $parsedDeviceId.ToString('D')
-        $userId = $parsedUserId.ToString('D')
-        $key = '{0}|{1}' -f $deviceId, $userId
-        $signInTime = ([datetime]$signIn.createdDateTime).ToUniversalTime()
-        if (-not $aggregates.ContainsKey($key)) {
-            $aggregates[$key] = [pscustomobject]@{ DeviceId = $deviceId; UserId = $userId; Count = 0; LatestSignIn = [datetime]::MinValue }
+            $deviceId = $parsedDeviceId.ToString('D')
+            $userId = $parsedUserId.ToString('D')
+            $key = '{0}|{1}' -f $deviceId, $userId
+            $signInTime = ([datetime]$signIn.createdDateTime).ToUniversalTime()
+            if (-not $aggregates.ContainsKey($key)) {
+                $aggregates[$key] = [pscustomobject]@{ DeviceId = $deviceId; UserId = $userId; Count = 0; LatestSignIn = [datetime]::MinValue }
+            }
+            $aggregates[$key].Count++
+            if ($signInTime -gt $aggregates[$key].LatestSignIn) { $aggregates[$key].LatestSignIn = $signInTime }
+            $eventCount++
         }
-        $aggregates[$key].Count++
-        if ($signInTime -gt $aggregates[$key].LatestSignIn) { $aggregates[$key].LatestSignIn = $signInTime }
-        $eventCount++
+        $requestUri = [string](Get-OptionalProperty -InputObject $page -Name '@odata.nextLink')
     }
-    $requestUri = [string]$page.'@odata.nextLink'
-}
 
-foreach ($aggregate in $aggregates.Values) {
-    Set-TableEntity -TableName $AggregateTableName -Entity @{
-        PartitionKey = $dateKey
-        RowKey       = ('{0}|{1}' -f $aggregate.DeviceId.ToLowerInvariant(), $aggregate.UserId.ToLowerInvariant())
-        DeviceId     = $aggregate.DeviceId
-        UserId       = $aggregate.UserId
-        SignInCount  = [int]$aggregate.Count
-        LatestSignIn = $aggregate.LatestSignIn.ToString('o')
+    foreach ($aggregate in $aggregates.Values) {
+        Set-TableEntity -TableName $AggregateTableName -Entity @{
+            PartitionKey = $dateKey
+            RowKey       = ('{0}|{1}' -f $aggregate.DeviceId.ToLowerInvariant(), $aggregate.UserId.ToLowerInvariant())
+            DeviceId     = $aggregate.DeviceId
+            UserId       = $aggregate.UserId
+            SignInCount  = [int]$aggregate.Count
+            LatestSignIn = $aggregate.LatestSignIn.ToString('o')
+        }
     }
+
+    Set-TableEntity -TableName $StateTableName -Entity @{
+        PartitionKey  = 'Collection'
+        RowKey        = $dateKey
+        Status        = 'Complete'
+        StartedAt     = $startedAt
+        CompletedAt   = [datetime]::UtcNow.ToString('o')
+        EventCount    = $eventCount
+        AggregateRows = $aggregates.Count
+    }
+
+    Remove-ExpiredDailyPartitions -CurrentDate $targetDate
+    Write-Output "Collected $eventCount successful sign-ins into $($aggregates.Count) aggregate rows for $($targetDate.ToString('yyyy-MM-dd'))."
 }
 
-Set-TableEntity -TableName $StateTableName -Entity @{
-    PartitionKey  = 'Collection'
-    RowKey        = $dateKey
-    Status        = 'Complete'
-    StartedAt     = $startedAt
-    CompletedAt   = [datetime]::UtcNow.ToString('o')
-    EventCount    = $eventCount
-    AggregateRows = $aggregates.Count
-}
+try {
+    $todayUtc = [datetime]::UtcNow.Date
+    if (-not [string]::IsNullOrWhiteSpace($CollectionEndDate) -and [string]::IsNullOrWhiteSpace($CollectionDate)) {
+        throw 'CollectionDate is required when CollectionEndDate is supplied.'
+    }
+    $firstDate = if ([string]::IsNullOrWhiteSpace($CollectionDate)) {
+        $todayUtc.AddDays(-1)
+    } else {
+        [datetime]::ParseExact(
+            $CollectionDate,
+            'yyyy-MM-dd',
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+        )
+    }
+    $lastDate = if ([string]::IsNullOrWhiteSpace($CollectionEndDate)) {
+        $firstDate
+    } else {
+        [datetime]::ParseExact(
+            $CollectionEndDate,
+            'yyyy-MM-dd',
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+        )
+    }
+    if ($lastDate -lt $firstDate) {
+        throw 'CollectionEndDate must be on or after CollectionDate.'
+    }
+    if ($lastDate -ge $todayUtc) {
+        throw 'CollectionDate and CollectionEndDate must identify completed UTC days.'
+    }
 
-Remove-ExpiredDailyPartitions -CurrentDate $targetDate
-Write-Output "Collected $eventCount successful sign-ins into $($aggregates.Count) aggregate rows for $($targetDate.ToString('yyyy-MM-dd'))."
+    Initialize-ManagedIdentity
+    for ($targetDate = $firstDate; $targetDate -le $lastDate; $targetDate = $targetDate.AddDays(1)) {
+        Invoke-DailyCollection -TargetDate $targetDate
+    }
+} finally {
+    $ErrorActionPreference = $script:OriginalErrorActionPreference
+}

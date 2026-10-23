@@ -23,7 +23,8 @@
     Globally unique Storage account name dedicated to allow rules, user settings, and review actions.
     When omitted, a name ending in gov is derived from StorageAccountName.
 .PARAMETER AutomationAccountName
-    Azure Automation account name. When omitted, a name is derived from the Storage account name.
+    Azure Automation account name. When omitted, aa-<name> is derived from the Storage account name
+    without its st prefix, following the Azure resource abbreviations (rg-, st, aa-, func-, asp-, appi-).
 .PARAMETER ReportingFrontend
     Reporting frontend to configure. LiveHtml is the default and enables Table CORS. GeneratedHtml
     and Excel disable Table CORS because they do not query Azure Storage from a browser.
@@ -42,17 +43,41 @@
 .PARAMETER BackendMode
     None deploys no backend, Existing records BffBaseUrl, and AzureFunctions creates and publishes the BFF.
 .PARAMETER FunctionAppName
-    Globally unique Azure Function App name used when BackendMode is AzureFunctions.
+    Globally unique Azure Function App name used when BackendMode is AzureFunctions. Use the func- prefix.
+    The Consumption plan (asp-<name>) and Application Insights (appi-<name>) names are derived from it
+    without its func- prefix.
 .PARAMETER FunctionStorageAccountName
     Globally unique Storage account used internally by Azure Functions.
+.PARAMETER FunctionPlanName
+    Function Consumption plan name. Defaults to asp-<FunctionAppName without func->. Pass the existing
+    name, for example <FunctionAppName>-plan, when rerunning an older deployment with -ForceRecreate.
+.PARAMETER ApplicationInsightsName
+    Application Insights name. Defaults to appi-<FunctionAppName without func->. Pass the existing
+    name, for example <FunctionAppName>-ai, when rerunning an older deployment with -ForceRecreate.
 .PARAMETER AppRegistrationMode
     Create creates or reconciles dedicated API and SPA app registrations. Existing uses supplied IDs and scope.
 .PARAMETER ApiClientId
     Existing API app registration client ID used as the BFF token audience.
 .PARAMETER ConfigureApiAppRoles
-    Explicit opt-in that adds or updates the four Admin-mode app roles (LocalAdmin.Governance.Read,
+    Adds or updates the four Admin-mode app roles (LocalAdmin.Governance.Read,
     LocalAdmin.Governance.Approve, LocalAdmin.Governance.SelfApprove, LocalAdmin.Actions.Operate) on the
-    API app registration. Works with Create and Existing app registrations; unrelated roles are preserved.
+    API app registration. AppRegistrationMode Create configures them automatically; Existing registrations
+    are changed only with this switch. Unrelated roles are preserved.
+.PARAMETER RepublishBff
+    Builds and publishes the BFF even when BffPublished is recorded in the checkpoint. On a resumed
+    deployment, other completed stages and existing Function App settings are preserved.
+.PARAMETER ConfigureBffDirectoryLookup
+    Explicitly grants User.Read.All and Group.Read.All Microsoft Graph application permissions to the
+    Function managed identity for signed-in, governance-authorized identity lookup. Works on resumed deployments.
+.PARAMETER SkipAdminGroups
+    Does not create the Admin-mode Entra security groups. By default, BackendMode AzureFunctions creates or
+    reuses four empty security groups and assigns each one its matching API app role.
+.PARAMETER AdminGroupNamePrefix
+    Prefix for the Admin-mode security group names. Defaults to sg-<resource group name without rg->, for
+    example sg-localadmin-reporting-governance-readers.
+.PARAMETER DeploymentReportPath
+    Directory that receives the non-secret after-deployment report (Markdown and JSON). Defaults to the
+    Deployment folder.
 .PARAMETER AdminAuthContextId
     Conditional Access authentication context ID (c1 to c99) the BFF requires for Admin mode. Defaults to c1.
 .PARAMETER AdminSessionMaxMinutes
@@ -89,6 +114,10 @@
 .PARAMETER InstallTemporaryBicep
     Approves downloading Bicep temporarily when it is not available. Without this switch, the script
     requests confirmation. The temporary installation does not normally require administrator rights.
+.PARAMETER InstallTemporaryNode
+    Approves downloading Node.js 22 (including npm) temporarily when npm is not available and the BFF
+    must be built. Without this switch, the script requests confirmation. The download is verified against
+    the official SHASUMS256.txt, used only by this process, and removed when the script finishes.
 .PARAMETER SkipGraphPermissionGrant
     Skips granting the required user, group, Entra device, and Intune managed-device permissions to
     the Automation managed identity.
@@ -113,11 +142,11 @@
 .PARAMETER LogFile
     Log filename. When omitted, a timestamped filename is generated.
 .NOTES
-Version: 0.7
+Version: 0.8
 Author: Martin Himken
 Original script name: Deploy-LocalAdminReporting.ps1
 Initial creation date: 2026-09-06
-Last change: 2026-10-09
+Last change: 2026-10-18
 Changes: ..\changelog.md
 #>
 
@@ -159,6 +188,12 @@ param(
 
     [string]$FunctionStorageAccountName,
 
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9-]{0,38}[A-Za-z0-9]$')]
+    [string]$FunctionPlanName,
+
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._()-]{0,253}[A-Za-z0-9_()-]$')]
+    [string]$ApplicationInsightsName,
+
     [ValidateSet('Create', 'Existing')]
     [string]$AppRegistrationMode = 'Create',
 
@@ -180,11 +215,22 @@ param(
 
     [switch]$ConfigureApiAppRoles,
 
+    [switch]$ConfigureBffDirectoryLookup,
+
+    [switch]$RepublishBff,
+
     [ValidatePattern('^c([1-9]|[1-9][0-9])$')]
     [string]$AdminAuthContextId = 'c1',
 
     [ValidateRange(5, 240)]
     [int]$AdminSessionMaxMinutes = 30,
+
+    [switch]$SkipAdminGroups,
+
+    [ValidatePattern('^[A-Za-z0-9._-]{1,200}$')]
+    [string]$AdminGroupNamePrefix,
+
+    [string]$DeploymentReportPath,
 
     [switch]$LockHostConfig,
 
@@ -205,6 +251,8 @@ param(
     [switch]$InstallMissingModules,
 
     [switch]$InstallTemporaryBicep,
+
+    [switch]$InstallTemporaryNode,
 
     [switch]$SkipGraphPermissionGrant,
 
@@ -296,12 +344,21 @@ function Initialize-Script {
     $Script:ToConsole = $false
     $script:OriginalPath = $env:PATH
     $script:TemporaryBicepDirectory = $null
+    $script:TemporaryNodeDirectory = $null
+    $script:OriginalNpmEnvironment = @{}
     $script:ConnectedGraphInThisRun = $false
     $script:ResumeFromState = $false
     $script:DeploymentState = $null
     $script:ApiAppRegistrationOwned = $false
     $script:SpaAppRegistrationOwned = $false
     $script:RemovalPerformed = $false
+    $script:StateFunctionPlanName = ''
+    $script:StateApplicationInsightsName = ''
+    $script:StateAdminGroupNamePrefix = ''
+    $script:AdminGroups = @()
+    $script:ApiAppRolesConfigured = $false
+    $script:TokenFileWritten = ''
+    $script:WrittenConfigJsonPath = ''
 
     $deploymentState = Get-DeploymentState
     if ($RemoveDeployment -and $ForceRecreate) {
@@ -332,7 +389,11 @@ function Initialize-Script {
     }
 
     if ([string]::IsNullOrWhiteSpace($AutomationAccountName)) {
-        $script:ResolvedAutomationAccountName = "AA-LAS-$StorageAccountName"
+        $automationBaseName = $StorageAccountName -replace '^st(?=.)', ''
+        $script:ResolvedAutomationAccountName = "aa-$automationBaseName"
+        if ($script:ResolvedAutomationAccountName.Length -lt 6) {
+            throw 'The derived Automation account name is shorter than 6 characters. Pass AutomationAccountName explicitly.'
+        }
     } else {
         if ($AutomationAccountName.Length -lt 6 -or $AutomationAccountName.Length -gt 50) {
             throw 'AutomationAccountName must be 6 to 50 characters when supplied.'
@@ -367,6 +428,15 @@ function Initialize-Script {
     $script:BackendPath = Join-Path -Path $script:SolutionRoot -ChildPath 'Backend'
     $script:RunbookName = 'rb-Resolve-LocalAdminLookupNames'
     $script:ScheduleName = 'rb-Resolve-LocalAdminLookupNames-Schedule'
+    $script:DeploymentReportDirectory = if ([string]::IsNullOrWhiteSpace($DeploymentReportPath)) { $PSScriptRoot } else { $DeploymentReportPath }
+    if (-not [string]::IsNullOrWhiteSpace($script:StateAdminGroupNamePrefix)) {
+        $script:ResolvedAdminGroupNamePrefix = $script:StateAdminGroupNamePrefix
+    } elseif (-not [string]::IsNullOrWhiteSpace($AdminGroupNamePrefix)) {
+        $script:ResolvedAdminGroupNamePrefix = $AdminGroupNamePrefix
+    } else {
+        $groupWorkloadName = (($ResourceGroupName -replace '^rg-', '') -replace '[^A-Za-z0-9._-]', '-').Trim('-').ToLowerInvariant()
+        $script:ResolvedAdminGroupNamePrefix = "sg-$groupWorkloadName"
+    }
     $script:ConfigJsonPath = if ([string]::IsNullOrWhiteSpace($ConfigJsonPath)) {
         Join-Path -Path (Join-Path -Path $script:SolutionRoot -ChildPath 'HTML') -ChildPath 'config.json'
     } else {
@@ -389,6 +459,12 @@ function Initialize-Script {
         }
         if ($FunctionStorageAccountName -notmatch '^[a-z0-9]{3,24}$') {
             throw 'FunctionStorageAccountName must contain 3 to 24 lowercase letters or numbers.'
+        }
+        $functionBaseName = $FunctionAppName -replace '^func-(?=.)', ''
+        $script:ResolvedFunctionPlanName = if (-not [string]::IsNullOrWhiteSpace($script:StateFunctionPlanName)) { $script:StateFunctionPlanName } elseif ($FunctionPlanName) { $FunctionPlanName } else { "asp-$functionBaseName" }
+        $script:ResolvedApplicationInsightsName = if (-not [string]::IsNullOrWhiteSpace($script:StateApplicationInsightsName)) { $script:StateApplicationInsightsName } elseif ($ApplicationInsightsName) { $ApplicationInsightsName } else { "appi-$functionBaseName" }
+        if ($script:ResolvedFunctionPlanName.Length -gt 40) {
+            throw "The derived App Service plan name '$($script:ResolvedFunctionPlanName)' exceeds 40 characters. Pass FunctionPlanName or use a shorter FunctionAppName."
         }
         if ($TenantId -eq [guid]::Empty) {
             throw 'TenantId is required when BackendMode is AzureFunctions.'
@@ -418,6 +494,8 @@ function Initialize-Script {
     } else {
         $script:ResolvedSpaRedirectUri = ''
         $script:ResolvedBffAllowedOrigins = @()
+        $script:ResolvedFunctionPlanName = ''
+        $script:ResolvedApplicationInsightsName = ''
     }
     if ($ReportingFrontend -eq 'LiveHtml') {
         $script:ResolvedAllowedCorsOrigins = if ($AllowedCorsOrigins.Count -eq 0) { @('*') } else { @($AllowedCorsOrigins) }
@@ -463,7 +541,7 @@ function Get-DeploymentState {
 
     try {
         $state = Get-Content -LiteralPath $statePath -Raw -ErrorAction Stop | ConvertFrom-Json -Depth 10 -AsHashtable
-        if ($null -ne $state -and $state.version -in @(1, 2, 3)) {
+        if ($null -ne $state -and $state.version -in @(1, 2, 3, 4)) {
             if ($state.version -eq 1 -and -not $state.completedStages) {
                 $state.completedStages = @([string]$state.lastSuccessfulStage)
             }
@@ -515,6 +593,11 @@ function Use-DeploymentStateConfiguration {
     $script:SkipGraphPermissionGrant = [bool]$State.skipGraphPermissionGrant
     $script:ApiAppRegistrationOwned = [bool]$State.apiAppRegistrationOwned
     $script:SpaAppRegistrationOwned = [bool]$State.spaAppRegistrationOwned
+    # Checkpoints written before version 4 used the legacy <FunctionAppName>-plan and -ai names.
+    $script:StateFunctionPlanName = if ($State.functionPlanName) { [string]$State.functionPlanName } elseif ([string]$State.backendMode -eq 'AzureFunctions') { "$($State.functionAppName)-plan" } else { '' }
+    $script:StateApplicationInsightsName = if ($State.applicationInsightsName) { [string]$State.applicationInsightsName } elseif ([string]$State.backendMode -eq 'AzureFunctions') { "$($State.functionAppName)-ai" } else { '' }
+    $script:StateAdminGroupNamePrefix = [string]$State.adminGroupNamePrefix
+    $script:AdminGroups = if ($State.adminGroups) { @($State.adminGroups) } else { @() }
     if (-not [string]::IsNullOrWhiteSpace([string]$State.configJsonPath)) {
         $script:ConfigJsonPath = [string]$State.configJsonPath
     }
@@ -581,7 +664,7 @@ function Test-DeploymentStateValidity {
 
 function Write-DeploymentState {
     param(
-        [Parameter(Mandatory = $true)]
+        # Omit Stage to persist intermediate progress, such as created group IDs, without completing a stage.
         [string]$Stage
     )
 
@@ -593,12 +676,16 @@ function Write-DeploymentState {
             }
         }
     }
-    if (-not $completedStages.Contains($Stage)) {
-        $completedStages.Add($Stage)
+    $lastSuccessfulStage = if ($null -ne $script:DeploymentState) { [string]$script:DeploymentState.lastSuccessfulStage } else { '' }
+    if (-not [string]::IsNullOrWhiteSpace($Stage)) {
+        if (-not $completedStages.Contains($Stage)) {
+            $completedStages.Add($Stage)
+        }
+        $lastSuccessfulStage = $Stage
     }
 
     $state = [ordered]@{
-        version = 3
+        version = 4
         updatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
         subscriptionId = [string]$SubscriptionId
         tenantId = if ($TenantId -ne [guid]::Empty) { [string]$TenantId } else { '' }
@@ -614,11 +701,15 @@ function Write-DeploymentState {
         backendMode = [string]$BackendMode
         functionAppName = if ($BackendMode -eq 'AzureFunctions') { [string]$FunctionAppName } else { '' }
         functionStorageAccountName = if ($BackendMode -eq 'AzureFunctions') { [string]$FunctionStorageAccountName } else { '' }
+        functionPlanName = [string]$script:ResolvedFunctionPlanName
+        applicationInsightsName = [string]$script:ResolvedApplicationInsightsName
         appRegistrationMode = [string]$AppRegistrationMode
         apiAppDisplayName = if ($BackendMode -eq 'AzureFunctions') { [string]$script:ResolvedApiAppDisplayName } else { '' }
         spaAppDisplayName = if ($BackendMode -eq 'AzureFunctions') { [string]$script:ResolvedSpaAppDisplayName } else { '' }
         apiAppRegistrationOwned = [bool]$script:ApiAppRegistrationOwned
         spaAppRegistrationOwned = [bool]$script:SpaAppRegistrationOwned
+        adminGroupNamePrefix = if ($BackendMode -eq 'AzureFunctions') { [string]$script:ResolvedAdminGroupNamePrefix } else { '' }
+        adminGroups = @($script:AdminGroups)
         apiClientId = if ($script:ResolvedApiClientId) { $script:ResolvedApiClientId.ToString() } else { '' }
         spaTenantId = if ($script:ResolvedSpaTenantId) { $script:ResolvedSpaTenantId.ToString() } elseif ($TenantId -ne [guid]::Empty) { [string]$TenantId } else { '' }
         spaClientId = if ($script:ResolvedSpaClientId) { $script:ResolvedSpaClientId.ToString() } else { '' }
@@ -635,7 +726,7 @@ function Write-DeploymentState {
         skipGraphPermissionGrant = [bool]$SkipGraphPermissionGrant
         configJsonPath = [string]$script:ConfigJsonPath
         completedStages = @($completedStages)
-        lastSuccessfulStage = $Stage
+        lastSuccessfulStage = $lastSuccessfulStage
         deploymentCompleted = ($Stage -eq 'DeploymentComplete')
     }
 
@@ -692,6 +783,98 @@ function Remove-TemporaryBicep {
         -not [string]::IsNullOrWhiteSpace($script:TemporaryBicepDirectory) -and
         (Test-Path -LiteralPath $script:TemporaryBicepDirectory)) {
         Remove-Item -LiteralPath $script:TemporaryBicepDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Initialize-NodeJs {
+    $requiredMajor = 22
+    $npmCommand = Get-Command npm -ErrorAction SilentlyContinue
+    if ($npmCommand -and (Get-Command node -ErrorAction SilentlyContinue)) {
+        $installedVersion = [string](& node --version)
+        Write-Log -Message "Using Node.js $installedVersion and npm available on PATH." -Component 'Prerequisites' -Type 1
+        if ($installedVersion -notmatch "^v$requiredMajor\.") {
+            Write-Log -Message "The Function App runs Node.js $requiredMajor; the local build uses $installedVersion." -Component 'Prerequisites' -Type 2
+        }
+        return
+    }
+
+    if (-not $IsWindows) {
+        throw 'npm is not available on PATH. Temporary Node.js installation is currently supported only on Windows.'
+    }
+
+    Write-Warning "Node.js $requiredMajor and npm are required to build the Azure Functions BFF package."
+    Write-Warning 'The temporary installation is stored under the current user TEMP directory and does not normally require administrator rights.'
+    $approved = $InstallTemporaryNode -or (Confirm-Action -Message "Download Node.js $requiredMajor temporarily for this deployment?")
+    if (-not $approved) {
+        throw 'Node.js and npm are required to build the BFF and the temporary download was declined.'
+    }
+
+    $architecture = switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
+        'Arm64' { 'arm64' }
+        'X64' { 'x64' }
+        default { throw "Temporary Node.js installation does not support the '$_' architecture." }
+    }
+
+    $release = (Invoke-RestMethod -Uri 'https://nodejs.org/dist/index.json' -ErrorAction Stop) |
+        Where-Object { $_.version -like "v$requiredMajor.*" -and $_.lts -and $_.files -contains "win-$architecture-zip" } |
+        Select-Object -First 1
+    if ($null -eq $release) {
+        throw "No Node.js $requiredMajor LTS release for win-$architecture was found on nodejs.org."
+    }
+    $version = [string]$release.version
+    $baseName = "node-$version-win-$architecture"
+    $distributionUri = "https://nodejs.org/dist/$version"
+
+    $script:TemporaryNodeDirectory = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath "LocalAdminReporting-Node-$([guid]::NewGuid())"
+    $null = New-Item -Path $script:TemporaryNodeDirectory -ItemType Directory -Force
+    $archivePath = Join-Path -Path $script:TemporaryNodeDirectory -ChildPath "$baseName.zip"
+
+    Write-Log -Message "Downloading temporary Node.js $version ($architecture) from nodejs.org." -Component 'Prerequisites' -Type 1
+    Invoke-WebRequest -Uri "$distributionUri/$baseName.zip" -OutFile $archivePath -UseBasicParsing -ErrorAction Stop
+    $checksums = [string](Invoke-WebRequest -Uri "$distributionUri/SHASUMS256.txt" -UseBasicParsing -ErrorAction Stop).Content
+    $expectedHash = ($checksums -split "`n" | Where-Object { $_ -match "^\s*([0-9a-f]{64})\s+$([regex]::Escape("$baseName.zip"))\s*$" } |
+        ForEach-Object { $Matches[1] } | Select-Object -First 1)
+    $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+    if ([string]::IsNullOrWhiteSpace($expectedHash) -or $actualHash -ne $expectedHash) {
+        throw 'The downloaded Node.js archive does not match the published SHA-256 checksum.'
+    }
+
+    Expand-Archive -LiteralPath $archivePath -DestinationPath $script:TemporaryNodeDirectory -Force
+    Remove-Item -LiteralPath $archivePath -Force
+    $nodeDirectory = Join-Path -Path $script:TemporaryNodeDirectory -ChildPath $baseName
+    $signature = Get-AuthenticodeSignature -FilePath (Join-Path -Path $nodeDirectory -ChildPath 'node.exe')
+    if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid -or
+        [string]$signature.SignerCertificate.Subject -notmatch 'OpenJS Foundation') {
+        throw 'The downloaded node.exe does not have a valid OpenJS Foundation Authenticode signature.'
+    }
+
+    # Keep the npm cache and global settings inside the temporary directory.
+    foreach ($name in 'npm_config_cache', 'npm_config_prefix', 'npm_config_update_notifier') {
+        $script:OriginalNpmEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    }
+    $env:npm_config_cache = Join-Path -Path $script:TemporaryNodeDirectory -ChildPath 'npm-cache'
+    $env:npm_config_prefix = Join-Path -Path $script:TemporaryNodeDirectory -ChildPath 'npm-prefix'
+    $env:npm_config_update_notifier = 'false'
+    $env:PATH = "$nodeDirectory$([IO.Path]::PathSeparator)$env:PATH"
+
+    $null = Get-Command npm -ErrorAction Stop
+    $npmVersion = [string](& npm --version)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The temporary npm could not be started.'
+    }
+    Write-Log -Message "Temporary Node.js $version with npm $npmVersion is ready for this deployment." -Component 'Prerequisites' -Type 1
+}
+
+function Remove-TemporaryNodeJs {
+    if ($null -ne (Get-Variable -Name OriginalNpmEnvironment -Scope Script -ErrorAction SilentlyContinue)) {
+        foreach ($entry in $script:OriginalNpmEnvironment.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
+        }
+    }
+    if ($null -ne (Get-Variable -Name TemporaryNodeDirectory -Scope Script -ErrorAction SilentlyContinue) -and
+        -not [string]::IsNullOrWhiteSpace($script:TemporaryNodeDirectory) -and
+        (Test-Path -LiteralPath $script:TemporaryNodeDirectory)) {
+        Remove-Item -LiteralPath $script:TemporaryNodeDirectory -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -761,18 +944,29 @@ function Connect-DeploymentAccounts {
     Set-AzContext -SubscriptionId $SubscriptionId -ErrorAction Stop | Out-Null
 
     $recordedStages = if ($null -ne $script:DeploymentState) { @($script:DeploymentState.completedStages) } else { @() }
+    $ownedAdminGroups = @($script:AdminGroups | Where-Object { $_ -and $_.owned -and $_.id })
+    $requiresGroupRemoval = $RemoveDeployment -and $ownedAdminGroups.Count -gt 0
+    $requiresGroupSetup = -not $RemoveDeployment -and
+        $BackendMode -eq 'AzureFunctions' -and
+        -not $SkipAdminGroups -and
+        $recordedStages -notcontains 'AdminGroupsReady'
     $requiresGraphRemoval = $RemoveDeployment -and
-        ($script:ApiAppRegistrationOwned -or $script:SpaAppRegistrationOwned)
+        ($script:ApiAppRegistrationOwned -or $script:SpaAppRegistrationOwned -or $requiresGroupRemoval)
     $requiresGraph = $requiresGraphRemoval -or
+        $requiresGroupSetup -or
         (-not $SkipGraphPermissionGrant -and $recordedStages -notcontains 'GraphPermissionsGranted') -or
         ($BackendMode -eq 'AzureFunctions' -and $ConfigureApiAppRoles) -or
+        ($BackendMode -eq 'AzureFunctions' -and $ConfigureBffDirectoryLookup) -or
         ($BackendMode -eq 'AzureFunctions' -and
             $AppRegistrationMode -eq 'Create' -and
             $recordedStages -notcontains 'AppRegistrationsReady')
     if ($requiresGraph) {
+        $requiredScopes = @('Application.Read.All', 'Application.ReadWrite.All', 'AppRoleAssignment.ReadWrite.All')
+        if ($requiresGroupSetup -or $requiresGroupRemoval) {
+            $requiredScopes += 'Group.ReadWrite.All'
+        }
         $graphContext = Get-MgContext -ErrorAction SilentlyContinue
         if ($null -ne $graphContext) {
-            $requiredScopes = @('Application.Read.All', 'Application.ReadWrite.All', 'AppRoleAssignment.ReadWrite.All')
             $missingScopes = @($requiredScopes | Where-Object { -not ($graphContext.Scopes -contains $_) })
             if ($missingScopes.Count -eq 0) {
                 Write-Log -Message 'Using the existing Microsoft Graph context for managed identity permission assignment.' -Component 'Authentication' -Type 1
@@ -791,7 +985,7 @@ function Connect-DeploymentAccounts {
             }
         } else {
             $graphParameters = @{
-                Scopes       = @('Application.Read.All', 'Application.ReadWrite.All', 'AppRoleAssignment.ReadWrite.All')
+                Scopes       = $requiredScopes
                 NoWelcome    = $true
                 ContextScope = 'Process'
             }
@@ -867,8 +1061,25 @@ function Get-GraphErrorMessage {
 function Get-OrCreateApplicationRegistration {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$DisplayName
+        [string]$DisplayName,
+        [string]$RecordedApplicationId,
+        [bool]$RecordedOwned = $false
     )
+
+    if (-not [string]::IsNullOrWhiteSpace($RecordedApplicationId)) {
+        if (-not $script:ResumeFromState -or -not $RecordedOwned) {
+            throw "The checkpoint does not prove that app registration '$DisplayName' was created by this deployment. Use AppRegistrationMode Existing with explicitly verified client IDs, or choose a unique display name."
+        }
+        $recordedResponse = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/applications?`$filter=appId eq '$RecordedApplicationId'&`$select=id,appId,displayName,api,spa,requiredResourceAccess,identifierUris" -OutputType PSObject
+        $recordedApplications = @($recordedResponse.value)
+        if ($recordedApplications.Count -ne 1 -or
+            [string]$recordedApplications[0].appId -ne $RecordedApplicationId -or
+            [string]$recordedApplications[0].displayName -ne $DisplayName) {
+            throw "The deployment-owned app registration '$RecordedApplicationId' is missing or no longer matches '$DisplayName'."
+        }
+        Write-Log -Message "Resuming deployment-owned app registration '$DisplayName' ($RecordedApplicationId)." -Component 'Entra' -Type 1
+        return [pscustomobject]@{ Application = $recordedApplications[0]; Created = $true }
+    }
 
     $escapedDisplayName = $DisplayName.Replace("'", "''")
     $response = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/applications?`$filter=displayName eq '$escapedDisplayName'&`$select=id,appId,displayName,api,spa,requiredResourceAccess,identifierUris" -OutputType PSObject
@@ -877,11 +1088,7 @@ function Get-OrCreateApplicationRegistration {
         throw "More than one app registration named '$DisplayName' exists. Use unique display names or clean up the duplicates."
     }
     if ($applications.Count -eq 1) {
-        Write-Log -Message "Reusing app registration '$DisplayName'." -Component 'Entra' -Type 1
-        return [pscustomobject]@{
-            Application = $applications[0]
-            Created = $false
-        }
+        throw "App registration '$DisplayName' already exists but is not proven to be owned by this deployment. Use AppRegistrationMode Existing with explicitly verified client IDs, or choose a unique display name."
     }
 
     $body = @{
@@ -952,11 +1159,185 @@ function Set-BffApiAppRoles {
         throw "The Admin-mode app roles could not be configured on the API app registration. $(Get-GraphErrorMessage -ErrorRecord $_)"
     }
     Write-Log -Message "Configured Admin-mode app roles on API app registration '$ApiClientId': $($managedValues -join ', '). Assign them under Enterprise applications > Users and groups." -Component 'Entra' -Type 1
+    $script:ApiAppRolesConfigured = $true
+}
+
+function Get-LocalAdminAdminGroupDefinitions {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Prefix
+    )
+
+    @(
+        [ordered]@{ key = 'GovernanceReaders'; displayName = "$Prefix-governance-readers"; appRoles = @('LocalAdmin.Governance.Read'); description = 'LocalAdmin reporting: read governance rules and review actions, and propose governance rules.' }
+        [ordered]@{ key = 'GovernanceApprovers'; displayName = "$Prefix-governance-approvers"; appRoles = @('LocalAdmin.Governance.Approve'); description = 'LocalAdmin reporting: approve, reject, and revoke governance rules in Admin mode (four-eyes).' }
+        [ordered]@{ key = 'GovernanceSelfApprovers'; displayName = "$Prefix-governance-selfapprovers"; appRoles = @('LocalAdmin.Governance.Approve', 'LocalAdmin.Governance.SelfApprove'); description = 'LocalAdmin reporting: approvers who may also approve their own governance proposals. Every self-approval is audited.' }
+        [ordered]@{ key = 'ActionOperators'; displayName = "$Prefix-action-operators"; appRoles = @('LocalAdmin.Actions.Operate'); description = 'LocalAdmin reporting: cancel review actions owned by other users in Admin mode.' }
+    )
+}
+
+function Get-OrCreateAdminSecurityGroup {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Definition,
+        [AllowNull()]
+        [System.Collections.IDictionary]$Recorded
+    )
+
+    if ($null -ne $Recorded -and -not [string]::IsNullOrWhiteSpace([string]$Recorded.id)) {
+        $group = $null
+        try {
+            $group = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/groups/$($Recorded.id)?`$select=id,displayName,securityEnabled" -OutputType PSObject -ErrorAction Stop
+        } catch {
+            if ($_.Exception.Message -notmatch '404|Request_ResourceNotFound|NotFound|does not exist') {
+                throw "Recorded security group '$($Recorded.id)' could not be verified. $(Get-GraphErrorMessage -ErrorRecord $_)"
+            }
+            Write-Log -Message "Recorded security group '$($Recorded.id)' was not found. Looking it up by display name." -Component 'Entra' -Type 2
+        }
+        if ($null -ne $group) {
+            if ([string]$group.displayName -ne [string]$Definition.displayName -or -not $group.securityEnabled) {
+                throw "Recorded group '$($Recorded.id)' is not a security-enabled group named '$($Definition.displayName)'."
+            }
+            if (-not [bool]$Recorded.owned) {
+                throw "Recorded group '$($Definition.displayName)' is not proven to have been created by this deployment. Rename it or use -SkipAdminGroups and manage role assignments yourself."
+            }
+            Write-Log -Message "Reusing recorded deployment-owned security group '$($group.displayName)' ($($group.id))." -Component 'Entra' -Type 1
+            return [pscustomobject]@{ Group = $group; Owned = $true }
+        }
+    }
+
+    $escapedName = ([string]$Definition.displayName).Replace("'", "''")
+    $response = Invoke-GraphRequestWithRetry -Method GET -Uri "https://graph.microsoft.com/v1.0/groups?`$filter=displayName eq '$escapedName'&`$select=id,displayName,securityEnabled"
+    $groups = @($response.value)
+    if ($groups.Count -gt 1) {
+        throw "More than one group named '$($Definition.displayName)' exists. Remove the duplicates or use -AdminGroupNamePrefix."
+    }
+    if ($groups.Count -eq 1) {
+        throw "Group '$($Definition.displayName)' already exists but is not proven to be owned by this deployment. Rename it or use -AdminGroupNamePrefix, or use -SkipAdminGroups and manage role assignments yourself."
+    }
+
+    $mailNickname = ([string]$Definition.displayName -replace '[^A-Za-z0-9._-]', '')
+    if ($mailNickname.Length -gt 64) {
+        $mailNickname = $mailNickname.Substring(0, 64)
+    }
+    $body = @{
+        displayName     = [string]$Definition.displayName
+        description     = [string]$Definition.description
+        mailEnabled     = $false
+        mailNickname    = $mailNickname
+        securityEnabled = $true
+    } | ConvertTo-Json -Compress
+    try {
+        $created = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/v1.0/groups' -Body $body -ContentType 'application/json' -OutputType PSObject -ErrorAction Stop
+    } catch {
+        throw "Security group '$($Definition.displayName)' could not be created. $(Get-GraphErrorMessage -ErrorRecord $_)"
+    }
+    Write-Log -Message "Created security group '$($created.displayName)' ($($created.id))." -Component 'Entra' -Type 1
+    return [pscustomobject]@{ Group = $created; Owned = $true }
+}
+
+function Initialize-AdminGroups {
+    param(
+        [Parameter(Mandatory = $true)]
+        [guid]$ApiClientId
+    )
+
+    Ensure-ServicePrincipal -ApplicationId $ApiClientId
+    $expectedRoleValues = @((Get-LocalAdminApiAppRoleDefinitions) | ForEach-Object { $_.value })
+    $maximumAttempts = if ($script:ApiAppRolesConfigured) { 8 } else { 1 }
+    for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
+        $servicePrincipalResponse = Invoke-GraphRequestWithRetry -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '$ApiClientId'&`$select=id,appId,appRoles"
+        $apiServicePrincipal = @($servicePrincipalResponse.value)[0]
+        if ($null -eq $apiServicePrincipal) {
+            throw "The API service principal for '$ApiClientId' could not be found."
+        }
+        $availableRoles = @($apiServicePrincipal.appRoles | Where-Object { $_.isEnabled -and @($_.allowedMemberTypes) -contains 'User' })
+        $availableValues = @($availableRoles | ForEach-Object { [string]$_.value })
+        if (@($expectedRoleValues | Where-Object { $availableValues -notcontains $_ }).Count -eq 0) {
+            break
+        }
+        if ($attempt -lt $maximumAttempts) {
+            # App roles added to the application replicate to its service principal asynchronously.
+            Start-Sleep -Seconds 5
+        }
+    }
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    $allAssigned = $true
+    foreach ($definition in (Get-LocalAdminAdminGroupDefinitions -Prefix $script:ResolvedAdminGroupNamePrefix)) {
+        $recorded = @($script:AdminGroups | Where-Object { $_ -and [string]$_.key -eq $definition.key })[0]
+        $groupResult = Get-OrCreateAdminSecurityGroup -Definition $definition -Recorded $recorded
+        $groupId = [string]$groupResult.Group.id
+
+        $assignmentsResponse = Invoke-GraphRequestWithRetry -Method GET -Uri "https://graph.microsoft.com/v1.0/groups/$groupId/appRoleAssignments?`$select=appRoleId,resourceId"
+        $existingAssignments = @($assignmentsResponse.value | Where-Object { [string]$_.resourceId -eq [string]$apiServicePrincipal.id })
+        $assignedRoles = [System.Collections.Generic.List[string]]::new()
+        $missingRoles = [System.Collections.Generic.List[string]]::new()
+        foreach ($roleValue in $definition.appRoles) {
+            $appRole = @($availableRoles | Where-Object { [string]$_.value -eq $roleValue })[0]
+            if ($null -eq $appRole) {
+                $missingRoles.Add($roleValue)
+                continue
+            }
+            if (@($existingAssignments | Where-Object { [string]$_.appRoleId -eq [string]$appRole.id }).Count -eq 0) {
+                $assignmentBody = @{
+                    principalId = $groupId
+                    resourceId  = [string]$apiServicePrincipal.id
+                    appRoleId   = [string]$appRole.id
+                } | ConvertTo-Json -Compress
+                # New groups can take a short time to replicate before they accept assignments.
+                Invoke-GraphRequestWithRetry -Method POST -Uri "https://graph.microsoft.com/v1.0/groups/$groupId/appRoleAssignments" -Body $assignmentBody | Out-Null
+                Write-Log -Message "Assigned API app role $roleValue to group '$($definition.displayName)'." -Component 'Entra' -Type 1
+            }
+            $assignedRoles.Add($roleValue)
+        }
+        if ($missingRoles.Count -gt 0) {
+            $allAssigned = $false
+            Write-Log -Message "The API app registration does not define $($missingRoles -join ', '). Group '$($definition.displayName)' was created without those assignments. Rerun with -ConfigureApiAppRoles." -Component 'Entra' -Type 2
+        }
+
+        $results.Add([ordered]@{
+                key           = [string]$definition.key
+                displayName   = [string]$definition.displayName
+                id            = $groupId
+                owned         = [bool]$groupResult.Owned
+                appRoles      = @($definition.appRoles)
+                assignedRoles = @($assignedRoles)
+                missingRoles  = @($missingRoles)
+            })
+        # Persist after each group so a failed run can still remove groups it created.
+        $script:AdminGroups = @($results) + @($script:AdminGroups | Where-Object { $_ -and @($results | ForEach-Object { $_.key }) -notcontains [string]$_.key })
+        Write-DeploymentState
+    }
+
+    $script:AdminGroups = @($results)
+    return $allAssigned
+}
+
+function Remove-OwnedAdminGroups {
+    foreach ($group in @($script:AdminGroups | Where-Object { $_ -and $_.id })) {
+        if (-not $group.owned) {
+            Write-Log -Message "Preserving security group '$($group.displayName)' ($($group.id)) because the checkpoint does not record script ownership." -Component 'Removal' -Type 1
+            continue
+        }
+        try {
+            Invoke-MgGraphRequest -Method DELETE -Uri "https://graph.microsoft.com/v1.0/groups/$($group.id)" -ErrorAction Stop | Out-Null
+            Write-Log -Message "Removed script-owned security group '$($group.displayName)' ($($group.id))." -Component 'Removal' -Type 1
+        } catch {
+            if ([string]$_.Exception.Message -match '404|NotFound|does not exist') {
+                Write-Log -Message "Script-owned security group '$($group.displayName)' is already absent." -Component 'Removal' -Type 2
+            } else {
+                throw "Security group '$($group.displayName)' could not be removed. $(Get-GraphErrorMessage -ErrorRecord $_)"
+            }
+        }
+    }
 }
 
 function Initialize-BffAppRegistrations {
-    $spaApplicationResult = Get-OrCreateApplicationRegistration -DisplayName $script:ResolvedSpaAppDisplayName
-    $apiApplicationResult = Get-OrCreateApplicationRegistration -DisplayName $script:ResolvedApiAppDisplayName
+    $spaRecordedId = if ($script:ResumeFromState -and $script:SpaAppRegistrationOwned) { [string]$script:ResolvedSpaClientId } else { '' }
+    $apiRecordedId = if ($script:ResumeFromState -and $script:ApiAppRegistrationOwned) { [string]$script:ResolvedApiClientId } else { '' }
+    $spaApplicationResult = Get-OrCreateApplicationRegistration -DisplayName $script:ResolvedSpaAppDisplayName -RecordedApplicationId $spaRecordedId -RecordedOwned ([bool]$spaRecordedId)
+    $apiApplicationResult = Get-OrCreateApplicationRegistration -DisplayName $script:ResolvedApiAppDisplayName -RecordedApplicationId $apiRecordedId -RecordedOwned ([bool]$apiRecordedId)
     $spaApplication = $spaApplicationResult.Application
     $apiApplication = $apiApplicationResult.Application
     $script:SpaAppRegistrationOwned = [bool]$spaApplicationResult.Created
@@ -1045,6 +1426,7 @@ function Initialize-BffAppRegistrations {
     $script:ResolvedSpaTenantId = $TenantId
     $script:ResolvedBffApiScope = "api://$apiApplicationId/access_as_user"
     Write-Log -Message 'Configured the API and SPA app registrations without client secrets.' -Component 'Entra' -Type 1
+    Set-BffApiAppRoles -ApiClientId $apiApplicationId
 }
 
 function Remove-OwnedApplicationRegistration {
@@ -1110,8 +1492,8 @@ function Get-DeploymentRemovalPlan {
 
     if ($BackendMode -eq 'AzureFunctions') {
         $plan.Add("Azure Function App: $FunctionAppName (including its managed identity)")
-        $plan.Add("Azure Function plan: $FunctionAppName-plan")
-        $plan.Add("Application Insights: $FunctionAppName-ai")
+        $plan.Add("Azure Function plan: $($script:ResolvedFunctionPlanName)")
+        $plan.Add("Application Insights: $($script:ResolvedApplicationInsightsName)")
         $plan.Add("Function host Storage account: $FunctionStorageAccountName (including package container and packages)")
     }
 
@@ -1124,6 +1506,13 @@ function Get-DeploymentRemovalPlan {
         $plan.Add("Microsoft Entra SPA app registration and service principal: $($script:ResolvedSpaClientId)")
     } elseif ($script:ResolvedSpaClientId) {
         $plan.Add("Preserve Microsoft Entra SPA app registration: $($script:ResolvedSpaClientId)")
+    }
+    foreach ($group in @($script:AdminGroups | Where-Object { $_ -and $_.id })) {
+        if ($group.owned) {
+            $plan.Add("Microsoft Entra security group and its app-role assignments: $($group.displayName) ($($group.id))")
+        } else {
+            $plan.Add("Preserve Microsoft Entra security group: $($group.displayName) ($($group.id))")
+        }
     }
 
     $plan.Add('Resource-group deployment records named LocalAdminReporting-*')
@@ -1171,11 +1560,12 @@ function Remove-SolutionDeployment {
     } elseif ($script:ResolvedApiClientId) {
         Write-Log -Message "Preserving API app registration '$($script:ResolvedApiClientId)' because the checkpoint does not record script ownership." -Component 'Removal' -Type 1
     }
+    Remove-OwnedAdminGroups
 
     if ($BackendMode -eq 'AzureFunctions') {
         Remove-TrackedAzureResource -Name $FunctionAppName -ResourceType 'Microsoft.Web/sites'
-        Remove-TrackedAzureResource -Name "$FunctionAppName-plan" -ResourceType 'Microsoft.Web/serverfarms'
-        Remove-TrackedAzureResource -Name "$FunctionAppName-ai" -ResourceType 'Microsoft.Insights/components'
+        Remove-TrackedAzureResource -Name $script:ResolvedFunctionPlanName -ResourceType 'Microsoft.Web/serverfarms'
+        Remove-TrackedAzureResource -Name $script:ResolvedApplicationInsightsName -ResourceType 'Microsoft.Insights/components'
         Remove-TrackedAzureResource -Name $FunctionStorageAccountName -ResourceType 'Microsoft.Storage/storageAccounts'
     }
     Remove-TrackedAzureResource -Name $script:ResolvedAutomationAccountName -ResourceType 'Microsoft.Automation/automationAccounts'
@@ -1253,9 +1643,12 @@ function Invoke-SolutionResourceDeployment {
         -allowedCorsOrigins $script:ResolvedAllowedCorsOrigins `
         -deployBff $deployBff `
         -functionAppName $(if ($deployBff) { $FunctionAppName } else { '' }) `
+        -functionPlanName $(if ($deployBff) { $script:ResolvedFunctionPlanName } else { '' }) `
+        -applicationInsightsName $(if ($deployBff) { $script:ResolvedApplicationInsightsName } else { '' }) `
         -functionStorageAccountName $(if ($deployBff) { $FunctionStorageAccountName } else { '' }) `
         -tenantId $(if ($deployBff) { $TenantId.ToString() } else { '' }) `
         -apiClientId $(if ($deployBff) { $script:ResolvedApiClientId.ToString() } else { '' }) `
+        -spaClientId $(if ($deployBff) { $script:ResolvedSpaClientId.ToString() } else { '' }) `
         -bffAllowedOrigins $(if ($deployBff) { $script:ResolvedBffAllowedOrigins } else { @() }) `
         -adminAuthContextId $AdminAuthContextId `
         -adminSessionMaxMinutes $AdminSessionMaxMinutes `
@@ -1274,7 +1667,8 @@ function Invoke-SolutionResourceDeployment {
 function Invoke-ManagedIdentityGraphPermissionGrant {
     param(
         [Parameter(Mandatory = $true)]
-        [guid]$ManagedIdentityPrincipalId
+        [guid]$ManagedIdentityPrincipalId,
+        [string[]]$Permissions = @('User.Read.All', 'Group.Read.All', 'Device.Read.All', 'DeviceManagementManagedDevices.Read.All')
     )
 
     if ($SkipGraphPermissionGrant) {
@@ -1305,7 +1699,7 @@ function Invoke-ManagedIdentityGraphPermissionGrant {
     $assignmentResponse = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$ManagedIdentityPrincipalId/appRoleAssignments?`$select=appRoleId,resourceId" -OutputType PSObject
     $existingAssignments = @($assignmentResponse.value)
 
-    foreach ($permissionValue in @('User.Read.All', 'Group.Read.All', 'Device.Read.All', 'DeviceManagementManagedDevices.Read.All')) {
+    foreach ($permissionValue in $Permissions) {
         $appRole = @($graphServicePrincipal.appRoles | Where-Object {
             $_.value -eq $permissionValue -and $_.isEnabled -and $_.allowedMemberTypes -contains 'Application'
         })[0]
@@ -1401,6 +1795,7 @@ function Import-ReconciliationRunbook {
 function Publish-BffFunctionApp {
     $stagingPath = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath "LocalAdminBff-$([guid]::NewGuid())"
     $archivePath = "$stagingPath.zip"
+    Initialize-NodeJs
     try {
         Write-Log -Message 'Building the Azure Functions BFF package.' -Component 'BFF' -Type 1
         Push-Location $script:BackendPath
@@ -1422,6 +1817,7 @@ function Publish-BffFunctionApp {
         Copy-Item -LiteralPath (Join-Path $script:BackendPath 'host.json') -Destination $stagingPath -Force
         Copy-Item -LiteralPath (Join-Path $script:BackendPath 'package.json') -Destination $stagingPath -Force
         Copy-Item -LiteralPath (Join-Path $script:BackendPath 'package-lock.json') -Destination $stagingPath -Force
+        Copy-Item -LiteralPath (Join-Path $script:BackendPath 'THIRD-PARTY-NOTICES.txt') -Destination $stagingPath -Force
 
         Push-Location $stagingPath
         try {
@@ -1458,6 +1854,7 @@ function Publish-BffFunctionApp {
         $existingSettings = ($existingSettingsResponse.Content | ConvertFrom-Json -AsHashtable).properties
         $existingSettings['WEBSITE_RUN_FROM_PACKAGE'] = $packageUri
         $existingSettings['WEBSITE_RUN_FROM_PACKAGE_BLOB_MI_RESOURCE_ID'] = 'SystemAssigned'
+        $existingSettings['SPA_CLIENT_ID'] = $script:ResolvedSpaClientId.ToString()
         $settingsBody = @{ properties = $existingSettings } | ConvertTo-Json -Depth 10 -Compress
         Invoke-AzRestMethod -Method PUT -Path $appSettingsPath -Payload $settingsBody -ErrorAction Stop | Out-Null
         Write-Log -Message "Configured Function App '$FunctionAppName' to run from the private package using its managed identity." -Component 'BFF' -Type 1
@@ -1477,26 +1874,34 @@ function Publish-BffFunctionApp {
             }
         }
 
-        $healthUri = "$($script:ResolvedBffBaseUrl)/profile"
+        $healthChecks = @(
+            @{ Path = '/profile'; Method = 'GET' }
+            @{ Path = '/sessions/admin'; Method = 'POST' }
+        )
         $ready = $false
         for ($attempt = 1; $attempt -le 30 -and -not $ready; $attempt++) {
             Start-Sleep -Seconds 10
             try {
-                $response = Invoke-WebRequest -Uri $healthUri -Method Get -SkipHttpErrorCheck -TimeoutSec 30
-                if ([int]$response.StatusCode -eq 401) {
-                    $ready = $true
-                } elseif ([int]$response.StatusCode -ge 500) {
-                    Write-Log -Message "BFF readiness attempt $attempt returned HTTP $([int]$response.StatusCode)." -Component 'BFF' -Type 2
-                } else {
-                    throw "The BFF readiness endpoint returned unexpected HTTP $([int]$response.StatusCode)."
+                foreach ($check in $healthChecks) {
+                    $healthUri = "$($script:ResolvedBffBaseUrl)$($check.Path)"
+                    $response = Invoke-WebRequest -Uri $healthUri -Method $check.Method -SkipHttpErrorCheck -TimeoutSec 30
+                    if ([int]$response.StatusCode -ne 401) {
+                        throw "The BFF readiness endpoint '$($check.Path)' returned unexpected HTTP $([int]$response.StatusCode)."
+                    }
+                    $errorBody = $response.Content | ConvertFrom-Json -ErrorAction Stop
+                    if ($errorBody.code -ne 'authentication_required') {
+                        throw "The BFF readiness endpoint '$($check.Path)' did not return the expected authentication_required error."
+                    }
                 }
+                $ready = $true
             } catch {
                 if ($attempt -eq 30) {
                     throw "The BFF package was published but did not become ready. $($_.Exception.Message)"
                 }
+                Write-Log -Message "BFF readiness attempt $attempt failed: $($_.Exception.Message)" -Component 'BFF' -Type 2
             }
         }
-        Write-Log -Message 'The BFF endpoint is online and rejects unauthenticated requests as expected.' -Component 'BFF' -Type 1
+        Write-Log -Message 'The BFF profile and Admin-mode endpoints are online and reject unauthenticated requests as expected.' -Component 'BFF' -Type 1
     } finally {
         if (Test-Path -LiteralPath $archivePath) {
             Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
@@ -1715,13 +2120,367 @@ Token: $($Tokens.GovernanceReportToken)
     }
 
     Write-Warning "SAS tokens were saved to '$selectedPath'."
+    $script:TokenFileWritten = $selectedPath
     Write-Warning 'Move the tokens into their final systems, then securely delete the plaintext file.'
     Write-Log -Message "Created a protected token file at '$selectedPath'. Token values were excluded from the log." -Component 'Tokens' -Type 2
+}
+
+function Get-ReportNamingStatus {
+    param(
+        [string]$Name,
+        [string]$Prefix
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Prefix)) {
+        return 'n/a'
+    }
+    if ($Name.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        return 'Follows reference'
+    }
+    return "Legacy or custom (reference prefix: $Prefix)"
+}
+
+function New-DeploymentReportData {
+    $context = Get-AzContext -ErrorAction SilentlyContinue
+    $reportTenantId = if ($null -ne $context) { [string]$context.Tenant.Id } elseif ($TenantId -ne [guid]::Empty) { [string]$TenantId } else { '' }
+    $portalBase = "https://portal.azure.com/#@$reportTenantId/resource"
+    $resourceGroup = Get-AzResourceGroup -Name $ResourceGroupName -ErrorAction SilentlyContinue
+    $resourceGroupResources = @(Get-AzResource -ResourceGroupName $ResourceGroupName -ErrorAction SilentlyContinue)
+
+    $trackedResources = [System.Collections.Generic.List[object]]::new()
+    $trackedResources.Add(@{ Component = 'Inventory Storage account'; Name = [string]$StorageAccountName; Type = 'Microsoft.Storage/storageAccounts'; Prefix = 'st' })
+    $trackedResources.Add(@{ Component = 'Governance Storage account'; Name = [string]$script:ResolvedGovernanceStorageAccountName; Type = 'Microsoft.Storage/storageAccounts'; Prefix = 'st' })
+    $trackedResources.Add(@{ Component = 'Automation account'; Name = [string]$script:ResolvedAutomationAccountName; Type = 'Microsoft.Automation/automationAccounts'; Prefix = 'aa-' })
+    if ($BackendMode -eq 'AzureFunctions') {
+        $trackedResources.Add(@{ Component = 'Function App (BFF)'; Name = [string]$FunctionAppName; Type = 'Microsoft.Web/sites'; Prefix = 'func-' })
+        $trackedResources.Add(@{ Component = 'Function Consumption plan'; Name = [string]$script:ResolvedFunctionPlanName; Type = 'Microsoft.Web/serverfarms'; Prefix = 'asp-' })
+        $trackedResources.Add(@{ Component = 'Application Insights'; Name = [string]$script:ResolvedApplicationInsightsName; Type = 'Microsoft.Insights/components'; Prefix = 'appi-' })
+        $trackedResources.Add(@{ Component = 'Function host Storage account'; Name = [string]$FunctionStorageAccountName; Type = 'Microsoft.Storage/storageAccounts'; Prefix = 'st' })
+    }
+
+    $matchedIds = [System.Collections.Generic.List[string]]::new()
+    $azureResources = foreach ($tracked in $trackedResources) {
+        $resource = @($resourceGroupResources | Where-Object { $_.Name -eq $tracked.Name -and $_.ResourceType -eq $tracked.Type })[0]
+        if ($null -ne $resource) {
+            $matchedIds.Add([string]$resource.ResourceId)
+        }
+        [ordered]@{
+            component    = $tracked.Component
+            name         = $tracked.Name
+            resourceType = $tracked.Type
+            status       = if ($null -ne $resource) { 'Deployed' } else { 'Not found' }
+            location     = if ($null -ne $resource) { [string]$resource.Location } else { '' }
+            naming       = Get-ReportNamingStatus -Name $tracked.Name -Prefix $tracked.Prefix
+            resourceId   = if ($null -ne $resource) { [string]$resource.ResourceId } else { '' }
+            portalUrl    = if ($null -ne $resource) { "$portalBase$($resource.ResourceId)" } else { '' }
+        }
+    }
+    $otherResources = foreach ($resource in @($resourceGroupResources | Where-Object { $matchedIds -notcontains [string]$_.ResourceId })) {
+        [ordered]@{ name = [string]$resource.Name; resourceType = [string]$resource.ResourceType; resourceId = [string]$resource.ResourceId }
+    }
+
+    $identities = [System.Collections.Generic.List[object]]::new()
+    try {
+        $automationAccount = Get-AzAutomationAccount -ResourceGroupName $ResourceGroupName -Name $script:ResolvedAutomationAccountName -ErrorAction Stop
+        $identities.Add([ordered]@{ owner = $script:ResolvedAutomationAccountName; principalId = [string]$automationAccount.Identity.PrincipalId })
+    } catch {
+        Write-Log -Message "The Automation managed identity could not be read for the report: $($_.Exception.Message)" -Component 'Report' -Type 2
+    }
+    if ($BackendMode -eq 'AzureFunctions') {
+        try {
+            $functionApp = Get-AzWebApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName -ErrorAction Stop
+            $identities.Add([ordered]@{ owner = $FunctionAppName; principalId = [string]$functionApp.Identity.PrincipalId })
+        } catch {
+            Write-Log -Message "The Function App managed identity could not be read for the report: $($_.Exception.Message)" -Component 'Report' -Type 2
+        }
+    }
+    foreach ($identity in $identities) {
+        $identity.roleAssignments = @()
+        if ([string]::IsNullOrWhiteSpace($identity.principalId)) {
+            continue
+        }
+        try {
+            $identity.roleAssignments = @(Get-AzRoleAssignment -ObjectId $identity.principalId -ErrorAction Stop | ForEach-Object {
+                    [ordered]@{ role = [string]$_.RoleDefinitionName; scope = [string]$_.Scope }
+                })
+        } catch {
+            Write-Log -Message "Role assignments for '$($identity.owner)' could not be read for the report: $($_.Exception.Message)" -Component 'Report' -Type 2
+        }
+    }
+
+    $graphPermissionsGranted = @($script:DeploymentState.completedStages) -contains 'GraphPermissionsGranted'
+    $schedule = Get-AzAutomationSchedule -ResourceGroupName $ResourceGroupName -AutomationAccountName $script:ResolvedAutomationAccountName -Name $script:ScheduleName -ErrorAction SilentlyContinue
+    $inventoryAccount = Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $StorageAccountName -ErrorAction SilentlyContinue
+    $governanceAccount = Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $script:ResolvedGovernanceStorageAccountName -ErrorAction SilentlyContinue
+
+    $apiDisplayName = [string]$script:ResolvedApiAppDisplayName
+    $spaDisplayName = [string]$script:ResolvedSpaAppDisplayName
+    if ($BackendMode -eq 'AzureFunctions' -and $null -ne (Get-MgContext -ErrorAction SilentlyContinue)) {
+        foreach ($entry in @(@{ Id = $script:ResolvedApiClientId; Kind = 'Api' }, @{ Id = $script:ResolvedSpaClientId; Kind = 'Spa' })) {
+            if (-not $entry.Id) { continue }
+            try {
+                $application = @((Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/applications?`$filter=appId eq '$($entry.Id)'&`$select=displayName" -OutputType PSObject -ErrorAction Stop).value)[0]
+                if ($null -ne $application) {
+                    if ($entry.Kind -eq 'Api') { $apiDisplayName = [string]$application.displayName } else { $spaDisplayName = [string]$application.displayName }
+                }
+            } catch {
+                Write-Log -Message "The $($entry.Kind) app registration display name could not be read for the report." -Component 'Report' -Type 2
+            }
+        }
+    }
+
+    $groups = @($script:AdminGroups | Where-Object { $_ })
+    $nextSteps = [System.Collections.Generic.List[string]]::new()
+    if ($BackendMode -eq 'AzureFunctions') {
+        if (@($groups | Where-Object { @($_.missingRoles).Count -gt 0 }).Count -gt 0) {
+            $nextSteps.Add('Some Admin-mode groups have no app-role assignment because the API app registration does not define the LocalAdmin.* roles. Rerun the deployment with -ConfigureApiAppRoles.')
+        }
+        if ($groups.Count -gt 0) {
+            $nextSteps.Add("Add members to the Admin-mode groups, or onboard them to PIM for Groups and add eligible members: $(@($groups | ForEach-Object { $_.displayName }) -join ', '). The groups are created empty.")
+        } elseif ($SkipAdminGroups) {
+            $nextSteps.Add('Admin-mode groups were skipped. Assign the LocalAdmin.* app roles under Enterprise applications > Users and groups.')
+        }
+        $nextSteps.Add("Verify that Conditional Access authentication context '$AdminAuthContextId' exists and is published to apps, and that an enabled Conditional Access policy targets this context with the intended MFA strength and sign-in frequency. The BFF setting and policy must use the same context ID; if this ID is already in use, choose a free ID and rerun with -AdminAuthContextId <id>. See README 'Admin mode Conditional Access setup'.")
+        if (-not (Test-DeploymentStageCompleted -Stage 'BffDirectoryPermissionsGranted')) {
+            $nextSteps.Add('Optional Entra identity lookup: rerun with -ConfigureBffDirectoryLookup to grant User.Read.All and Group.Read.All to the Function managed identity. SAS-only inventory lookup requires no Graph permissions.')
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($script:ResolvedSpaRedirectUri)) {
+        $nextSteps.Add("Publish the updated LiveHTML files and generated config.json to the web root that serves $($script:ResolvedSpaRedirectUri).")
+    }
+    if ($script:ResolvedAllowedCorsOrigins -contains '*') {
+        $nextSteps.Add('Table CORS allows *. Restrict -AllowedCorsOrigins to the exact report origin for production.')
+    }
+    if (-not [string]::IsNullOrWhiteSpace($script:TokenFileWritten)) {
+        $nextSteps.Add("Move the SAS tokens from '$($script:TokenFileWritten)' into their target systems, then securely delete the file.")
+    }
+    if ($SkipGraphPermissionGrant) {
+        $nextSteps.Add('Assign User.Read.All, Group.Read.All, Device.Read.All, and DeviceManagementManagedDevices.Read.All to the Automation managed identity.')
+    }
+    if ($BackendMode -eq 'AzureFunctions') {
+        $nextSteps.Add('After the groups have members and the Conditional Access policy is enabled, sign in as an assigned admin, enter Admin mode, and verify the protected governance actions work as expected.')
+    }
+
+    return [ordered]@{
+        reportVersion     = 1
+        generatedAtUtc    = (Get-Date).ToUniversalTime().ToString('o')
+        deployedBy        = if ($null -ne $context) { [string]$context.Account.Id } else { '' }
+        scriptVersion     = '0.8'
+        logFile           = [string]$script:LogFile
+        azure             = [ordered]@{
+            tenantId          = $reportTenantId
+            subscriptionName  = if ($null -ne $context) { [string]$context.Subscription.Name } else { '' }
+            subscriptionId    = [string]$SubscriptionId
+            resourceGroup     = [string]$ResourceGroupName
+            resourceGroupId   = if ($null -ne $resourceGroup) { [string]$resourceGroup.ResourceId } else { '' }
+            resourceGroupNaming = Get-ReportNamingStatus -Name $ResourceGroupName -Prefix 'rg-'
+            resourceGroupUrl  = if ($null -ne $resourceGroup) { "$portalBase$($resourceGroup.ResourceId)" } else { '' }
+            location          = [string]$Location
+            namingReference   = 'https://www.azureperiodictable.com/'
+            resources         = @($azureResources)
+            otherResourcesInResourceGroup = @($otherResources)
+            tables            = [ordered]@{
+                inventory  = @('LocalAdminCollection', 'AdminUserNames', 'AdminGroups', 'LocalAdminDevices')
+                governance = @('LocalAdminAllowRules', 'LocalAdminUserSettings', 'LocalAdminReviewActions', 'LocalAdminAuditRecords')
+            }
+            managedIdentities = @($identities)
+            automation        = [ordered]@{
+                runbook               = [string]$script:RunbookName
+                schedule              = [string]$script:ScheduleName
+                scheduleIntervalHours = [int]$ScheduleIntervalHours
+                nextRun               = if ($null -ne $schedule -and $schedule.NextRun) { ([datetimeoffset]$schedule.NextRun).ToString('o') } else { '' }
+                graphApplicationPermissions = @('User.Read.All', 'Group.Read.All', 'Device.Read.All', 'DeviceManagementManagedDevices.Read.All')
+                graphPermissionStatus = if ($graphPermissionsGranted) { 'Granted by deployment' } elseif ($SkipGraphPermissionGrant) { 'Skipped by parameter' } else { 'Not granted' }
+            }
+        }
+        endpoints         = [ordered]@{
+            inventoryTableEndpoint  = if ($null -ne $inventoryAccount) { [string]$inventoryAccount.PrimaryEndpoints.Table } else { '' }
+            governanceTableEndpoint = if ($null -ne $governanceAccount) { [string]$governanceAccount.PrimaryEndpoints.Table } else { '' }
+            tableCorsOrigins        = @($script:ResolvedAllowedCorsOrigins)
+            bffBaseUrl              = [string]$script:ResolvedBffBaseUrl
+            bffAllowedOrigins       = @($script:ResolvedBffAllowedOrigins)
+            spaRedirectUri          = [string]$script:ResolvedSpaRedirectUri
+        }
+        entra             = [ordered]@{
+            backendMode            = [string]$BackendMode
+            appRegistrationMode    = if ($BackendMode -eq 'AzureFunctions') { [string]$AppRegistrationMode } else { '' }
+            apiApplication         = [ordered]@{ displayName = $apiDisplayName; clientId = if ($script:ResolvedApiClientId) { $script:ResolvedApiClientId.ToString() } else { '' }; ownedByDeployment = [bool]$script:ApiAppRegistrationOwned; scope = [string]$script:ResolvedBffApiScope }
+            spaApplication         = [ordered]@{ displayName = $spaDisplayName; clientId = if ($script:ResolvedSpaClientId) { $script:ResolvedSpaClientId.ToString() } else { '' }; ownedByDeployment = [bool]$script:SpaAppRegistrationOwned }
+            adminAuthContextId     = if ($BackendMode -eq 'AzureFunctions') { [string]$AdminAuthContextId } else { '' }
+            adminSessionMaxMinutes = if ($BackendMode -eq 'AzureFunctions') { [int]$AdminSessionMaxMinutes } else { 0 }
+            adminGroups            = @($groups | ForEach-Object {
+                    [ordered]@{ displayName = [string]$_.displayName; objectId = [string]$_.id; appRoles = @($_.appRoles); assignedRoles = @($_.assignedRoles); missingRoles = @($_.missingRoles); ownedByDeployment = [bool]$_.owned }
+                })
+            bffDirectoryPermissionsGranted = Test-DeploymentStageCompleted -Stage 'BffDirectoryPermissionsGranted'
+        }
+        localFiles        = [ordered]@{
+            deploymentCheckpoint = Get-DeploymentStatePath
+            configJson           = if (Test-Path -LiteralPath $script:ConfigJsonPath -PathType Leaf) { [string]$script:ConfigJsonPath } else { '' }
+            sasTokenFile         = [string]$script:TokenFileWritten
+        }
+        completedStages   = @($script:DeploymentState.completedStages)
+        nextSteps         = @($nextSteps)
+    }
+}
+
+function ConvertTo-ReportCell {
+    param($Value)
+
+    $text = if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) { (@($Value) | Where-Object { $_ -ne $null -and "$_" -ne '' }) -join ', ' } else { [string]$Value }
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return '-'
+    }
+    return ($text -replace '\|', '\|' -replace '\r?\n', ' ')
+}
+
+function ConvertTo-DeploymentReportMarkdown {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Data
+    )
+
+    $azure = $Data.azure
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add('# Local administrator reporting - deployment report')
+    $lines.Add('')
+    $lines.Add('This report contains identifiers and configuration only. It contains no SAS tokens, keys, connection strings, or OAuth tokens. Treat it as internal operational documentation.')
+    $lines.Add('')
+    $lines.Add('| Item | Value |')
+    $lines.Add('|---|---|')
+    $lines.Add("| Generated (UTC) | $(ConvertTo-ReportCell $Data.generatedAtUtc) |")
+    $lines.Add("| Deployed by | $(ConvertTo-ReportCell $Data.deployedBy) |")
+    $lines.Add("| Tenant ID | $(ConvertTo-ReportCell $azure.tenantId) |")
+    $lines.Add("| Subscription | $(ConvertTo-ReportCell $azure.subscriptionName) ($(ConvertTo-ReportCell $azure.subscriptionId)) |")
+    $lines.Add("| Resource group | [$($azure.resourceGroup)]($($azure.resourceGroupUrl)) - $($azure.resourceGroupNaming) |")
+    $lines.Add("| Region | $(ConvertTo-ReportCell $azure.location) |")
+    $lines.Add("| Backend mode | $(ConvertTo-ReportCell $Data.entra.backendMode) |")
+    $lines.Add("| Deployment log | $(ConvertTo-ReportCell $Data.logFile) |")
+    $lines.Add('')
+    $lines.Add('## Azure resources')
+    $lines.Add('')
+    $lines.Add("Naming is checked against the abbreviations from $($azure.namingReference).")
+    $lines.Add('')
+    $lines.Add('| Component | Name | Type | Status | Naming | Portal |')
+    $lines.Add('|---|---|---|---|---|---|')
+    foreach ($resource in $azure.resources) {
+        $portal = if ($resource.portalUrl) { "[Open]($($resource.portalUrl))" } else { '-' }
+        $lines.Add("| $($resource.component) | ``$($resource.name)`` | $($resource.resourceType) | $($resource.status) | $($resource.naming) | $portal |")
+    }
+    $lines.Add('')
+    $lines.Add("Inventory tables: $(ConvertTo-ReportCell $azure.tables.inventory)")
+    $lines.Add('')
+    $lines.Add("Governance tables: $(ConvertTo-ReportCell $azure.tables.governance)")
+    if (@($azure.otherResourcesInResourceGroup).Count -gt 0) {
+        $lines.Add('')
+        $lines.Add('Other resources in the resource group (not tracked by this deployment):')
+        $lines.Add('')
+        foreach ($resource in $azure.otherResourcesInResourceGroup) {
+            $lines.Add("- ``$($resource.name)`` ($($resource.resourceType))")
+        }
+    }
+    $lines.Add('')
+    $lines.Add('## Managed identities and Azure role assignments')
+    $lines.Add('')
+    $lines.Add('| Identity of | Principal ID | Role | Scope |')
+    $lines.Add('|---|---|---|---|')
+    foreach ($identity in $azure.managedIdentities) {
+        $assignments = @($identity.roleAssignments)
+        if ($assignments.Count -eq 0) {
+            $lines.Add("| $($identity.owner) | $(ConvertTo-ReportCell $identity.principalId) | - | - |")
+        }
+        foreach ($assignment in $assignments) {
+            $lines.Add("| $($identity.owner) | $($identity.principalId) | $(ConvertTo-ReportCell $assignment.role) | $(ConvertTo-ReportCell $assignment.scope) |")
+        }
+    }
+    $lines.Add('')
+    $lines.Add("Microsoft Graph application permissions for the Automation identity ($($azure.automation.graphPermissionStatus)): $(ConvertTo-ReportCell $azure.automation.graphApplicationPermissions)")
+    $lines.Add('')
+    $lines.Add('## Automation')
+    $lines.Add('')
+    $lines.Add("- Runbook: ``$($azure.automation.runbook)``")
+    $lines.Add("- Schedule: ``$($azure.automation.schedule)`` every $($azure.automation.scheduleIntervalHours) hour(s); next run: $(ConvertTo-ReportCell $azure.automation.nextRun)")
+    $lines.Add('')
+    $lines.Add('## Endpoints')
+    $lines.Add('')
+    $lines.Add('| Endpoint | Value |')
+    $lines.Add('|---|---|')
+    $lines.Add("| Inventory Table endpoint | $(ConvertTo-ReportCell $Data.endpoints.inventoryTableEndpoint) |")
+    $lines.Add("| Governance Table endpoint | $(ConvertTo-ReportCell $Data.endpoints.governanceTableEndpoint) |")
+    $lines.Add("| Table CORS origins | $(ConvertTo-ReportCell $Data.endpoints.tableCorsOrigins) |")
+    $lines.Add("| BFF base URL | $(ConvertTo-ReportCell $Data.endpoints.bffBaseUrl) |")
+    $lines.Add("| BFF allowed origins | $(ConvertTo-ReportCell $Data.endpoints.bffAllowedOrigins) |")
+    $lines.Add("| LiveHTML / SPA redirect URI | $(ConvertTo-ReportCell $Data.endpoints.spaRedirectUri) |")
+    if ($Data.entra.backendMode -eq 'AzureFunctions') {
+        $entra = $Data.entra
+        $lines.Add('')
+        $lines.Add('## Microsoft Entra')
+        $lines.Add('')
+        $lines.Add('| Object | Display name | ID | Owned by deployment |')
+        $lines.Add('|---|---|---|---|')
+        $lines.Add("| API app registration | $(ConvertTo-ReportCell $entra.apiApplication.displayName) | $(ConvertTo-ReportCell $entra.apiApplication.clientId) | $($entra.apiApplication.ownedByDeployment) |")
+        $lines.Add("| SPA app registration | $(ConvertTo-ReportCell $entra.spaApplication.displayName) | $(ConvertTo-ReportCell $entra.spaApplication.clientId) | $($entra.spaApplication.ownedByDeployment) |")
+        $lines.Add('')
+        $lines.Add("- App registration mode: $($entra.appRegistrationMode)")
+        $lines.Add("- Delegated API scope: ``$(ConvertTo-ReportCell $entra.apiApplication.scope)``")
+        $lines.Add("- Admin mode authentication context: ``$($entra.adminAuthContextId)``; maximum session: $($entra.adminSessionMaxMinutes) minutes")
+        $lines.Add("- Function identity directory lookup permissions (User.Read.All, Group.Read.All) granted by deployment: $($entra.bffDirectoryPermissionsGranted)")
+        $lines.Add('')
+        $lines.Add('### Admin-mode security groups')
+        $lines.Add('')
+        if (@($entra.adminGroups).Count -eq 0) {
+            $lines.Add('No groups were created by this deployment.')
+        } else {
+            $lines.Add('| Group | Object ID | App roles assigned | Missing roles | Owned by deployment |')
+            $lines.Add('|---|---|---|---|---|')
+            foreach ($group in $entra.adminGroups) {
+                $lines.Add("| ``$($group.displayName)`` | $($group.objectId) | $(ConvertTo-ReportCell $group.assignedRoles) | $(ConvertTo-ReportCell $group.missingRoles) | $($group.ownedByDeployment) |")
+            }
+        }
+    }
+    $lines.Add('')
+    $lines.Add('## Local files')
+    $lines.Add('')
+    $lines.Add("- Deployment checkpoint: $(ConvertTo-ReportCell $Data.localFiles.deploymentCheckpoint)")
+    $lines.Add("- Public config.json: $(ConvertTo-ReportCell $Data.localFiles.configJson)")
+    $lines.Add("- SAS token file written in this run: $(ConvertTo-ReportCell $Data.localFiles.sasTokenFile)")
+    $lines.Add('')
+    $lines.Add('## Completed deployment stages')
+    $lines.Add('')
+    $lines.Add((ConvertTo-ReportCell $Data.completedStages))
+    $lines.Add('')
+    $lines.Add('## Next steps')
+    $lines.Add('')
+    if (@($Data.nextSteps).Count -eq 0) {
+        $lines.Add('No manual steps are outstanding.')
+    }
+    $stepNumber = 1
+    foreach ($step in $Data.nextSteps) {
+        $lines.Add("$stepNumber. $step")
+        $stepNumber++
+    }
+    return ($lines -join [Environment]::NewLine)
+}
+
+function Export-DeploymentReport {
+    $data = New-DeploymentReportData
+    if (-not (Test-Path -LiteralPath $script:DeploymentReportDirectory -PathType Container)) {
+        $null = New-Item -Path $script:DeploymentReportDirectory -ItemType Directory -Force
+    }
+    $baseName = "LocalAdminReporting-DeploymentReport_$($script:DateTime)"
+    $markdownPath = Join-Path -Path $script:DeploymentReportDirectory -ChildPath "$baseName.md"
+    $jsonPath = Join-Path -Path $script:DeploymentReportDirectory -ChildPath "$baseName.json"
+    $data | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $jsonPath -Encoding UTF8 -Force -ErrorAction Stop
+    ConvertTo-DeploymentReportMarkdown -Data $data | Set-Content -LiteralPath $markdownPath -Encoding UTF8 -Force -ErrorAction Stop
+    Write-Log -Message "Wrote the after-deployment report to '$markdownPath' and '$jsonPath'." -Component 'Report' -Type 1
+    return $markdownPath
 }
 
 # Main
 try {
     Initialize-Script
+    if ($ConfigureBffDirectoryLookup -and ($BackendMode -ne 'AzureFunctions' -or $SkipGraphPermissionGrant)) {
+        throw '-ConfigureBffDirectoryLookup requires BackendMode AzureFunctions and cannot be combined with -SkipGraphPermissionGrant.'
+    }
     Write-Host 'Prerequisites may be installed for the current user or downloaded temporarily with your approval.'
     Write-Host 'These prerequisite actions do not normally require administrator rights. The Azure deployment still requires appropriate Azure and Microsoft Graph permissions.'
     Write-Log -Message 'Starting local administrator reporting deployment.' -Component 'Initialize' -Type 1
@@ -1787,7 +2546,7 @@ try {
         if ($PSCmdlet.ShouldProcess([string]$script:ResolvedApiClientId, 'Add or update the Admin-mode app roles on the API app registration')) {
             Set-BffApiAppRoles -ApiClientId $script:ResolvedApiClientId
         }
-    } elseif ($BackendMode -eq 'AzureFunctions') {
+    } elseif ($BackendMode -eq 'AzureFunctions' -and -not $script:ApiAppRolesConfigured) {
         Write-Log -Message 'API app roles were not changed. Use -ConfigureApiAppRoles to add the Admin-mode roles to the API app registration.' -Component 'Entra' -Type 1
     }
 
@@ -1797,6 +2556,22 @@ try {
         Write-DeploymentState -Stage 'AzureResourcesReady'
     } else {
         Write-Log -Message 'Skipping the Bicep resource deployment because AzureResourcesReady is recorded and verified.' -Component 'State' -Type 1
+    }
+
+    if ($BackendMode -eq 'AzureFunctions' -and -not $SkipAdminGroups -and
+        -not (Test-DeploymentStageCompleted -Stage 'AdminGroupsReady')) {
+        if ($PSCmdlet.ShouldProcess($script:ResolvedAdminGroupNamePrefix, 'Create or reuse the Admin-mode security groups and assign their API app roles')) {
+            if (Initialize-AdminGroups -ApiClientId $script:ResolvedApiClientId) {
+                Write-DeploymentState -Stage 'AdminGroupsReady'
+            } else {
+                Write-DeploymentState
+                Write-Warning 'Admin-mode groups were created, but some app roles are missing on the API app registration. Rerun with -ConfigureApiAppRoles.'
+            }
+        }
+    } elseif ($BackendMode -eq 'AzureFunctions' -and (Test-DeploymentStageCompleted -Stage 'AdminGroupsReady')) {
+        Write-Log -Message 'Skipping Admin-mode group setup because AdminGroupsReady is recorded.' -Component 'State' -Type 1
+    } elseif ($BackendMode -eq 'AzureFunctions') {
+        Write-Log -Message 'Admin-mode security groups were skipped by parameter.' -Component 'Entra' -Type 1
     }
 
     if (-not $SkipGraphPermissionGrant -and -not (Test-DeploymentStageCompleted -Stage 'GraphPermissionsGranted')) {
@@ -1815,6 +2590,18 @@ try {
         Write-Log -Message 'Microsoft Graph permission assignment was skipped by parameter.' -Component 'Graph' -Type 2
     }
 
+    if ($BackendMode -eq 'AzureFunctions' -and $ConfigureBffDirectoryLookup) {
+        $functionApp = Get-AzWebApp -ResourceGroupName $ResourceGroupName -Name $FunctionAppName -ErrorAction Stop
+        $functionPrincipalId = [string]$functionApp.Identity.PrincipalId
+        if ([string]::IsNullOrWhiteSpace($functionPrincipalId)) {
+            throw 'The Function App does not expose a system-assigned managed identity.'
+        }
+        if ($PSCmdlet.ShouldProcess($FunctionAppName, 'Grant User.Read.All and Group.Read.All to the Function managed identity for directory lookup')) {
+            Invoke-ManagedIdentityGraphPermissionGrant -ManagedIdentityPrincipalId ([guid]$functionPrincipalId) -Permissions @('User.Read.All', 'Group.Read.All')
+            Write-DeploymentState -Stage 'BffDirectoryPermissionsGranted'
+        }
+    }
+
     if (-not (Test-DeploymentStageCompleted -Stage 'RunbookReady') -and
         $PSCmdlet.ShouldProcess($script:ResolvedAutomationAccountName, 'Import, publish, and schedule the reconciliation runbook')) {
         Import-ReconciliationRunbook
@@ -1824,7 +2611,7 @@ try {
     }
 
     if ($BackendMode -eq 'AzureFunctions' -and
-        -not (Test-DeploymentStageCompleted -Stage 'BffPublished') -and
+        ($RepublishBff -or -not (Test-DeploymentStageCompleted -Stage 'BffPublished')) -and
         $PSCmdlet.ShouldProcess($FunctionAppName, 'Build and publish the Azure Functions BFF')) {
         Publish-BffFunctionApp
         Write-DeploymentState -Stage 'BffPublished'
@@ -1860,11 +2647,16 @@ try {
         Write-Log -Message 'Skipping config.json generation because ConfigReady is recorded.' -Component 'State' -Type 1
     }
 
-    if (-not (Test-DeploymentStageCompleted -Stage 'DeploymentComplete')) {
-        Write-DeploymentState -Stage 'DeploymentComplete'
-    }
+    Write-DeploymentState -Stage 'DeploymentComplete'
 
     Write-Log -Message "Deployment completed. Inventory storage account: $StorageAccountName. Governance storage account: $($script:ResolvedGovernanceStorageAccountName). Automation account: $($script:ResolvedAutomationAccountName)." -Component 'Summary' -Type 1
+    try {
+        $reportPath = Export-DeploymentReport
+        Write-Output "After-deployment report: $reportPath"
+    } catch {
+        Write-Log -Message "The after-deployment report could not be created: $($_.Exception.Message)" -Component 'Report' -Type 2
+        Write-Warning "The deployment succeeded, but the after-deployment report could not be created. $($_.Exception.Message)"
+    }
     Write-Output "SUCCESS: Deployment completed. Review the log at $($script:LogFile)."
     exit 0
 } catch {
@@ -1874,6 +2666,7 @@ try {
     Write-Error "Deployment failed. $($_.Exception.Message)"
     exit 1
 } finally {
+    Remove-TemporaryNodeJs
     Remove-TemporaryBicep
     if ($script:ConnectedGraphInThisRun -and (Get-Command Disconnect-MgGraph -ErrorAction SilentlyContinue)) {
         $requestedWhatIf = $WhatIfPreference

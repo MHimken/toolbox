@@ -7,6 +7,7 @@ import { ActionService } from '../actionService.js';
 import { AdminSessionService } from '../adminSessionService.js';
 import { RuleService } from '../ruleService.js';
 import { AzureTableGovernanceRepository } from '../repositories.js';
+import { DirectoryLookupService } from '../directoryService.js';
 
 const config = loadConfig();
 const repository = new AzureTableGovernanceRepository(config);
@@ -16,7 +17,22 @@ const handlers = createProfileHandlers({
   profiles: new ProfileService(repository),
   actions: new ActionService(repository, config),
   rules: new RuleService(repository, config),
-  adminSessions: new AdminSessionService(repository, config)
+  adminSessions: new AdminSessionService(repository, config),
+  directory: new DirectoryLookupService()
+});
+
+app.http('IdentityLookupOptions', {
+  methods: ['OPTIONS'],
+  authLevel: 'anonymous',
+  route: 'identities/lookup',
+  handler: handlers.options
+});
+
+app.http('IdentityLookup', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'identities/lookup',
+  handler: handlers.lookupIdentities
 });
 
 app.http('ProfileOptions', {
@@ -127,20 +143,20 @@ app.http('RuleTransition', {
 app.http('AdminSessionOptions', {
   methods: ['OPTIONS'],
   authLevel: 'anonymous',
-  route: 'admin/session',
+  route: 'sessions/admin',
   handler: handlers.options
 });
 
 app.http('AdminSessionEnter', {
   methods: ['POST'],
   authLevel: 'anonymous',
-  route: 'admin/session',
+  route: 'sessions/admin',
   handler: handlers.enterAdminMode
 });
 
 app.http('AdminSessionExit', {
   methods: ['DELETE'],
   authLevel: 'anonymous',
-  route: 'admin/session',
+  route: 'sessions/admin',
   handler: handlers.exitAdminMode
 });

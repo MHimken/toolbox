@@ -27,6 +27,12 @@ param deployBff bool = false
 @description('Globally unique Azure Function App name. Required when deployBff is true.')
 param functionAppName string = ''
 
+@description('Function Consumption plan name. Defaults to <functionAppName>-plan when empty.')
+param functionPlanName string = ''
+
+@description('Application Insights name. Defaults to <functionAppName>-ai when empty.')
+param applicationInsightsName string = ''
+
 @description('Globally unique Storage account used by the Azure Functions host. Required when deployBff is true.')
 param functionStorageAccountName string = ''
 
@@ -35,6 +41,9 @@ param tenantId string = ''
 
 @description('Microsoft Entra API application client ID accepted as the BFF token audience.')
 param apiClientId string = ''
+
+@description('Microsoft Entra SPA application client ID allowed to call the BFF.')
+param spaClientId string = ''
 
 @description('Origins allowed to call the BFF. Use exact HTTPS origins where possible.')
 param bffAllowedOrigins array = []
@@ -58,6 +67,8 @@ var storageBlobDataReaderRoleDefinitionId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
   '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'
 )
+var resolvedFunctionPlanName = empty(functionPlanName) ? '${functionAppName}-plan' : functionPlanName
+var resolvedApplicationInsightsName = empty(applicationInsightsName) ? '${functionAppName}-ai' : applicationInsightsName
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
@@ -268,7 +279,7 @@ resource functionPackageContainer 'Microsoft.Storage/storageAccounts/blobService
 }
 
 resource functionPlan 'Microsoft.Web/serverfarms@2023-12-01' = if (deployBff) {
-  name: '${functionAppName}-plan'
+  name: resolvedFunctionPlanName
   location: location
   tags: tags
   kind: 'linux'
@@ -282,7 +293,7 @@ resource functionPlan 'Microsoft.Web/serverfarms@2023-12-01' = if (deployBff) {
 }
 
 resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = if (deployBff) {
-  name: '${functionAppName}-ai'
+  name: resolvedApplicationInsightsName
   location: location
   tags: tags
   kind: 'web'
@@ -347,6 +358,10 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = if (deployBff) {
         {
           name: 'API_CLIENT_ID'
           value: apiClientId
+        }
+        {
+          name: 'SPA_CLIENT_ID'
+          value: spaClientId
         }
         {
           name: 'GOVERNANCE_TABLE_ENDPOINT'
@@ -427,3 +442,5 @@ output governanceStorageAccountName string = governanceStorageAccount.name
 output governanceTableEndpoint string = governanceStorageAccount.properties.primaryEndpoints.table
 output bffBaseUrl string = deployBff ? 'https://${functionAppName}.azurewebsites.net/v1' : ''
 output deployedFunctionAppName string = deployBff ? functionAppName : ''
+output functionPlanName string = deployBff ? resolvedFunctionPlanName : ''
+output applicationInsightsName string = deployBff ? resolvedApplicationInsightsName : ''

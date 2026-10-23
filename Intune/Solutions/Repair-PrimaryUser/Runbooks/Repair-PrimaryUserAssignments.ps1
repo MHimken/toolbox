@@ -8,7 +8,8 @@
     combines their device/user counts, and assigns the highest-count user to each company-owned
     Windows device. Equal counts are resolved by the latest successful sign-in.
 .PARAMETER Preview
-    Calculates and audits recommendations without changing Intune assignments.
+    Set to true to calculate and audit recommendations without changing Intune assignments.
+    Defaults to false, which applies assignments. Accepts a Boolean Azure Automation input.
 .NOTES
     Runtime: PowerShell 7.2
     Required module: Az.Accounts
@@ -45,10 +46,11 @@ param(
     [ValidateRange(1, 48)]
     [int]$StaleLockHours = 12,
 
-    [switch]$Preview
+    [bool]$Preview = $false
 )
 
 Set-StrictMode -Version Latest
+$script:OriginalErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = 'Stop'
 $script:StorageBaseUri = 'https://{0}.table.core.windows.net' -f $StorageAccountName
 $script:StorageToken = $null
@@ -62,6 +64,60 @@ function ConvertFrom-SecureAccessToken {
     $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Token)
     try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer) }
     finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer) }
+}
+
+# StrictMode throws on missing properties, so optional response members are read through this helper.
+function Get-OptionalProperty {
+    param(
+        [AllowNull()][object]$InputObject,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if ($null -eq $InputObject) { return $null }
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Get-HttpStatusCode {
+    param([Parameter(Mandatory = $true)][Management.Automation.ErrorRecord]$ErrorRecord)
+
+    $response = Get-OptionalProperty -InputObject $ErrorRecord.Exception -Name 'Response'
+    if ($null -eq $response) { return 0 }
+    return [int]$response.StatusCode
+}
+
+function Test-RetryableError {
+    param([Parameter(Mandatory = $true)][Management.Automation.ErrorRecord]$ErrorRecord)
+
+    $statusCode = Get-HttpStatusCode -ErrorRecord $ErrorRecord
+    if ($statusCode -eq 429 -or $statusCode -ge 500) { return $true }
+    $exception = $ErrorRecord.Exception
+    return $statusCode -eq 0 -and (
+        $exception -is [Net.Http.HttpRequestException] -or
+        $exception -is [IO.IOException] -or
+        $exception -is [TimeoutException] -or
+        $exception -is [Threading.Tasks.TaskCanceledException])
+}
+
+function Get-RetryDelaySeconds {
+    param(
+        [Parameter(Mandatory = $true)][Management.Automation.ErrorRecord]$ErrorRecord,
+        [Parameter(Mandatory = $true)][int]$Attempt
+    )
+
+    $delay = 0
+    $response = Get-OptionalProperty -InputObject $ErrorRecord.Exception -Name 'Response'
+    if ($response -is [Net.Http.HttpResponseMessage] -and $null -ne $response.Headers.RetryAfter) {
+        $retryAfter = $response.Headers.RetryAfter
+        if ($null -ne $retryAfter.Delta) {
+            $delay = $retryAfter.Delta.TotalSeconds
+        } elseif ($null -ne $retryAfter.Date) {
+            $delay = ($retryAfter.Date - [DateTimeOffset]::UtcNow).TotalSeconds
+        }
+    }
+    if ($delay -le 0) { $delay = [math]::Min([math]::Pow(2, $Attempt), 30) }
+    return [int][math]::Ceiling($delay)
 }
 
 function Initialize-ManagedIdentity {
@@ -102,15 +158,8 @@ function Invoke-RestWithRetry {
             if ($null -ne $Body) { $parameters.Body = $Body }
             return Invoke-WebRequest @parameters
         } catch {
-            $response = $_.Exception.Response
-            $statusCode = if ($null -ne $response) { [int]$response.StatusCode } else { 0 }
-            if ($attempt -eq $MaximumRetryCount -or ($statusCode -ne 429 -and $statusCode -lt 500)) { throw }
-            $retryAfter = 0
-            if ($null -ne $response -and $null -ne $response.Headers) {
-                [void][int]::TryParse([string]$response.Headers['Retry-After'], [ref]$retryAfter)
-            }
-            if ($retryAfter -le 0) { $retryAfter = [math]::Min([math]::Pow(2, $attempt), 30) }
-            Start-Sleep -Seconds $retryAfter
+            if ($attempt -eq $MaximumRetryCount -or -not (Test-RetryableError -ErrorRecord $_)) { throw }
+            Start-Sleep -Seconds (Get-RetryDelaySeconds -ErrorRecord $_ -Attempt $attempt)
         }
     }
 }
@@ -149,7 +198,7 @@ function Get-TableEntity {
         $uri = ConvertTo-EntityUri -TableName $TableName -PartitionKey $PartitionKey -RowKey $RowKey
         return (Invoke-RestWithRetry -Method Get -Uri $uri -Headers (Get-StorageHeaders)).Content | ConvertFrom-Json
     } catch {
-        if ($null -ne $_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) { return $null }
+        if ((Get-HttpStatusCode -ErrorRecord $_) -eq 404) { return $null }
         throw
     }
 }
@@ -163,8 +212,8 @@ function Get-TableEntitiesByPartition {
     $nextPartitionKey = $null
     $nextRowKey = $null
     do {
-        $filter = [uri]::EscapeDataString("PartitionKey eq '$($PartitionKey.Replace("'", "''"))'")
-        $uri = '{0}/{1}()?$filter={2}' -f $script:StorageBaseUri, $TableName, $filter
+        $partitionFilter = [uri]::EscapeDataString("PartitionKey eq '$($PartitionKey.Replace("'", "''"))'")
+        $uri = '{0}/{1}()?$filter={2}' -f $script:StorageBaseUri, $TableName, $partitionFilter
         if (-not [string]::IsNullOrWhiteSpace($nextPartitionKey)) {
             $uri += '&NextPartitionKey={0}&NextRowKey={1}' -f [uri]::EscapeDataString($nextPartitionKey), [uri]::EscapeDataString($nextRowKey)
         }
@@ -190,7 +239,7 @@ function Enter-AnalysisLock {
     }
 
     $headers = Get-StorageHeaders -ForWrite
-    $headers['If-None-Match'] = '*'
+    # Insert Entity rejects duplicate keys with HTTP 409 without a conditional header.
     $body = [Text.Encoding]::UTF8.GetBytes((@{
         PartitionKey = 'Analysis'
         RowKey       = 'Active'
@@ -201,7 +250,7 @@ function Enter-AnalysisLock {
     try {
         Invoke-RestWithRetry -Method Post -Uri $uri -Headers $headers -Body $body | Out-Null
     } catch {
-        if ($null -ne $_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 409) {
+        if ((Get-HttpStatusCode -ErrorRecord $_) -eq 409) {
             throw 'Another weekly analysis acquired the lock first.'
         }
         throw
@@ -224,15 +273,8 @@ function Invoke-GraphGet {
         try {
             return Invoke-RestMethod -Method Get -Uri $Uri -Headers @{ Authorization = "Bearer $script:GraphToken" } -ErrorAction Stop
         } catch {
-            $response = $_.Exception.Response
-            $statusCode = if ($null -ne $response) { [int]$response.StatusCode } else { 0 }
-            if ($attempt -eq $MaximumRetryCount -or ($statusCode -ne 429 -and $statusCode -lt 500)) { throw }
-            $retryAfter = 0
-            if ($null -ne $response -and $null -ne $response.Headers) {
-                [void][int]::TryParse([string]$response.Headers['Retry-After'], [ref]$retryAfter)
-            }
-            if ($retryAfter -le 0) { $retryAfter = [math]::Min([math]::Pow(2, $attempt), 30) }
-            Start-Sleep -Seconds $retryAfter
+            if ($attempt -eq $MaximumRetryCount -or -not (Test-RetryableError -ErrorRecord $_)) { throw }
+            Start-Sleep -Seconds (Get-RetryDelaySeconds -ErrorRecord $_ -Attempt $attempt)
         }
     }
 }
@@ -253,15 +295,8 @@ function Invoke-GraphBatch {
                 } -Body $body -ErrorAction Stop
                 break
             } catch {
-                $httpResponse = $_.Exception.Response
-                $statusCode = if ($null -ne $httpResponse) { [int]$httpResponse.StatusCode } else { 0 }
-                if ($batchAttempt -eq $MaximumRetryCount -or ($statusCode -ne 429 -and $statusCode -lt 500)) { throw }
-                $retryAfter = 0
-                if ($null -ne $httpResponse -and $null -ne $httpResponse.Headers) {
-                    [void][int]::TryParse([string]$httpResponse.Headers['Retry-After'], [ref]$retryAfter)
-                }
-                if ($retryAfter -le 0) { $retryAfter = [int][math]::Min([math]::Pow(2, $batchAttempt), 30) }
-                Start-Sleep -Seconds $retryAfter
+                if ($batchAttempt -eq $MaximumRetryCount -or -not (Test-RetryableError -ErrorRecord $_)) { throw }
+                Start-Sleep -Seconds (Get-RetryDelaySeconds -ErrorRecord $_ -Attempt $batchAttempt)
             }
         }
         $retry = [Collections.Generic.List[object]]::new()
@@ -274,7 +309,9 @@ function Invoke-GraphBatch {
             } elseif (([int]$item.status -eq 429 -or [int]$item.status -ge 500) -and $attempt -lt $MaximumRetryCount) {
                 $retry.Add($request)
             } else {
-                $message = if ($null -ne $item.body -and $null -ne $item.body.error) { [string]$item.body.error.message } else { 'Graph batch request failed.' }
+                $errorBody = Get-OptionalProperty -InputObject (Get-OptionalProperty -InputObject $item -Name 'body') -Name 'error'
+                $errorMessage = [string](Get-OptionalProperty -InputObject $errorBody -Name 'message')
+                $message = if (-not [string]::IsNullOrWhiteSpace($errorMessage)) { $errorMessage } else { 'Graph batch request failed.' }
                 $results.Add([pscustomobject]@{ Request = $request; Status = [int]$item.status; Error = $message })
             }
         }
@@ -295,152 +332,156 @@ function Write-AuditEntity {
     Set-TableEntity -TableName $AuditTableName -Entity $entity
 }
 
-Initialize-ManagedIdentity
-Enter-AnalysisLock
-$startedAt = [datetime]::UtcNow
-$summary = @{ DevicesEvaluated = 0; ChangesNeeded = 0; Updated = 0; Failed = 0; Unchanged = 0 }
-
 try {
-    $endDate = if ([string]::IsNullOrWhiteSpace($AnalysisEndDate)) {
-        [datetime]::UtcNow.Date.AddDays(-1)
-    } else {
-        [datetime]::ParseExact(
-            $AnalysisEndDate,
-            'yyyy-MM-dd',
-            [Globalization.CultureInfo]::InvariantCulture,
-            [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
-        )
-    }
-    if ($endDate -ge [datetime]::UtcNow.Date) { throw 'AnalysisEndDate must identify a completed UTC day.' }
+    Initialize-ManagedIdentity
+    Enter-AnalysisLock
+    $startedAt = [datetime]::UtcNow
+    $summary = @{ DevicesEvaluated = 0; ChangesNeeded = 0; Updated = 0; Failed = 0; Unchanged = 0 }
 
-    $dateKeys = [Collections.Generic.List[string]]::new()
-    $missingDates = [Collections.Generic.List[string]]::new()
-    for ($offset = $DaysToAnalyze - 1; $offset -ge 0; $offset--) {
-        $date = $endDate.AddDays(-$offset)
-        $dateKey = $date.ToString('yyyyMMdd')
-        $dateKeys.Add($dateKey)
-        $state = Get-TableEntity -TableName $StateTableName -PartitionKey 'Collection' -RowKey $dateKey
-        if ($null -eq $state -or [string]$state.Status -ne 'Complete') { $missingDates.Add($date.ToString('yyyy-MM-dd')) }
-    }
-    if ($missingDates.Count -gt 0) {
-        throw "No assignments were changed because collection is incomplete for: $($missingDates -join ', ')."
-    }
-
-    $countsByDevice = @{}
-    foreach ($dateKey in $dateKeys) {
-        foreach ($row in @(Get-TableEntitiesByPartition -TableName $AggregateTableName -PartitionKey $dateKey)) {
-            $deviceId = ([string]$row.DeviceId).ToLowerInvariant()
-            $userId = ([string]$row.UserId).ToLowerInvariant()
-            if (-not $countsByDevice.ContainsKey($deviceId)) { $countsByDevice[$deviceId] = @{} }
-            if (-not $countsByDevice[$deviceId].ContainsKey($userId)) {
-                $countsByDevice[$deviceId][$userId] = [pscustomobject]@{ UserId = [string]$row.UserId; Count = [int64]0; LatestSignIn = [datetime]::MinValue }
-            }
-            $candidate = $countsByDevice[$deviceId][$userId]
-            $candidate.Count += [int64]$row.SignInCount
-            $latest = ([datetime]$row.LatestSignIn).ToUniversalTime()
-            if ($latest -gt $candidate.LatestSignIn) { $candidate.LatestSignIn = $latest }
+    try {
+        $endDate = if ([string]::IsNullOrWhiteSpace($AnalysisEndDate)) {
+            [datetime]::UtcNow.Date.AddDays(-1)
+        } else {
+            [datetime]::ParseExact(
+                $AnalysisEndDate,
+                'yyyy-MM-dd',
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+            )
         }
-    }
+        if ($endDate -ge [datetime]::UtcNow.Date) { throw 'AnalysisEndDate must identify a completed UTC day.' }
 
-    $winners = @{}
-    foreach ($deviceId in $countsByDevice.Keys) {
-        $winners[$deviceId] = @($countsByDevice[$deviceId].Values | Sort-Object -Property @(
-            @{ Expression = 'Count'; Descending = $true },
-            @{ Expression = 'LatestSignIn'; Descending = $true },
-            @{ Expression = 'UserId'; Descending = $false }
-        ))[0]
-    }
-    $countsByDevice = $null
+        $dateKeys = [Collections.Generic.List[string]]::new()
+        $missingDates = [Collections.Generic.List[string]]::new()
+        for ($offset = $DaysToAnalyze - 1; $offset -ge 0; $offset--) {
+            $date = $endDate.AddDays(-$offset)
+            $dateKey = $date.ToString('yyyyMMdd')
+            $dateKeys.Add($dateKey)
+            $state = Get-TableEntity -TableName $StateTableName -PartitionKey 'Collection' -RowKey $dateKey
+            if ($null -eq $state -or [string]$state.Status -ne 'Complete') { $missingDates.Add($date.ToString('yyyy-MM-dd')) }
+        }
+        if ($missingDates.Count -gt 0) {
+            throw "No assignments were changed because collection is incomplete for: $($missingDates -join ', ')."
+        }
 
-    $requests = [Collections.Generic.List[object]]::new()
-    $requestMetadata = @{}
-    $requestId = 0
-    $filter = [uri]::EscapeDataString("operatingSystem eq 'Windows' and managedDeviceOwnerType eq 'Company'")
-    $deviceUri = 'https://graph.microsoft.com/beta/deviceManagement/managedDevices?$filter={0}&$select=id,azureADDeviceId,deviceName,userId&$top=1000' -f $filter
-    while (-not [string]::IsNullOrWhiteSpace($deviceUri)) {
-        $page = Invoke-GraphGet -Uri $deviceUri
-        foreach ($device in @($page.value)) {
-            $azureDeviceId = ([string]$device.azureADDeviceId).ToLowerInvariant()
-            if (-not $winners.ContainsKey($azureDeviceId)) { continue }
-            $summary.DevicesEvaluated++
-            $winner = $winners[$azureDeviceId]
-            if ([string]$device.userId -eq [string]$winner.UserId) {
-                $summary.Unchanged++
-                Write-AuditEntity -RowKey ([string]$device.id) -Properties @{
-                    DeviceId = [string]$device.id; AzureDeviceId = [string]$device.azureADDeviceId; DeviceName = [string]$device.deviceName
-                    PreviousUserId = [string]$device.userId; RecommendedUserId = [string]$winner.UserId; SignInCount = [int64]$winner.Count
-                    LatestSignIn = $winner.LatestSignIn.ToString('o'); Outcome = 'Unchanged'; Preview = [bool]$Preview
+        $countsByDevice = @{}
+        foreach ($dateKey in $dateKeys) {
+            foreach ($row in @(Get-TableEntitiesByPartition -TableName $AggregateTableName -PartitionKey $dateKey)) {
+                $deviceId = ([string]$row.DeviceId).ToLowerInvariant()
+                $userId = ([string]$row.UserId).ToLowerInvariant()
+                if (-not $countsByDevice.ContainsKey($deviceId)) { $countsByDevice[$deviceId] = @{} }
+                if (-not $countsByDevice[$deviceId].ContainsKey($userId)) {
+                    $countsByDevice[$deviceId][$userId] = [pscustomobject]@{ UserId = [string]$row.UserId; Count = [int64]0; LatestSignIn = [datetime]::MinValue }
                 }
-                continue
+                $candidate = $countsByDevice[$deviceId][$userId]
+                $candidate.Count += [int64]$row.SignInCount
+                $latest = ([datetime]$row.LatestSignIn).ToUniversalTime()
+                if ($latest -gt $candidate.LatestSignIn) { $candidate.LatestSignIn = $latest }
             }
+        }
 
-            $summary.ChangesNeeded++
-            if ($Preview) {
-                Write-AuditEntity -RowKey ([string]$device.id) -Properties @{
-                    DeviceId = [string]$device.id; AzureDeviceId = [string]$device.azureADDeviceId; DeviceName = [string]$device.deviceName
-                    PreviousUserId = [string]$device.userId; RecommendedUserId = [string]$winner.UserId; SignInCount = [int64]$winner.Count
-                    LatestSignIn = $winner.LatestSignIn.ToString('o'); Outcome = 'Preview'; Preview = $true
-                }
-                continue
-            }
+        $winners = @{}
+        foreach ($deviceId in $countsByDevice.Keys) {
+            $winners[$deviceId] = @($countsByDevice[$deviceId].Values | Sort-Object -Property @(
+                @{ Expression = 'Count'; Descending = $true },
+                @{ Expression = 'LatestSignIn'; Descending = $true },
+                @{ Expression = 'UserId'; Descending = $false }
+            ))[0]
+        }
+        $countsByDevice = $null
 
-            $requestId++
-            $id = [string]$requestId
-            $request = [pscustomobject]@{
-                id      = $id
-                method  = 'POST'
-                url     = "/deviceManagement/managedDevices/$($device.id)/users/`$ref"
-                headers = @{ 'Content-Type' = 'application/json' }
-                body    = @{ '@odata.id' = "https://graph.microsoft.com/beta/users/$($winner.UserId)" }
-            }
-            $requests.Add($request)
-            $requestMetadata[$id] = [pscustomobject]@{ Device = $device; Winner = $winner }
-
-            if ($requests.Count -eq 20) {
-                foreach ($result in @(Invoke-GraphBatch -Requests @($requests))) {
-                    $metadata = $requestMetadata[[string]$result.Request.id]
-                    $outcome = if ($null -eq $result.Error) { $summary.Updated++; 'Updated' } else { $summary.Failed++; 'Failed' }
-                    Write-AuditEntity -RowKey ([string]$metadata.Device.id) -Properties @{
-                        DeviceId = [string]$metadata.Device.id; AzureDeviceId = [string]$metadata.Device.azureADDeviceId; DeviceName = [string]$metadata.Device.deviceName
-                        PreviousUserId = [string]$metadata.Device.userId; RecommendedUserId = [string]$metadata.Winner.UserId; SignInCount = [int64]$metadata.Winner.Count
-                        LatestSignIn = $metadata.Winner.LatestSignIn.ToString('o'); Outcome = $outcome; HttpStatus = [int]$result.Status
-                        ErrorMessage = [string]$result.Error; Preview = $false
+        $requests = [Collections.Generic.List[object]]::new()
+        $requestMetadata = @{}
+        $requestId = 0
+        $managedDeviceFilter = [uri]::EscapeDataString("operatingSystem eq 'Windows' and managedDeviceOwnerType eq 'Company'")
+        $deviceUri = 'https://graph.microsoft.com/beta/deviceManagement/managedDevices?$filter={0}&$select=id,azureADDeviceId,deviceName,userId&$top=1000' -f $managedDeviceFilter
+        while (-not [string]::IsNullOrWhiteSpace($deviceUri)) {
+            $page = Invoke-GraphGet -Uri $deviceUri
+            foreach ($device in @($page.value)) {
+                $azureDeviceId = ([string]$device.azureADDeviceId).ToLowerInvariant()
+                if (-not $winners.ContainsKey($azureDeviceId)) { continue }
+                $summary.DevicesEvaluated++
+                $winner = $winners[$azureDeviceId]
+                if ([string]$device.userId -eq [string]$winner.UserId) {
+                    $summary.Unchanged++
+                    Write-AuditEntity -RowKey ([string]$device.id) -Properties @{
+                        DeviceId = [string]$device.id; AzureDeviceId = [string]$device.azureADDeviceId; DeviceName = [string]$device.deviceName
+                        PreviousUserId = [string]$device.userId; RecommendedUserId = [string]$winner.UserId; SignInCount = [int64]$winner.Count
+                        LatestSignIn = $winner.LatestSignIn.ToString('o'); Outcome = 'Unchanged'; Preview = [bool]$Preview
                     }
+                    continue
                 }
-                $requests.Clear()
-                $requestMetadata.Clear()
+
+                $summary.ChangesNeeded++
+                if ($Preview) {
+                    Write-AuditEntity -RowKey ([string]$device.id) -Properties @{
+                        DeviceId = [string]$device.id; AzureDeviceId = [string]$device.azureADDeviceId; DeviceName = [string]$device.deviceName
+                        PreviousUserId = [string]$device.userId; RecommendedUserId = [string]$winner.UserId; SignInCount = [int64]$winner.Count
+                        LatestSignIn = $winner.LatestSignIn.ToString('o'); Outcome = 'Preview'; Preview = $true
+                    }
+                    continue
+                }
+
+                $requestId++
+                $id = [string]$requestId
+                $request = [pscustomobject]@{
+                    id      = $id
+                    method  = 'POST'
+                    url     = "/deviceManagement/managedDevices/$($device.id)/users/`$ref"
+                    headers = @{ 'Content-Type' = 'application/json' }
+                    body    = @{ '@odata.id' = "https://graph.microsoft.com/beta/users/$($winner.UserId)" }
+                }
+                $requests.Add($request)
+                $requestMetadata[$id] = [pscustomobject]@{ Device = $device; Winner = $winner }
+
+                if ($requests.Count -eq 20) {
+                    foreach ($result in @(Invoke-GraphBatch -Requests @($requests))) {
+                        $metadata = $requestMetadata[[string]$result.Request.id]
+                        $outcome = if ($null -eq $result.Error) { $summary.Updated++; 'Updated' } else { $summary.Failed++; 'Failed' }
+                        Write-AuditEntity -RowKey ([string]$metadata.Device.id) -Properties @{
+                            DeviceId = [string]$metadata.Device.id; AzureDeviceId = [string]$metadata.Device.azureADDeviceId; DeviceName = [string]$metadata.Device.deviceName
+                            PreviousUserId = [string]$metadata.Device.userId; RecommendedUserId = [string]$metadata.Winner.UserId; SignInCount = [int64]$metadata.Winner.Count
+                            LatestSignIn = $metadata.Winner.LatestSignIn.ToString('o'); Outcome = $outcome; HttpStatus = [int]$result.Status
+                            ErrorMessage = [string]$result.Error; Preview = $false
+                        }
+                    }
+                    $requests.Clear()
+                    $requestMetadata.Clear()
+                }
+            }
+            $deviceUri = [string](Get-OptionalProperty -InputObject $page -Name '@odata.nextLink')
+        }
+
+        if ($requests.Count -gt 0) {
+            foreach ($result in @(Invoke-GraphBatch -Requests @($requests))) {
+                $metadata = $requestMetadata[[string]$result.Request.id]
+                $outcome = if ($null -eq $result.Error) { $summary.Updated++; 'Updated' } else { $summary.Failed++; 'Failed' }
+                Write-AuditEntity -RowKey ([string]$metadata.Device.id) -Properties @{
+                    DeviceId = [string]$metadata.Device.id; AzureDeviceId = [string]$metadata.Device.azureADDeviceId; DeviceName = [string]$metadata.Device.deviceName
+                    PreviousUserId = [string]$metadata.Device.userId; RecommendedUserId = [string]$metadata.Winner.UserId; SignInCount = [int64]$metadata.Winner.Count
+                    LatestSignIn = $metadata.Winner.LatestSignIn.ToString('o'); Outcome = $outcome; HttpStatus = [int]$result.Status
+                    ErrorMessage = [string]$result.Error; Preview = $false
+                }
             }
         }
-        $deviceUri = [string]$page.'@odata.nextLink'
-    }
 
-    if ($requests.Count -gt 0) {
-        foreach ($result in @(Invoke-GraphBatch -Requests @($requests))) {
-            $metadata = $requestMetadata[[string]$result.Request.id]
-            $outcome = if ($null -eq $result.Error) { $summary.Updated++; 'Updated' } else { $summary.Failed++; 'Failed' }
-            Write-AuditEntity -RowKey ([string]$metadata.Device.id) -Properties @{
-                DeviceId = [string]$metadata.Device.id; AzureDeviceId = [string]$metadata.Device.azureADDeviceId; DeviceName = [string]$metadata.Device.deviceName
-                PreviousUserId = [string]$metadata.Device.userId; RecommendedUserId = [string]$metadata.Winner.UserId; SignInCount = [int64]$metadata.Winner.Count
-                LatestSignIn = $metadata.Winner.LatestSignIn.ToString('o'); Outcome = $outcome; HttpStatus = [int]$result.Status
-                ErrorMessage = [string]$result.Error; Preview = $false
-            }
+        Set-TableEntity -TableName $StateTableName -Entity @{
+            PartitionKey = 'AnalysisRuns'; RowKey = $script:RunId; Status = if ($summary.Failed -gt 0) { 'CompletedWithErrors' } else { 'Complete' }
+            StartedAt = $startedAt.ToString('o'); CompletedAt = [datetime]::UtcNow.ToString('o'); AnalysisEndDate = $endDate.ToString('yyyy-MM-dd')
+            DaysAnalyzed = $DaysToAnalyze; Preview = [bool]$Preview; DevicesEvaluated = $summary.DevicesEvaluated; ChangesNeeded = $summary.ChangesNeeded
+            Updated = $summary.Updated; Failed = $summary.Failed; Unchanged = $summary.Unchanged
         }
+        Write-Output "Analysis $script:RunId complete. Evaluated: $($summary.DevicesEvaluated); changes: $($summary.ChangesNeeded); updated: $($summary.Updated); failed: $($summary.Failed); unchanged: $($summary.Unchanged)."
+    } catch {
+        Set-TableEntity -TableName $StateTableName -Entity @{
+            PartitionKey = 'AnalysisRuns'; RowKey = $script:RunId; Status = 'Failed'; StartedAt = $startedAt.ToString('o')
+            CompletedAt = [datetime]::UtcNow.ToString('o'); ErrorMessage = $_.Exception.Message; Preview = [bool]$Preview
+        }
+        throw
+    } finally {
+        try { Exit-AnalysisLock }
+        catch { Write-Warning "The analysis lock could not be released. $($_.Exception.Message)" }
     }
-
-    Set-TableEntity -TableName $StateTableName -Entity @{
-        PartitionKey = 'AnalysisRuns'; RowKey = $script:RunId; Status = if ($summary.Failed -gt 0) { 'CompletedWithErrors' } else { 'Complete' }
-        StartedAt = $startedAt.ToString('o'); CompletedAt = [datetime]::UtcNow.ToString('o'); AnalysisEndDate = $endDate.ToString('yyyy-MM-dd')
-        DaysAnalyzed = $DaysToAnalyze; Preview = [bool]$Preview; DevicesEvaluated = $summary.DevicesEvaluated; ChangesNeeded = $summary.ChangesNeeded
-        Updated = $summary.Updated; Failed = $summary.Failed; Unchanged = $summary.Unchanged
-    }
-    Write-Output "Analysis $script:RunId complete. Evaluated: $($summary.DevicesEvaluated); changes: $($summary.ChangesNeeded); updated: $($summary.Updated); failed: $($summary.Failed); unchanged: $($summary.Unchanged)."
-} catch {
-    Set-TableEntity -TableName $StateTableName -Entity @{
-        PartitionKey = 'AnalysisRuns'; RowKey = $script:RunId; Status = 'Failed'; StartedAt = $startedAt.ToString('o')
-        CompletedAt = [datetime]::UtcNow.ToString('o'); ErrorMessage = $_.Exception.Message; Preview = [bool]$Preview
-    }
-    throw
 } finally {
-    try { Exit-AnalysisLock }
-    catch { Write-Warning "The analysis lock could not be released. $($_.Exception.Message)" }
+    $ErrorActionPreference = $script:OriginalErrorActionPreference
 }

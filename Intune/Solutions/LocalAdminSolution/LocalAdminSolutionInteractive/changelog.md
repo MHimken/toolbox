@@ -2,6 +2,44 @@
 
 ## 2026
 
+### 21st of October
+
+* Added local-first principal and assigned-through group lookup to rule proposals. SAS-only searches remain offline; authorized signed-in searches fall back to Entra only after no local match and an 800 ms typing pause. Results are bounded and cached in memory, obsolete searches are cancelled, and synced identities expose separate Entra and AD SID choices.
+* Added a protected, rate-limited BFF identity lookup endpoint and opt-in `-ConfigureBffDirectoryLookup` permission grants for the Function managed identity. No new SPA Graph scopes or npm dependencies are required.
+* Added informational principal name/UPN snapshots to SID-only rules and governance displays/exports.
+* Preserved assigned-through group SIDs in review rows and normalized collector source codes (`L`, `E`, `A`) so selected identities and group-scoped previews match collected inventory correctly.
+* Added Users/Groups identity drill-downs for loaded computers, membership paths and related rules; snapshot exports retain this read-only feature without directory calls.
+
+### 20th of October
+
+* Fixed generated snapshots failing to start: the exporter did not provide the table-layout helpers, `normalizeSidInput`, or `saveRecoveryProfile` that LiveHTML now imports. Each module is now bundled in its own scope, with aliased imports, and export fails closed on unresolved imports, missing template markers, or remaining external resources.
+* Hardened CSV export against spreadsheet formula injection by prefixing text that begins with `=`, `+`, `-`, `@`, tab, or carriage return. Added CSV quoting and Unicode tests.
+* Hardened Entra deployment against app-registration and security-group display-name collisions: Create mode now fails closed unless existing IDs are checkpointed as deployment-owned; privileged groups are never adopted by name. The BFF now requires access-token `azp`/`appid` to match the configured SPA client ID.
+* Added clickable rule-match previews for proposers and approvers, including governance-row and approval-confirmation summaries. The read-only preview lists matching loaded review entries without losing the underlying form and explains the limits of the scope estimate.
+* Fixed sign-out popups remaining open and leaving the main report signed in: state-only logout callbacks now reach the MSAL redirect bridge, and logout explicitly returns the popup to the configured SPA redirect URI without reloading the main report.
+* Moved Sign out into the title bar, visible once a Microsoft Entra account is signed in. Cloud profile reload remains in Settings.
+* Fixed pasted principal and assigned-through group SIDs containing Unicode hyphens being rejected. Proposal validation, match previews and submission now use ASCII SID separators.
+* Documented that page reload clears the in-memory report sign-in and Admin mode without signing out the Microsoft Entra browser session.
+
+### 19th of October
+
+* Fixed title-bar button hover contrast without changing disabled controls on hover. Added a collapsible box showing only the current sign-in/Admin-mode status, with a local up/down arrow beside the timers and automatic expansion on errors. The arrow appears without a full-width bar.
+* Moved Microsoft Entra sign-in, Enter Admin mode and their status messages to the top right of the title bar, and moved the matching-rows count into the report mode bar. A dark-red Retry button replaces the popup warning bar. Cloud profile reload and sign-out remain in Settings.
+* Added an explicit Retry authentication control for closed or abandoned MSAL 5 popups, including Admin-mode step-up. Retrying cancels the previous bridge wait without reloading the report, and superseded results cannot replace the active attempt.
+* Kept the page header and Admin-mode controls visible while scrolling, and added a live idle-timeout countdown that resets on activity without extending the absolute Admin-mode expiry.
+* Added a total-timeout countdown alongside the idle timer, using the backend's session expiry so activity cannot reset it.
+
+### 18th of October
+
+* Fixed Admin-mode entry returning HTTP 404: Azure Functions reserves routes beginning with `admin`, so the session route is now `/v1/sessions/admin`. Updated the browser client and API contract, and made deployment readiness check both profile and Admin-mode routes.
+* Added `-RepublishBff` to publish backend code on a resumed deployment without rerunning completed infrastructure or SAS stages, while preserving existing Function App settings.
+* The deployment now creates four Admin-mode Entra security groups (`sg-<name>-governance-readers`, `-governance-approvers`, `-governance-selfapprovers`, `-action-operators`) and assigns the matching API app roles. Added `-SkipAdminGroups` and `-AdminGroupNamePrefix`. Groups created by the deployment are removed by `-RemoveDeployment`; reused groups are preserved.
+* `-AppRegistrationMode Create` now adds the `LocalAdmin.*` app roles automatically.
+* Derived Azure names follow the [Azure Periodic Table](https://www.azureperiodictable.com/) abbreviations: `aa-` for the Automation account, `asp-` for the Function plan, and `appi-` for Application Insights. Existing deployments keep their recorded names; `-FunctionPlanName` and `-ApplicationInsightsName` pin existing names when using `-ForceRecreate`.
+* Added an after-deployment report (Markdown and JSON) that lists the tenant, subscription, deployed resources, naming checks, identities and role assignments, endpoints, app registrations, groups, and remaining manual steps. Added `-DeploymentReportPath`.
+* Deployment checkpoint version 4 records the plan, Application Insights, and group names.
+* Added `-InstallTemporaryNode`: when npm is missing, the deployment downloads a checksum- and signature-verified Node.js 22 LTS into TEMP to build the BFF and removes it afterwards.
+
 ### 12th of October
 
 * Implemented Admin mode: backend-enforced API app roles, Conditional Access authentication-context step-up (default `c1`) via MSAL claims challenge, a 30-minute absolute and 15-minute idle limit, and audited entry/exit.

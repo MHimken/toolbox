@@ -32,6 +32,13 @@ export function equalOwnerKeys(left: string, right: string): boolean {
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
+export function validateClientApplication(payload: JWTPayload, expectedClientId: string): void {
+  const clientId = payload.azp ?? payload.appid;
+  if (typeof clientId !== 'string' || clientId.toLowerCase() !== expectedClientId) {
+    throw new ApiError(401, 'invalid_client_application', 'The access token was issued to an unapproved client application.');
+  }
+}
+
 export class EntraTokenVerifier implements TokenVerifier {
   private readonly jwks;
 
@@ -48,6 +55,7 @@ export class EntraTokenVerifier implements TokenVerifier {
         issuer: `https://login.microsoftonline.com/${this.config.tenantId}/v2.0`,
         algorithms: ['RS256']
       });
+      validateClientApplication(payload, this.config.spaClientId);
       const tenantId = typeof payload.tid === 'string' ? payload.tid.toLowerCase() : '';
       const objectId = typeof payload.oid === 'string' ? payload.oid.toLowerCase() : '';
       if (tenantId !== this.config.tenantId || !objectId) {
