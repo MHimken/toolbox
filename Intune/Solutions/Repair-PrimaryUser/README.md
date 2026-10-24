@@ -4,16 +4,7 @@ This Azure Automation solution repairs Microsoft Intune primary-user assignments
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    S[Microsoft Graph sign-in logs] -->|Daily, previous UTC day| C[Collection runbook]
-    C --> D[(Daily aggregate table)]
-    C --> T[(State table)]
-    D -->|Weekly, last 28 complete days| A[Assignment runbook]
-    T --> A
-    A -->|Batch updates| I[Microsoft Intune]
-    A --> U[(Audit table)]
-```
+![Repair Primary User architecture: deployment, daily collection, weekly analysis, Azure Tables, and Microsoft Graph](Images/Repair-PrimaryUser-Solution.png)
 
 The daily collector reads the previous completed UTC day, counts successful `Windows Sign In` events by device and user, and stores only the count and latest sign-in timestamp. Raw audit events are not stored.
 
@@ -144,7 +135,14 @@ Each day has its own completion state. If one day fails, the job stops; rerun th
 
 After updating the local collector, rerun `Deployment\Deploy-RepairPrimaryUser.ps1 -Resume` to publish the changed runbook without recreating completed schedules.
 
-Partitions older than `RetentionDays` are removed after successful collection. Keep retention greater than the analysis window; 35 days provides seven days of recovery margin.
+## Data retention
+
+Both runbooks delete expired rows in Table Storage entity group transactions of up to 100 rows per request. Queries request only `PartitionKey` and `RowKey` and are processed page by page, so deleting a day with tens of thousands of device/user rows takes a few hundred requests instead of one request per row.
+
+- **Collector (`RetentionDays`, default 35):** after a successful job, every `PrimaryUserDaily` row and `Collection` state row dated more than `RetentionDays` before the last collected date is deleted. This includes days left incomplete by failed collections. Keep retention greater than the analysis window; 35 days provides seven days of recovery margin.
+- **Analyzer (`AuditRetentionDays`, default 180):** at the end of each weekly run, including preview runs and failed analyses, `PrimaryUserAudit` partitions and `AnalysisRuns` summaries older than `AuditRetentionDays` are deleted while the analysis lock is still held. A failed cleanup is reported as a warning and does not change the run result.
+
+The deployed weekly schedule does not pass `AuditRetentionDays`, so the default applies. To keep a different period, add the parameter to the `RepairPrimaryUser-WeeklyAnalysis` schedule link or start the runbook manually with it.
 
 ## Weekly analysis
 
@@ -174,6 +172,7 @@ The analyzer:
 5. Skips unchanged devices.
 6. Sends changed assignments in Microsoft Graph batches of at most 20.
 7. Retries throttled and transient requests and records each outcome.
+8. Deletes audit history older than `AuditRetentionDays`, then releases the lock.
 
 ## Monitoring and recovery
 

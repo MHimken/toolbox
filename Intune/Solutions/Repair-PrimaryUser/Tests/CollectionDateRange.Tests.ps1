@@ -115,7 +115,7 @@ Test-Condition ($collectorTestState.GraphDates.Count -eq 1 -and $collectorTestSt
 Reset-CollectorTestData
 & $collectorUnderTest -StorageAccountName 'rpucollectiontest' -CollectionDate '2024-02-28' -CollectionEndDate '2024-03-01' | Out-Null
 Test-Condition (($collectorTestState.GraphDates -join ',') -eq '20240228,20240229,20240301') 'An inclusive range must traverse leap days and month boundaries in order.'
-Test-Condition ($collectorTestState.CleanupDates.Count -eq 3) 'Retention cleanup must still run for each collected date.'
+Test-Condition (($collectorTestState.CleanupDates -join ',') -eq '20240301') 'Retention cleanup must run once per job, relative to the last collected date.'
 foreach ($dateKey in @('20240228', '20240229', '20240301')) {
     $expectedEventCount = 1 + ([int]$dateKey.Substring(6, 2) % 3)
     Test-Condition ($collectorTestState.States[$dateKey].Status -eq 'Complete') 'Each day needs an independent completion state.'

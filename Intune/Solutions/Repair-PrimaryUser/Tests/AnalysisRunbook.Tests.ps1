@@ -17,7 +17,7 @@ if ($analyzerIssues.Count) { throw ($analyzerIssues | Out-String) }
 $analyzerSource = $analyzerAst.Extent.Text
 $mockedFunctions = @(
     'Initialize-ManagedIdentity', 'Get-TableEntity', 'Set-TableEntity',
-    'Get-TableEntitiesByPartition', 'Invoke-GraphGet', 'Invoke-GraphBatch'
+    'Get-TableEntitiesByPartition', 'Invoke-GraphGet', 'Invoke-GraphBatch', 'Remove-ExpiredAnalysisHistory'
 )
 foreach ($mockedFunction in @($analyzerAst.FindAll({
     param($syntaxNode)
@@ -48,6 +48,13 @@ function Reset-AnalysisTestData {
     $analysisTestState.BatchCount = 0
     $analysisTestState.Audit = $null
     $analysisTestState.Summary = $null
+    $analysisTestState.HistoryCleanups = 0
+    $analysisTestState.LockHeldDuringCleanup = $true
+}
+
+function Remove-ExpiredAnalysisHistory {
+    $analysisTestState.HistoryCleanups++
+    if ($null -eq $analysisTestState.ActiveLock) { $analysisTestState.LockHeldDuringCleanup = $false }
 }
 
 function Initialize-ManagedIdentity {}
@@ -116,6 +123,8 @@ Test-Condition ($analysisTestState.BatchCount -eq 0 -and $analysisTestState.Summ
     'Preview must never submit Graph assignment requests.'
 Test-Condition ($analysisTestState.PostCount -eq 1 -and $analysisTestState.DeleteCount -eq 1 -and
     $null -eq $analysisTestState.ActiveLock) 'Preview must acquire and release the analysis lock.'
+Test-Condition ($analysisTestState.HistoryCleanups -eq 1 -and $analysisTestState.LockHeldDuringCleanup) `
+    'Audit retention must run once per analysis while the lock is held, including previews.'
 
 foreach ($applyParameters in @(@{ Preview = $false }, @{})) {
     Reset-AnalysisTestData
@@ -154,7 +163,8 @@ foreach ($lockScenario in @('InsertConflict', 'ActiveLock', 'StaleLock')) {
         $failureObserved = $true
     }
     Test-Condition $failureObserved 'Competing analyses must fail before evaluating assignments.'
-    Test-Condition ($analysisTestState.BatchCount -eq 0 -and $analysisTestState.DeleteCount -eq 0) `
-        'A failed lock acquisition must not submit updates or release another run''s lock.'
+    Test-Condition ($analysisTestState.BatchCount -eq 0 -and $analysisTestState.DeleteCount -eq 0 -and
+        $analysisTestState.HistoryCleanups -eq 0) `
+        'A failed lock acquisition must not submit updates, clean history, or release another run''s lock.'
 }
 Write-Output 'Analyzer Boolean input and lock tests passed.'

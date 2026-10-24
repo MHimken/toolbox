@@ -10,6 +10,9 @@
 .PARAMETER Preview
     Set to true to calculate and audit recommendations without changing Intune assignments.
     Defaults to false, which applies assignments. Accepts a Boolean Azure Automation input.
+.PARAMETER AuditRetentionDays
+    Days of audit rows and analysis run summaries to keep. Older rows are deleted in batches of up
+    to 100 rows while the analysis lock is held, also in preview runs. Defaults to 180.
 .NOTES
     Runtime: PowerShell 7.2
     Required module: Az.Accounts
@@ -45,6 +48,9 @@ param(
 
     [ValidateRange(1, 48)]
     [int]$StaleLockHours = 12,
+
+    [ValidateRange(7, 3650)]
+    [int]$AuditRetentionDays = 180,
 
     [bool]$Preview = $false
 )
@@ -222,6 +228,113 @@ function Get-TableEntitiesByPartition {
         $nextPartitionKey = [string]$response.Headers['x-ms-continuation-NextPartitionKey']
         $nextRowKey = [string]$response.Headers['x-ms-continuation-NextRowKey']
     } while (-not [string]::IsNullOrWhiteSpace($nextPartitionKey))
+}
+
+function Remove-TableEntity {
+    param(
+        [Parameter(Mandatory = $true)][string]$TableName,
+        [Parameter(Mandatory = $true)][string]$PartitionKey,
+        [Parameter(Mandatory = $true)][string]$RowKey
+    )
+
+    $headers = Get-StorageHeaders
+    $headers['If-Match'] = '*'
+    $uri = ConvertTo-EntityUri -TableName $TableName -PartitionKey $PartitionKey -RowKey $RowKey
+    try {
+        Invoke-RestWithRetry -Method Delete -Uri $uri -Headers $headers | Out-Null
+    } catch {
+        if ((Get-HttpStatusCode -ErrorRecord $_) -ne 404) { throw }
+    }
+}
+
+# Deletes up to 100 rows of one partition in a single entity group transaction.
+function Invoke-TableBatchDelete {
+    param(
+        [Parameter(Mandatory = $true)][string]$TableName,
+        [Parameter(Mandatory = $true)][string]$PartitionKey,
+        [Parameter(Mandatory = $true)][ValidateCount(1, 100)][string[]]$RowKeys
+    )
+
+    $batchBoundary = 'batch_{0}' -f [guid]::NewGuid()
+    $changesetBoundary = 'changeset_{0}' -f [guid]::NewGuid()
+    $payload = [Text.StringBuilder]::new()
+    [void]$payload.Append("--$batchBoundary`r`nContent-Type: multipart/mixed; boundary=$changesetBoundary`r`n`r`n")
+    $contentId = 0
+    foreach ($rowKey in $RowKeys) {
+        $contentId++
+        $entityUri = ConvertTo-EntityUri -TableName $TableName -PartitionKey $PartitionKey -RowKey $rowKey
+        [void]$payload.Append("--$changesetBoundary`r`nContent-Type: application/http`r`nContent-Transfer-Encoding: binary`r`n`r`n")
+        [void]$payload.Append("DELETE $($entityUri.AbsoluteUri) HTTP/1.1`r`nContent-ID: $contentId`r`nAccept: application/json;odata=minimalmetadata`r`nIf-Match: *`r`nDataServiceVersion: 3.0;`r`n`r`n")
+    }
+    [void]$payload.Append("--$changesetBoundary--`r`n--$batchBoundary--`r`n")
+
+    $headers = Get-StorageHeaders
+    $headers['Content-Type'] = "multipart/mixed; boundary=$batchBoundary"
+    $headers['DataServiceVersion'] = '3.0;'
+    $headers['MaxDataServiceVersion'] = '3.0;NetFx'
+    $body = [Text.Encoding]::UTF8.GetBytes($payload.ToString())
+    $response = Invoke-RestWithRetry -Method Post -Uri ('{0}/$batch' -f $script:StorageBaseUri) -Headers $headers -Body $body
+    $responseText = if ($response.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($response.Content) } else { [string]$response.Content }
+
+    $operationStatusCodes = @([regex]::Matches($responseText, '(?m)^HTTP/1\.1 (\d{3})') | ForEach-Object { [int]$_.Groups[1].Value })
+    $failedStatusCodes = @($operationStatusCodes | Where-Object { $_ -ge 300 })
+    if ($operationStatusCodes.Count -gt 0 -and $failedStatusCodes.Count -eq 0) { return }
+    # A row already deleted by a retried or concurrent request rolls back the whole changeset.
+    if ($failedStatusCodes -contains 404) {
+        foreach ($rowKey in $RowKeys) { Remove-TableEntity -TableName $TableName -PartitionKey $PartitionKey -RowKey $rowKey }
+        return
+    }
+    $responseExcerpt = $responseText.Substring(0, [math]::Min($responseText.Length, 1000))
+    throw "Batch delete failed for partition '$PartitionKey' in table '$TableName'. $responseExcerpt"
+}
+
+# Streams matching keys page by page and deletes them in per-partition batches of up to 100 rows.
+function Remove-TableEntityByFilter {
+    param(
+        [Parameter(Mandatory = $true)][string]$TableName,
+        [Parameter(Mandatory = $true)][string]$Filter
+    )
+
+    $removedCount = 0
+    $pendingPartitionKey = $null
+    $pendingRowKeys = [Collections.Generic.List[string]]::new()
+    $nextPartitionKey = $null
+    $nextRowKey = $null
+    do {
+        $uri = '{0}/{1}()?$filter={2}&$select=PartitionKey,RowKey' -f $script:StorageBaseUri, $TableName, [uri]::EscapeDataString($Filter)
+        if (-not [string]::IsNullOrWhiteSpace($nextPartitionKey)) {
+            $uri += '&NextPartitionKey={0}&NextRowKey={1}' -f [uri]::EscapeDataString($nextPartitionKey), [uri]::EscapeDataString($nextRowKey)
+        }
+        $response = Invoke-RestWithRetry -Method Get -Uri $uri -Headers (Get-StorageHeaders)
+        foreach ($entity in @(($response.Content | ConvertFrom-Json).value)) {
+            $entityPartitionKey = [string]$entity.PartitionKey
+            if ($pendingRowKeys.Count -gt 0 -and ($entityPartitionKey -cne $pendingPartitionKey -or $pendingRowKeys.Count -eq 100)) {
+                Invoke-TableBatchDelete -TableName $TableName -PartitionKey $pendingPartitionKey -RowKeys $pendingRowKeys.ToArray()
+                $removedCount += $pendingRowKeys.Count
+                $pendingRowKeys.Clear()
+            }
+            $pendingPartitionKey = $entityPartitionKey
+            $pendingRowKeys.Add([string]$entity.RowKey)
+        }
+        $nextPartitionKey = [string]$response.Headers['x-ms-continuation-NextPartitionKey']
+        $nextRowKey = [string]$response.Headers['x-ms-continuation-NextRowKey']
+    } while (-not [string]::IsNullOrWhiteSpace($nextPartitionKey))
+
+    if ($pendingRowKeys.Count -gt 0) {
+        Invoke-TableBatchDelete -TableName $TableName -PartitionKey $pendingPartitionKey -RowKeys $pendingRowKeys.ToArray()
+        $removedCount += $pendingRowKeys.Count
+    }
+    return $removedCount
+}
+
+# Audit partitions and run summary row keys start with the run's UTC timestamp (yyyyMMddTHHmmssZ).
+function Remove-ExpiredAnalysisHistory {
+    $expiredDate = [datetime]::UtcNow.Date.AddDays(-$AuditRetentionDays).ToString('yyyyMMdd')
+    $auditRowCount = Remove-TableEntityByFilter -TableName $AuditTableName -Filter "PartitionKey lt '$expiredDate'"
+    $summaryRowCount = Remove-TableEntityByFilter -TableName $StateTableName -Filter "PartitionKey eq 'AnalysisRuns' and RowKey lt '$expiredDate'"
+    if ($auditRowCount -gt 0 -or $summaryRowCount -gt 0) {
+        Write-Output "Removed $auditRowCount audit rows and $summaryRowCount run summaries dated before $expiredDate."
+    }
 }
 
 function Enter-AnalysisLock {
@@ -479,6 +592,8 @@ try {
         }
         throw
     } finally {
+        try { Remove-ExpiredAnalysisHistory }
+        catch { Write-Warning "Expired audit history could not be removed. $($_.Exception.Message)" }
         try { Exit-AnalysisLock }
         catch { Write-Warning "The analysis lock could not be released. $($_.Exception.Message)" }
     }

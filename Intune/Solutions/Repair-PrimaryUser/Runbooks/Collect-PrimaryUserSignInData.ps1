@@ -19,6 +19,10 @@
     identify completed UTC days and the end date must be on or after the start date.
 .PARAMETER ForceRecollect
     Set to true to replace a partition even when its state is Complete. Defaults to false.
+.PARAMETER RetentionDays
+    Days of aggregates to keep, counted back from the last collected date. After a successful job,
+    all older aggregate rows and collection state rows are deleted in batches of up to 100 rows,
+    including days that never completed. Defaults to 35.
 .NOTES
     Runtime: PowerShell 7.2
     Required module: Az.Accounts
@@ -158,7 +162,7 @@ function Get-StorageHeaders {
 
 function Invoke-RestWithRetry {
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('Get', 'Put', 'Delete')][string]$Method,
+        [Parameter(Mandatory = $true)][ValidateSet('Get', 'Post', 'Put', 'Delete')][string]$Method,
         [Parameter(Mandatory = $true)][uri]$Uri,
         [Parameter(Mandatory = $true)][hashtable]$Headers,
         [AllowNull()][byte[]]$Body
@@ -199,25 +203,101 @@ function Set-TableEntity {
     Invoke-RestWithRetry -Method Put -Uri $uri -Headers (Get-StorageHeaders -ForWrite) -Body $body | Out-Null
 }
 
-function Get-TableEntitiesByPartition {
+function Remove-TableEntity {
     param(
         [Parameter(Mandatory = $true)][string]$TableName,
-        [Parameter(Mandatory = $true)][string]$PartitionKey
+        [Parameter(Mandatory = $true)][string]$PartitionKey,
+        [Parameter(Mandatory = $true)][string]$RowKey
     )
 
+    $headers = Get-StorageHeaders
+    $headers['If-Match'] = '*'
+    $uri = ConvertTo-EntityUri -TableName $TableName -PartitionKey $PartitionKey -RowKey $RowKey
+    try {
+        Invoke-RestWithRetry -Method Delete -Uri $uri -Headers $headers | Out-Null
+    } catch {
+        if ((Get-HttpStatusCode -ErrorRecord $_) -ne 404) { throw }
+    }
+}
+
+# Deletes up to 100 rows of one partition in a single entity group transaction.
+function Invoke-TableBatchDelete {
+    param(
+        [Parameter(Mandatory = $true)][string]$TableName,
+        [Parameter(Mandatory = $true)][string]$PartitionKey,
+        [Parameter(Mandatory = $true)][ValidateCount(1, 100)][string[]]$RowKeys
+    )
+
+    $batchBoundary = 'batch_{0}' -f [guid]::NewGuid()
+    $changesetBoundary = 'changeset_{0}' -f [guid]::NewGuid()
+    $payload = [Text.StringBuilder]::new()
+    [void]$payload.Append("--$batchBoundary`r`nContent-Type: multipart/mixed; boundary=$changesetBoundary`r`n`r`n")
+    $contentId = 0
+    foreach ($rowKey in $RowKeys) {
+        $contentId++
+        $entityUri = ConvertTo-EntityUri -TableName $TableName -PartitionKey $PartitionKey -RowKey $rowKey
+        [void]$payload.Append("--$changesetBoundary`r`nContent-Type: application/http`r`nContent-Transfer-Encoding: binary`r`n`r`n")
+        [void]$payload.Append("DELETE $($entityUri.AbsoluteUri) HTTP/1.1`r`nContent-ID: $contentId`r`nAccept: application/json;odata=minimalmetadata`r`nIf-Match: *`r`nDataServiceVersion: 3.0;`r`n`r`n")
+    }
+    [void]$payload.Append("--$changesetBoundary--`r`n--$batchBoundary--`r`n")
+
+    $headers = Get-StorageHeaders
+    $headers['Content-Type'] = "multipart/mixed; boundary=$batchBoundary"
+    $headers['DataServiceVersion'] = '3.0;'
+    $headers['MaxDataServiceVersion'] = '3.0;NetFx'
+    $body = [Text.Encoding]::UTF8.GetBytes($payload.ToString())
+    $response = Invoke-RestWithRetry -Method Post -Uri ('{0}/$batch' -f $script:StorageBaseUri) -Headers $headers -Body $body
+    $responseText = if ($response.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($response.Content) } else { [string]$response.Content }
+
+    $operationStatusCodes = @([regex]::Matches($responseText, '(?m)^HTTP/1\.1 (\d{3})') | ForEach-Object { [int]$_.Groups[1].Value })
+    $failedStatusCodes = @($operationStatusCodes | Where-Object { $_ -ge 300 })
+    if ($operationStatusCodes.Count -gt 0 -and $failedStatusCodes.Count -eq 0) { return }
+    # A row already deleted by a retried or concurrent request rolls back the whole changeset.
+    if ($failedStatusCodes -contains 404) {
+        foreach ($rowKey in $RowKeys) { Remove-TableEntity -TableName $TableName -PartitionKey $PartitionKey -RowKey $rowKey }
+        return
+    }
+    $responseExcerpt = $responseText.Substring(0, [math]::Min($responseText.Length, 1000))
+    throw "Batch delete failed for partition '$PartitionKey' in table '$TableName'. $responseExcerpt"
+}
+
+# Streams matching keys page by page and deletes them in per-partition batches of up to 100 rows.
+function Remove-TableEntityByFilter {
+    param(
+        [Parameter(Mandatory = $true)][string]$TableName,
+        [Parameter(Mandatory = $true)][string]$Filter
+    )
+
+    $removedCount = 0
+    $pendingPartitionKey = $null
+    $pendingRowKeys = [Collections.Generic.List[string]]::new()
     $nextPartitionKey = $null
     $nextRowKey = $null
     do {
-        $partitionFilter = [uri]::EscapeDataString("PartitionKey eq '$($PartitionKey.Replace("'", "''"))'")
-        $uri = '{0}/{1}()?$filter={2}' -f $script:StorageBaseUri, $TableName, $partitionFilter
+        $uri = '{0}/{1}()?$filter={2}&$select=PartitionKey,RowKey' -f $script:StorageBaseUri, $TableName, [uri]::EscapeDataString($Filter)
         if (-not [string]::IsNullOrWhiteSpace($nextPartitionKey)) {
             $uri += '&NextPartitionKey={0}&NextRowKey={1}' -f [uri]::EscapeDataString($nextPartitionKey), [uri]::EscapeDataString($nextRowKey)
         }
         $response = Invoke-RestWithRetry -Method Get -Uri $uri -Headers (Get-StorageHeaders)
-        foreach ($entity in @(($response.Content | ConvertFrom-Json).value)) { Write-Output $entity }
+        foreach ($entity in @(($response.Content | ConvertFrom-Json).value)) {
+            $entityPartitionKey = [string]$entity.PartitionKey
+            if ($pendingRowKeys.Count -gt 0 -and ($entityPartitionKey -cne $pendingPartitionKey -or $pendingRowKeys.Count -eq 100)) {
+                Invoke-TableBatchDelete -TableName $TableName -PartitionKey $pendingPartitionKey -RowKeys $pendingRowKeys.ToArray()
+                $removedCount += $pendingRowKeys.Count
+                $pendingRowKeys.Clear()
+            }
+            $pendingPartitionKey = $entityPartitionKey
+            $pendingRowKeys.Add([string]$entity.RowKey)
+        }
         $nextPartitionKey = [string]$response.Headers['x-ms-continuation-NextPartitionKey']
         $nextRowKey = [string]$response.Headers['x-ms-continuation-NextRowKey']
     } while (-not [string]::IsNullOrWhiteSpace($nextPartitionKey))
+
+    if ($pendingRowKeys.Count -gt 0) {
+        Invoke-TableBatchDelete -TableName $TableName -PartitionKey $pendingPartitionKey -RowKeys $pendingRowKeys.ToArray()
+        $removedCount += $pendingRowKeys.Count
+    }
+    return $removedCount
 }
 
 function Remove-TablePartition {
@@ -226,12 +306,8 @@ function Remove-TablePartition {
         [Parameter(Mandatory = $true)][string]$PartitionKey
     )
 
-    foreach ($entity in @(Get-TableEntitiesByPartition -TableName $TableName -PartitionKey $PartitionKey)) {
-        $headers = Get-StorageHeaders
-        $headers['If-Match'] = '*'
-        $uri = ConvertTo-EntityUri -TableName $TableName -PartitionKey $PartitionKey -RowKey ([string]$entity.RowKey)
-        Invoke-RestWithRetry -Method Delete -Uri $uri -Headers $headers | Out-Null
-    }
+    $partitionFilter = "PartitionKey eq '$($PartitionKey.Replace("'", "''"))'"
+    Remove-TableEntityByFilter -TableName $TableName -Filter $partitionFilter | Out-Null
 }
 
 function Get-CollectionState {
@@ -263,17 +339,13 @@ function Invoke-GraphGet {
 function Remove-ExpiredDailyPartitions {
     param([Parameter(Mandatory = $true)][datetime]$CurrentDate)
 
+    # Date partition keys sort chronologically, so one range query finds every expired day,
+    # including days left incomplete by failed collections.
     $expiredDate = $CurrentDate.AddDays(-$RetentionDays).ToString('yyyyMMdd')
-    $expiredStateFilter = [uri]::EscapeDataString("PartitionKey eq 'Collection' and RowKey lt '$expiredDate' and Status eq 'Complete'")
-    $uri = '{0}/{1}()?$filter={2}' -f $script:StorageBaseUri, $StateTableName, $expiredStateFilter
-    $response = Invoke-RestWithRetry -Method Get -Uri $uri -Headers (Get-StorageHeaders)
-    foreach ($state in @(($response.Content | ConvertFrom-Json).value)) {
-        Remove-TablePartition -TableName $AggregateTableName -PartitionKey ([string]$state.RowKey)
-        $headers = Get-StorageHeaders
-        $headers['If-Match'] = '*'
-        $stateUri = ConvertTo-EntityUri -TableName $StateTableName -PartitionKey 'Collection' -RowKey ([string]$state.RowKey)
-        Invoke-RestWithRetry -Method Delete -Uri $stateUri -Headers $headers | Out-Null
-        Write-Output "Removed expired aggregate partition $($state.RowKey)."
+    $aggregateRowCount = Remove-TableEntityByFilter -TableName $AggregateTableName -Filter "PartitionKey lt '$expiredDate'"
+    $stateRowCount = Remove-TableEntityByFilter -TableName $StateTableName -Filter "PartitionKey eq 'Collection' and RowKey lt '$expiredDate'"
+    if ($aggregateRowCount -gt 0 -or $stateRowCount -gt 0) {
+        Write-Output "Removed $aggregateRowCount aggregate rows and $stateRowCount collection state rows dated before $expiredDate."
     }
 }
 
@@ -352,7 +424,6 @@ function Invoke-DailyCollection {
         AggregateRows = $aggregates.Count
     }
 
-    Remove-ExpiredDailyPartitions -CurrentDate $targetDate
     Write-Output "Collected $eventCount successful sign-ins into $($aggregates.Count) aggregate rows for $($targetDate.ToString('yyyy-MM-dd'))."
 }
 
@@ -392,6 +463,7 @@ try {
     for ($targetDate = $firstDate; $targetDate -le $lastDate; $targetDate = $targetDate.AddDays(1)) {
         Invoke-DailyCollection -TargetDate $targetDate
     }
+    Remove-ExpiredDailyPartitions -CurrentDate $lastDate
 } finally {
     $ErrorActionPreference = $script:OriginalErrorActionPreference
 }

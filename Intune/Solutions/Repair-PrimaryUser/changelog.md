@@ -2,6 +2,13 @@
 
 ## 2026
 
+### 24th of October
+
+* Sped up table deletes: both runbooks now delete rows in Table Storage entity group transactions of up to 100 rows, query only `PartitionKey` and `RowKey`, and stream results page by page. Batches rolled back by an already-deleted row fall back to single deletes that ignore HTTP 404.
+* Collector retention now removes every expired aggregate and collection state row with one range query, including days left incomplete by failed collections. It runs once per job relative to the last collected date instead of after every day, and follows all result pages.
+* Added `AuditRetentionDays` (default 180) to the analyzer. Expired `PrimaryUserAudit` partitions and `AnalysisRuns` summaries are deleted at the end of each run while the analysis lock is held; cleanup failures only produce a warning.
+* Added `Tests\TableRetention.Tests.ps1`.
+
 ### 23rd of October
 
 * Fixed analysis lock creation failing with HTTP 400: Table Storage Insert Entity requests must not include `If-None-Match`. Duplicate inserts still fail with HTTP 409 and stop competing analyses.
