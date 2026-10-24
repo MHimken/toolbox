@@ -19,7 +19,7 @@
     Approves downloading a temporary Microsoft-signed Bicep executable on Windows when Bicep is not
     available on PATH. Without this switch, the script asks before downloading it.
 .NOTES
-    Run this deployment script from PowerShell 7.2 on an administration workstation or Azure Cloud Shell.
+    Run this deployment script from PowerShell 7.2 or later on an administration workstation or Azure Cloud Shell.
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]

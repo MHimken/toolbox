@@ -14,7 +14,7 @@
     Days of audit rows and analysis run summaries to keep. Older rows are deleted in batches of up
     to 100 rows while the analysis lock is held, also in preview runs. Defaults to 180.
 .NOTES
-    Runtime: PowerShell 7.2
+    Runtime: PowerShell 7.2 or later
     Required module: Az.Accounts
     Graph application permission: DeviceManagementManagedDevices.ReadWrite.All
     Azure role: Storage Table Data Contributor

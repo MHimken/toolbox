@@ -1,6 +1,6 @@
 # Repair Primary User
 
-This Azure Automation solution repairs Microsoft Intune primary-user assignments from successful Windows sign-ins. It uses two independently scheduled PowerShell 7.2 runbooks and compact Azure Table aggregates.
+This Azure Automation solution repairs Microsoft Intune primary-user assignments from successful Windows sign-ins. It uses two independently scheduled PowerShell 7 runbooks and compact Azure Table aggregates. The scripts require PowerShell 7.2 or later; any newer 7.x version works as well.
 
 ## Architecture
 
@@ -18,7 +18,7 @@ The deployment creates:
 - `PrimaryUserDaily`, `PrimaryUserState`, and `PrimaryUserAudit` Azure Tables.
 - One Azure Automation Account with a system-assigned managed identity.
 - `Storage Table Data Contributor` assignments scoped to the three solution tables.
-- Published PowerShell 7.2 daily and weekly runbooks with UTC schedules.
+- Published daily and weekly runbooks with UTC schedules. They are imported with the PowerShell 7.2 runtime; you can switch them to a newer PowerShell 7.x runtime in the Automation Account.
 
 The managed identity requires these Microsoft Graph application permissions:
 
@@ -29,7 +29,7 @@ The deployment script can grant both permissions. The administrator running it n
 
 ## Deployment
 
-Run the deployment from PowerShell 7.2 on an administration workstation or Azure Cloud Shell. The script uses `bicep` from PATH if available. On Windows, if it is missing, the script asks to download a temporary Bicep executable from the official Azure Bicep release. Use `-InstallTemporaryBicep` to approve this download without a prompt.
+Run the deployment from PowerShell 7.2 or later on an administration workstation or Azure Cloud Shell. The script uses `bicep` from PATH if available. On Windows, if it is missing, the script asks to download a temporary Bicep executable from the official Azure Bicep release. Use `-InstallTemporaryBicep` to approve this download without a prompt.
 
 The downloaded executable must have a valid Microsoft Authenticode signature before it is run. It is added to PATH only for this deployment; the original PATH is restored and the temporary directory is removed on success or failure. No administrator rights are normally required. On other platforms, install Bicep on PATH before deploying.
 

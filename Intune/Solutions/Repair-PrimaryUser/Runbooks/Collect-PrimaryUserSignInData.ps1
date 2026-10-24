@@ -24,7 +24,7 @@
     all older aggregate rows and collection state rows are deleted in batches of up to 100 rows,
     including days that never completed. Defaults to 35.
 .NOTES
-    Runtime: PowerShell 7.2
+    Runtime: PowerShell 7.2 or later
     Required module: Az.Accounts
     Graph application permission: AuditLog.Read.All
     Azure role: Storage Table Data Contributor
