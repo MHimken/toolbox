@@ -16,6 +16,9 @@ param automationAccountName string
 @description('Tags applied to resources that support tags.')
 param tags object = {}
 
+@description('Creates table role assignments. Set to false when the deploying account cannot write role assignments.')
+param assignTableRoles bool = true
+
 var storageTableDataContributorRoleDefinitionId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
   '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
@@ -77,7 +80,7 @@ resource automationAccount 'Microsoft.Automation/automationAccounts@2023-11-01' 
   }
 }
 
-resource dailyAggregatesContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource dailyAggregatesContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (assignTableRoles) {
   name: guid(dailyAggregates.id, automationAccount.id, storageTableDataContributorRoleDefinitionId)
   scope: dailyAggregates
   properties: {
@@ -87,7 +90,7 @@ resource dailyAggregatesContributor 'Microsoft.Authorization/roleAssignments@202
   }
 }
 
-resource workflowStateContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource workflowStateContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (assignTableRoles) {
   name: guid(workflowState.id, automationAccount.id, storageTableDataContributorRoleDefinitionId)
   scope: workflowState
   properties: {
@@ -97,7 +100,7 @@ resource workflowStateContributor 'Microsoft.Authorization/roleAssignments@2022-
   }
 }
 
-resource assignmentAuditContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource assignmentAuditContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (assignTableRoles) {
   name: guid(assignmentAudit.id, automationAccount.id, storageTableDataContributorRoleDefinitionId)
   scope: assignmentAudit
   properties: {
@@ -111,8 +114,10 @@ output automationAccountName string = automationAccount.name
 output automationManagedIdentityPrincipalId string = automationAccount.identity.principalId
 output storageAccountName string = storageAccount.name
 output tableEndpoint string = storageAccount.properties.primaryEndpoints.table
-output tableRoleAssignmentIds array = [
-  dailyAggregatesContributor.id
-  workflowStateContributor.id
-  assignmentAuditContributor.id
-]
+output tableRoleAssignmentIds array = assignTableRoles
+  ? [
+      dailyAggregatesContributor.id
+      workflowStateContributor.id
+      assignmentAuditContributor.id
+    ]
+  : []

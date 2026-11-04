@@ -60,7 +60,7 @@ See the [Intune remediation changelog](Intune/Remediations/changelog.md) for det
 
 | Script | Description | Status | Last updated |
 | --- | --- | --- | --- |
-| [LDAPSigningAnalyzer.ps1](Defender/LDAPSigningAnalyzer.ps1) | Analyzes LDAP signing configuration and related domain controller events. | Finished | 2026-08-30 |
+| [LDAPSigningAnalyzer.ps1](Defender/LDAPSigningAnalyzer.ps1) | Analyzes LDAP signing configuration and related events on one or more domain controllers, with automatic domain controller detection. | Finished | 2026-11-04 |
 | [NTLMAuditAnalyse.ps1](Defender/NTLMAuditAnalyse.ps1) | Collects and exports NTLM audit data. | Finished | 2026-08-30 |
 | [Set-WindowsProductKey.ps1](Defender/Set-WindowsProductKey.ps1) | Installs and activates a Windows product key from a Defender Live Response session. | Finished | 2026-08-30 |
 

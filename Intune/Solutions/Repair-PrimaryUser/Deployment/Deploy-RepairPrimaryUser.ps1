@@ -7,6 +7,10 @@
     weekly UTC schedules, and optionally grants the required Microsoft Graph application permissions
     to the Automation Account system-assigned managed identity. Saves configuration, resource IDs,
     and completed stages to a local JSON checkpoint so interrupted deployments can continue.
+    Finds each runbook in the parent Runbooks folder first, then beside this deployment script.
+    When the signed-in account cannot create Azure role assignments, for example with only the
+    Contributor role, deploys everything else and prints the table role assignments that an
+    administrator must create. A later -Resume verifies them and completes the deployment.
 .PARAMETER DeploymentStatePath
     Checkpoint file path. Defaults to .repair-primary-user-deployment-state.json beside this script.
 .PARAMETER Resume
@@ -72,6 +76,10 @@ $script:OriginalErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = 'Stop'
 $script:OriginalPath = $env:PATH
 $script:TemporaryBicepDirectory = $null
+# ParentResourceNotFound is returned for child resources, such as tables, when the storage account is missing.
+$script:AzureNotFoundErrorCodes = @('ResourceNotFound', 'ResourceGroupNotFound', 'ParentResourceNotFound', 'RoleAssignmentNotFound')
+$script:StorageTableDataContributorRoleId = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
+$script:MissingTableRoleScopes = @()
 
 function Confirm-Action {
     param([Parameter(Mandatory = $true)][string]$Message)
@@ -219,7 +227,7 @@ function Test-AzureResourceNotFound {
             Write-Verbose 'The Azure error response did not contain a JSON error code.'
         }
     }
-    return $azureErrorCode -in @('ResourceNotFound', 'ResourceGroupNotFound') -or
+    return $azureErrorCode -in $script:AzureNotFoundErrorCodes -or
         $OperationError.FullyQualifiedErrorId -like '*ResourceNotFound*' -or
         $OperationError.FullyQualifiedErrorId -like '*ResourceGroupNotFound*'
 }
@@ -236,16 +244,41 @@ function Get-DeploymentResource {
     }
     try {
         $response = Invoke-AzRestMethod -Path "$ResourceId`?api-version=$resourceApiVersion" -Method GET -ErrorAction Stop
-        $resource = $response.Content | ConvertFrom-Json -AsHashtable -ErrorAction Stop
-        if ($resource -isnot [System.Collections.IDictionary] -or
-            [string]$resource.id -ine $ResourceId) {
-            throw "Azure returned an unexpected resource for '$ResourceId'."
-        }
-        return [pscustomobject]@{ ResourceId = [string]$resource.id }
     } catch {
         if (Test-AzureResourceNotFound -OperationError $_) { return $null }
         throw
     }
+    if ($null -eq $response -or $null -eq $response.PSObject.Properties['StatusCode'] -or
+        $null -eq $response.PSObject.Properties['Content']) {
+        throw "Azure returned an invalid HTTP response for '$ResourceId'."
+    }
+
+    $statusCode = [int]$response.StatusCode
+    if ($statusCode -lt 200 -or $statusCode -ge 300) {
+        $errorBody = [string]$response.Content
+        if ($statusCode -eq 404) {
+            try {
+                $azureError = ConvertFrom-Json -InputObject $errorBody -AsHashtable -ErrorAction Stop
+            } catch {
+                throw "Azure resource lookup failed for '$ResourceId' (HTTP $statusCode). Response: $errorBody"
+            }
+            if ($azureError -is [System.Collections.IDictionary] -and
+                $azureError.Contains('error') -and
+                $azureError['error'] -is [System.Collections.IDictionary] -and
+                $azureError['error'].Contains('code') -and
+                [string]$azureError['error']['code'] -in $script:AzureNotFoundErrorCodes) {
+                return $null
+            }
+        }
+        throw "Azure resource lookup failed for '$ResourceId' (HTTP $statusCode). Response: $errorBody"
+    }
+
+    $resource = $response.Content | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+    if ($resource -isnot [System.Collections.IDictionary] -or
+        -not $resource.Contains('id') -or [string]$resource['id'] -ine $ResourceId) {
+        throw "Azure returned an unexpected resource for '$ResourceId'."
+    }
+    return [pscustomobject]@{ ResourceId = [string]$resource['id'] }
 }
 
 function Update-DeploymentResourceInventory {
@@ -282,7 +315,121 @@ function Update-DeploymentResourceInventory {
     } else {
         $script:DeploymentState.managedIdentityPrincipalId = ''
     }
-    return $allResourcesPresent -and @($script:DeploymentState.roleAssignmentIds).Count -eq 3
+    $tableRolesReady = (Get-TableRoleAssignmentMode) -eq 'Manual' -or @($script:DeploymentState.roleAssignmentIds).Count -eq 3
+    return $allResourcesPresent -and $tableRolesReady
+}
+
+function Get-TableRoleAssignmentMode {
+    # Older checkpoints do not contain this key and always used template-managed role assignments.
+    if ($script:DeploymentState.Contains('tableRoleAssignmentMode') -and
+        $script:DeploymentState['tableRoleAssignmentMode'] -eq 'Manual') {
+        return 'Manual'
+    }
+    return 'Template'
+}
+
+function Test-TableRoleAssignmentDeploymentBlocked {
+    param([System.Management.Automation.ErrorRecord]$OperationError)
+
+    $errorMessages = @()
+    if ($null -ne $OperationError.ErrorDetails) { $errorMessages += $OperationError.ErrorDetails.Message }
+    $exception = $OperationError.Exception
+    while ($null -ne $exception) {
+        $errorMessages += $exception.Message
+        $exception = $exception.InnerException
+    }
+    # RoleAssignmentExists means an administrator already created the assignment under another name.
+    return ($errorMessages -join ' ') -match 'Microsoft\.Authorization/roleAssignments/write|RoleAssignmentExists'
+}
+
+function Invoke-AzureFoundationDeployment {
+    param([Parameter(Mandatory = $true)][bool]$AssignTableRoles)
+
+    $templateParameters = @{
+        location              = $Location
+        storageAccountName    = $StorageAccountName
+        automationAccountName = $script:ResolvedAutomationAccountName
+        assignTableRoles      = $AssignTableRoles
+    }
+    $deployment = New-AzResourceGroupDeployment -Name "RepairPrimaryUser-$([datetime]::UtcNow.ToString('yyyyMMddHHmmss'))" `
+        -ResourceGroupName $ResourceGroupName -TemplateFile $script:TemplatePath -TemplateParameterObject $templateParameters `
+        -Mode Incremental -ErrorAction Stop
+    if ($deployment.ProvisioningState -ne 'Succeeded') { throw "Azure deployment completed with state '$($deployment.ProvisioningState)'." }
+    return $deployment
+}
+
+function Get-MissingTableRoleAssignmentScope {
+    param([Parameter(Mandatory = $true)][guid]$PrincipalId)
+
+    $storageId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts/$StorageAccountName"
+    $tableIds = @('PrimaryUserDaily', 'PrimaryUserState', 'PrimaryUserAudit' | ForEach-Object {
+        "$storageId/tableServices/default/tables/$_"
+    })
+    # A principal filter returns assignments at, above, and below the storage account scope.
+    $principalFilter = [uri]::EscapeDataString("principalId eq '$PrincipalId'")
+    $response = Invoke-AzRestMethod -Method GET -ErrorAction Stop `
+        -Path "$storageId/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&`$filter=$principalFilter"
+    if ($null -eq $response -or $null -eq $response.PSObject.Properties['StatusCode'] -or
+        $null -eq $response.PSObject.Properties['Content']) {
+        throw "Azure returned an invalid HTTP response for the role assignments of '$storageId'."
+    }
+    $statusCode = [int]$response.StatusCode
+    if ($statusCode -lt 200 -or $statusCode -ge 300) {
+        throw "Azure role assignment lookup failed for '$storageId' (HTTP $statusCode). Response: $($response.Content)"
+    }
+    $assignmentList = ConvertFrom-Json -InputObject ([string]$response.Content) -AsHashtable -ErrorAction Stop
+    if ($assignmentList -isnot [System.Collections.IDictionary] -or -not $assignmentList.Contains('value')) {
+        throw "Azure returned an unexpected role assignment list for '$storageId'."
+    }
+
+    $assignedScopes = @(foreach ($assignment in @($assignmentList['value'])) {
+        if ($assignment -isnot [System.Collections.IDictionary] -or
+            $assignment['properties'] -isnot [System.Collections.IDictionary]) { continue }
+        $assignedScope = ([string]$assignment['properties']['scope']).TrimEnd('/')
+        if (-not [string]::IsNullOrWhiteSpace($assignedScope) -and
+            [string]$assignment['properties']['roleDefinitionId'] -like "*/roleDefinitions/$script:StorageTableDataContributorRoleId") {
+            $assignedScope
+        }
+    })
+    return @($tableIds | Where-Object {
+        $tableId = $_
+        @($assignedScopes | Where-Object {
+            $tableId -ieq $_ -or $tableId.StartsWith("$_/", [StringComparison]::OrdinalIgnoreCase)
+        }).Count -eq 0
+    })
+}
+
+function Write-TableRoleAssignmentInstruction {
+    param(
+        [Parameter(Mandatory = $true)][guid]$PrincipalId,
+        [Parameter(Mandatory = $true)][string[]]$Scope
+    )
+
+    $scopeLines = ($Scope | ForEach-Object { "    '$_'" }) -join [Environment]::NewLine
+    $scriptPath = $PSCommandPath.Replace("'", "''")
+    $statePath = $script:DeploymentStatePath.Replace("'", "''")
+    Write-Warning "Deployment is incomplete. The Automation Account managed identity needs Storage Table Data Contributor on $($Scope.Count) table(s). The runbooks cannot use their tables until these role assignments exist."
+    Write-Output @"
+
+MANUAL STEP: Ask an account with Owner, User Access Administrator, or Role Based Access Control Administrator
+rights on storage account '$StorageAccountName' to run:
+
+Connect-AzAccount -Tenant '$TenantId' -Subscription '$SubscriptionId'
+`$principalId = '$PrincipalId'
+foreach (`$tableScope in @(
+$scopeLines
+)) {
+    New-AzRoleAssignment -ObjectId `$principalId -ObjectType ServicePrincipal -RoleDefinitionName 'Storage Table Data Contributor' -Scope `$tableScope
+}
+
+Azure portal alternative: Storage account '$StorageAccountName' > Access control (IAM) > Add role assignment >
+Storage Table Data Contributor > Managed identity > Automation Account '$script:ResolvedAutomationAccountName'.
+This storage account scope covers all solution tables.
+
+Afterwards, verify the role assignments and complete the deployment with:
+& '$scriptPath' -Resume -DeploymentStatePath '$statePath'
+
+"@
 }
 
 function Initialize-Bicep {
@@ -426,6 +573,19 @@ function Grant-ManagedIdentityGraphPermissions {
     }
 }
 
+function Get-SolutionRunbookPath {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $candidatePaths = @(
+        (Join-Path -Path $script:SolutionRoot -ChildPath "Runbooks\$Name")
+        (Join-Path -Path $PSScriptRoot -ChildPath $Name)
+    )
+    foreach ($candidatePath in $candidatePaths) {
+        if (Test-Path -LiteralPath $candidatePath -PathType Leaf) { return $candidatePath }
+    }
+    throw "Required runbook '$Name' was not found. Checked: $($candidatePaths -join '; ')."
+}
+
 function Import-SolutionRunbook {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -502,11 +662,14 @@ try {
     Initialize-DeploymentState -DeploymentArguments $PSBoundParameters
     $script:SolutionRoot = Split-Path -Path $PSScriptRoot -Parent
     $script:TemplatePath = Join-Path -Path $PSScriptRoot -ChildPath 'main.bicep'
-    $collectorPath = Join-Path -Path $script:SolutionRoot -ChildPath 'Runbooks\Collect-PrimaryUserSignInData.ps1'
-    $analyzerPath = Join-Path -Path $script:SolutionRoot -ChildPath 'Runbooks\Repair-PrimaryUserAssignments.ps1'
-    foreach ($path in @($script:TemplatePath, $collectorPath, $analyzerPath)) {
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required deployment file was not found: $path" }
+    if (-not (Test-Path -LiteralPath $script:TemplatePath -PathType Leaf)) {
+        throw "Required deployment file was not found: $script:TemplatePath"
     }
+    if ((Get-Content -LiteralPath $script:TemplatePath -Raw) -notmatch '(?m)^\s*param\s+assignTableRoles\s+bool\b') {
+        throw "The template '$script:TemplatePath' is from an older version. Copy main.bicep from the same version as this script."
+    }
+    $collectorPath = Get-SolutionRunbookPath -Name 'Collect-PrimaryUserSignInData.ps1'
+    $analyzerPath = Get-SolutionRunbookPath -Name 'Repair-PrimaryUserAssignments.ps1'
     $collectorTime = [timespan]::ParseExact($CollectorStartTimeUtc, 'hh\:mm', [Globalization.CultureInfo]::InvariantCulture)
     $analyzerTime = [timespan]::ParseExact($AnalyzerStartTimeUtc, 'hh\:mm', [Globalization.CultureInfo]::InvariantCulture)
     if ($analyzerTime -lt $collectorTime.Add([timespan]::FromHours(1))) {
@@ -543,11 +706,24 @@ try {
             if ($null -eq $resourceGroup) {
                 New-AzResourceGroup -Name $ResourceGroupName -Location $Location -ErrorAction Stop | Out-Null
             }
-            $deployment = New-AzResourceGroupDeployment -Name "RepairPrimaryUser-$([datetime]::UtcNow.ToString('yyyyMMddHHmmss'))" `
-                -ResourceGroupName $ResourceGroupName -TemplateFile $script:TemplatePath -location $Location -Mode Incremental `
-                -storageAccountName $StorageAccountName -automationAccountName $script:ResolvedAutomationAccountName -ErrorAction Stop
-            if ($deployment.ProvisioningState -ne 'Succeeded') { throw "Azure deployment completed with state '$($deployment.ProvisioningState)'." }
-            $script:DeploymentState.roleAssignmentIds = @($deployment.Outputs.tableRoleAssignmentIds.Value)
+            $assignTableRoles = (Get-TableRoleAssignmentMode) -eq 'Template'
+            try {
+                $deployment = Invoke-AzureFoundationDeployment -AssignTableRoles $assignTableRoles
+            } catch {
+                if (-not $assignTableRoles -or -not (Test-TableRoleAssignmentDeploymentBlocked -OperationError $_)) { throw }
+                Write-Verbose "Template role assignment error: $($_.Exception.Message)"
+                Write-Warning ('This deployment cannot create the Storage Table Data Contributor role assignments. The signed-in account ' +
+                    'lacks Microsoft.Authorization/roleAssignments/write (for example, it has only Contributor), or the assignments ' +
+                    'already exist outside this template. Deploying the remaining resources; existing role assignments are verified next.')
+                $assignTableRoles = $false
+                $script:DeploymentState.tableRoleAssignmentMode = 'Manual'
+                Write-DeploymentState
+                $deployment = Invoke-AzureFoundationDeployment -AssignTableRoles $false
+            }
+            $script:DeploymentState.roleAssignmentIds = @()
+            if ($assignTableRoles) {
+                $script:DeploymentState.roleAssignmentIds = @($deployment.Outputs.tableRoleAssignmentIds.Value)
+            }
             if (-not (Update-DeploymentResourceInventory)) { throw 'Azure deployment completed, but the expected resources could not all be verified.' }
             Write-DeploymentState -Stage 'AzureResourcesReady' -Fingerprint $templateFingerprint
         } else {
@@ -555,6 +731,14 @@ try {
         }
 
         $principalId = [guid]$script:DeploymentState.managedIdentityPrincipalId
+        if ((Get-TableRoleAssignmentMode) -eq 'Manual') {
+            $script:MissingTableRoleScopes = @(Get-MissingTableRoleAssignmentScope -PrincipalId $principalId)
+            if ($script:MissingTableRoleScopes.Count -eq 0) {
+                Write-Output 'Verified the manually created Storage Table Data Contributor role assignments.'
+            } else {
+                Write-Warning 'Table role assignments are missing. Continuing with the remaining steps; the manual steps are listed at the end.'
+            }
+        }
         if (-not $SkipGraphPermissionGrant) {
             if (-not $PSCmdlet.ShouldProcess([string]$principalId, 'Grant required Microsoft Graph application permissions')) {
                 throw 'Graph permission reconciliation was declined. Resume to finish, or use -SkipGraphPermissionGrant when granting permissions separately.'
@@ -599,6 +783,11 @@ try {
         }
 
         $script:DeploymentState.currentStage = ''
+        if ($script:MissingTableRoleScopes.Count -gt 0) {
+            Write-DeploymentState
+            Write-TableRoleAssignmentInstruction -PrincipalId $principalId -Scope $script:MissingTableRoleScopes
+            return
+        }
         $script:DeploymentState.deploymentCompleted = $true
         Write-DeploymentState
         Write-Output "Deployment complete. Daily collection: $CollectorStartTimeUtc UTC. Weekly analysis: $AnalyzerDayOfWeek $AnalyzerStartTimeUtc UTC."
@@ -611,6 +800,10 @@ try {
             } catch {
                 Write-Warning "Could not refresh the deployment checkpoint after failure: $($_.Exception.Message)"
             }
+        }
+        # A later stage failure, such as missing Graph rights, must not hide the pending manual role assignments.
+        if ($script:MissingTableRoleScopes.Count -gt 0) {
+            Write-TableRoleAssignmentInstruction -PrincipalId $principalId -Scope $script:MissingTableRoleScopes
         }
         throw
     } finally {

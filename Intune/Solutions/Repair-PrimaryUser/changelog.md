@@ -2,6 +2,12 @@
 
 ## 2026
 
+### 3rd of November
+
+* The deployment script now finds each runbook in `..\Runbooks` first, then beside the deployment script. A missing runbook stops the deployment before the checkpoint changes and lists both checked paths.
+* Fixed a strict-mode `id` property error during resource inventory: `Invoke-AzRestMethod` error responses are now checked by HTTP status. Not-found codes, including `ParentResourceNotFound` for tables of a missing storage account, mark resources as missing. Other errors stop with the HTTP status and response.
+* Accounts without `Microsoft.Authorization/roleAssignments/write`, such as `Contributor`, can now deploy. `main.bicep` has a new `assignTableRoles` parameter. When ARM denies the table role assignments, or reports them as already existing, the script redeploys without them. It finishes the remaining stages and prints the manual `Storage Table Data Contributor` assignment steps. `-Resume` verifies those assignments before marking the deployment complete.
+
 ### 24th of October
 
 * Sped up table deletes: both runbooks now delete rows in Table Storage entity group transactions of up to 100 rows, query only `PartitionKey` and `RowKey`, and stream results page by page. Batches rolled back by an already-deleted row fall back to single deletes that ignore HTTP 404.

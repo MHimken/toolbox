@@ -1,10 +1,13 @@
 <#
 .SYNOPSIS
-Analyzes LDAP signing related Directory Service events and shows unsigned or failing LDAP requests.
+Analyzes LDAP signing related Directory Service events on one or more domain controllers and shows unsigned or failing LDAP requests.
 
 .DESCRIPTION
-Collects LDAP signing and LDAP channel binding events using Get-WinEvent with an XPath filter and presents
-findings in Out-GridView. The script includes event id, event name, source, and account information when available.
+Collects LDAP signing and LDAP channel binding events using Get-WinEvent with an XPath filter from each target domain controller
+and presents findings in Out-GridView. When no domain controller is specified, the script autodetects all domain controllers of
+the current domain through Active Directory, uses the DNS SRV record _ldap._tcp.dc._msdcs.<domain> as fallback, and queries each
+detected domain controller. Domain controllers that cannot be queried are logged and the remaining domain controllers are still
+processed. The script includes the reporting domain controller, event id, event name, source, and account information when available.
 
 .PARAMETER LogPath
 Specifies the log directory path. The default value is the script folder.
@@ -14,23 +17,37 @@ Specifies the log file name. If omitted, a file name is generated automatically 
 and an ISO 8601 24-hour timestamp.
 
 .PARAMETER ComputerName
-Specifies the server whose Directory Service log should be queried. The default is the local computer.
-When a remote server is specified, local registry and audit policy checks are skipped and assumed to be configured correctly.
+Specifies one or more domain controllers whose Directory Service log should be queried. Accepts an array of names or a
+comma-separated list. When omitted, all domain controllers of the current domain are autodetected and queried.
+For the local computer, LDAP signing audit prerequisites are checked and configured. For remote domain controllers,
+registry and audit policy checks are skipped and assumed to be configured correctly.
+
+.EXAMPLE
+.\LDAPSigningAnalyzer.ps1
+Autodetects all domain controllers of the current domain and queries each of them.
+
+.EXAMPLE
+.\LDAPSigningAnalyzer.ps1 -ComputerName DC01, DC02.contoso.com
+Queries the Directory Service log of the domain controllers DC01 and DC02.contoso.com.
+
+.EXAMPLE
+pwsh.exe -File .\LDAPSigningAnalyzer.ps1 -ComputerName "DC01,DC02"
+Queries DC01 and DC02. The comma-separated list is split into individual domain controller names.
 
 .NOTES
-Version: 0.1
+Version: 0.2
 Author: Martin Himken
 Original script name: LDAPSigningAnalyzer.ps1
 Initial creation date: 2026-07-22
-Last change: 2026-08-13
-Changes: Add LDAP channel binding events 3039-3041 and 3074-3075 and query all supported LDAP security events
+Last change: 2026-11-04
+Changes: ComputerName accepts multiple domain controllers. All domain controllers of the current domain are autodetected and queried when no ComputerName is provided.
 #>
 
 [CmdletBinding()]
 param(
 	[string]$LogPath = $PSScriptRoot,
 	[string]$LogFile = $null,
-	[string]$ComputerName = $env:COMPUTERNAME
+	[string[]]$ComputerName
 )
 
 function Write-Log {
@@ -77,7 +94,6 @@ function Initialize-Script {
 	$Script:DateTime = Get-Date -Format 'yyyy-MM-ddTHH-mm-ss'
 	$DefinedScriptName = 'LDAPSigningAnalyzer'
 	$SanitizedScriptName = $DefinedScriptName -replace '\s+', ''
-	$Script:IsRemoteTarget = $ComputerName -notin @('.', 'localhost', $env:COMPUTERNAME)
 
 	if (-not $LogPath) {
 		$LogPath = $PSScriptRoot
@@ -93,6 +109,116 @@ function Initialize-Script {
 
 	$Script:LogFile = Join-Path -Path $LogPath -ChildPath $LogFile
 	Write-Log -Message "Script initialized. Log file path: $($Script:LogFile)" -Component 'Initialize-Script' -Type 1
+	$Script:LocalComputerNames = @(Get-LocalComputerName)
+}
+
+function Get-LocalComputerName {
+	$localNames = @('.', 'localhost', '127.0.0.1', '::1', $env:COMPUTERNAME)
+
+	try {
+		$ipGlobalProperties = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties()
+		$localNames += $ipGlobalProperties.HostName
+		if ($ipGlobalProperties.DomainName) {
+			$localNames += "$($ipGlobalProperties.HostName).$($ipGlobalProperties.DomainName)"
+		}
+	} catch {
+		Write-Log -Message "Could not read the local DNS host name. $($_.Exception.Message)" -Component 'Get-LocalComputerName' -Type 2
+	}
+
+	return $localNames | Where-Object { $_ } | Sort-Object -Unique
+}
+
+function Get-LdapSigningDomainController {
+	$domainControllerNames = [System.Collections.Generic.List[string]]::new()
+
+	try {
+		$currentDomain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
+		try {
+			foreach ($domainController in $currentDomain.DomainControllers) {
+				if ($domainController.Name) {
+					$domainControllerNames.Add($domainController.Name)
+				}
+			}
+			Write-Log -Message "Active Directory returned $($domainControllerNames.Count) domain controller(s) for domain '$($currentDomain.Name)'." -Component 'Get-LdapSigningDomainController' -Type 1
+		} finally {
+			$currentDomain.Dispose()
+		}
+	} catch {
+		Write-Log -Message "Domain controller discovery through Active Directory failed. $($_.Exception.Message)" -Component 'Get-LdapSigningDomainController' -Type 2
+	}
+
+	if ($domainControllerNames.Count -eq 0) {
+		$domainName = $env:USERDNSDOMAIN
+		if (-not $domainName) {
+			try {
+				$computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+				if ($computerSystem.PartOfDomain) {
+					$domainName = $computerSystem.Domain
+				}
+			} catch {
+				Write-Log -Message "Could not determine the domain of the local computer. $($_.Exception.Message)" -Component 'Get-LdapSigningDomainController' -Type 2
+			}
+		}
+
+		if ($domainName) {
+			$srvRecordName = "_ldap._tcp.dc._msdcs.$domainName"
+			try {
+				$srvRecords = @(Resolve-DnsName -Name $srvRecordName -Type SRV -ErrorAction Stop | Where-Object { $_.Type -eq 'SRV' -and $_.NameTarget })
+				foreach ($srvRecord in $srvRecords) {
+					$domainControllerNames.Add($srvRecord.NameTarget.TrimEnd('.'))
+				}
+				Write-Log -Message "DNS SRV record '$srvRecordName' returned $($srvRecords.Count) domain controller(s)." -Component 'Get-LdapSigningDomainController' -Type 1
+			} catch {
+				Write-Log -Message "Domain controller discovery through DNS SRV record '$srvRecordName' failed. $($_.Exception.Message)" -Component 'Get-LdapSigningDomainController' -Type 2
+			}
+		} else {
+			Write-Log -Message 'The current user and the local computer are not associated with an Active Directory domain. DNS SRV discovery is skipped.' -Component 'Get-LdapSigningDomainController' -Type 2
+		}
+	}
+
+	return $domainControllerNames | Sort-Object -Unique
+}
+
+function Resolve-LdapSigningTarget {
+	param(
+		[string[]]$RequestedComputerName
+	)
+
+	# Split entries such as "DC01,DC02", which arrive as one string when the script is started with pwsh.exe -File.
+	$candidateNames = @(
+		foreach ($requestedName in $RequestedComputerName) {
+			$requestedName -split '[,;\s]+' | Where-Object { $_ }
+		}
+	)
+
+	if ($candidateNames.Count -eq 0) {
+		Write-Log -Message 'No domain controller was specified. Starting domain controller autodetection.' -Component 'Resolve-LdapSigningTarget' -Type 1
+		$candidateNames = @(Get-LdapSigningDomainController)
+	}
+
+	$targetList = [System.Collections.Generic.List[object]]::new()
+	$processedNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+	$hasLocalTarget = $false
+
+	foreach ($candidateName in $candidateNames) {
+		if (-not $processedNames.Add($candidateName)) {
+			continue
+		}
+
+		$isLocalTarget = $candidateName -in $Script:LocalComputerNames
+		if ($isLocalTarget -and $hasLocalTarget) {
+			Write-Log -Message "Target '$candidateName' refers to the local computer, which is already included. The entry is skipped." -Component 'Resolve-LdapSigningTarget' -Type 1
+			continue
+		}
+
+		$hasLocalTarget = $hasLocalTarget -or $isLocalTarget
+		$targetList.Add([PSCustomObject]@{
+				ComputerName = $candidateName
+				IsLocal      = $isLocalTarget
+			})
+	}
+
+	return $targetList
 }
 
 function Get-LdapSigningEventName {
@@ -115,16 +241,21 @@ function Get-LdapSigningEventName {
 }
 
 function Test-LdapSigningAuditConfiguration {
+	param(
+		[string]$TargetComputerName,
+		[bool]$IsLocalTarget
+	)
+
 	$result = [PSCustomObject]@{
-		IsDomainController          = $false
+		IsDomainController          = 'NotChecked'
 		DirectoryServiceAuditPolicy = 'NotChecked'
 		LdapInterfaceEventsLevel    = 'NotChecked'
 	}
 
-	if ($Script:IsRemoteTarget) {
+	if (-not $IsLocalTarget) {
 		$result.DirectoryServiceAuditPolicy = 'AssumedConfiguredForRemoteTarget'
 		$result.LdapInterfaceEventsLevel = 'AssumedConfiguredForRemoteTarget'
-		Write-Log -Message "Remote target '$ComputerName' specified. Registry and audit policy checks are skipped and assumed to be configured correctly." -Component 'AuditCheck' -Type 2
+		Write-Log -Message "Remote target '$TargetComputerName' specified. Registry and audit policy checks are skipped and assumed to be configured correctly." -Component 'AuditCheck' -Type 2
 		return $result
 	}
 
@@ -182,24 +313,40 @@ function Test-LdapSigningAuditConfiguration {
 }
 
 function Get-LdapSigningEvents {
+	param(
+		[string]$TargetComputerName,
+		[bool]$IsLocalTarget
+	)
+
 	$xPath = "*[System[Provider[@Name='Microsoft-Windows-ActiveDirectory_DomainService'] and (EventID=2886 or EventID=2887 or EventID=2888 or EventID=2889 or EventID=3039 or EventID=3040 or EventID=3041 or EventID=3074 or EventID=3075)]]"
+	$queryResult = [PSCustomObject]@{
+		ComputerName = $TargetComputerName
+		Succeeded    = $false
+		Events       = @()
+	}
 
 	try {
-		Write-Log -Message "Reading Directory Service log with XPath: $xPath" -Component 'Get-LdapSigningEvents' -Type 1
+		Write-Log -Message "Reading Directory Service log on '$TargetComputerName' with XPath: $xPath" -Component 'Get-LdapSigningEvents' -Type 1
 		$eventParameters = @{ LogName = 'Directory Service'; FilterXPath = $xPath; ErrorAction = 'Stop' }
-		if ($Script:IsRemoteTarget) {
-			$eventParameters.ComputerName = $ComputerName
+		if (-not $IsLocalTarget) {
+			$eventParameters.ComputerName = $TargetComputerName
 		}
-		return Get-WinEvent @eventParameters
+		$queryResult.Events = @(Get-WinEvent @eventParameters)
+		$queryResult.Succeeded = $true
+		Write-Log -Message "Read $($queryResult.Events.Count) supported LDAP signing or channel binding event(s) from '$TargetComputerName'." -Component 'Get-LdapSigningEvents' -Type 1
 	} catch {
 		$errorMessage = $_.Exception.Message
-		if ($Script:IsRemoteTarget -and $errorMessage -match '(?i)RPC server is unavailable|network path was not found|target computer.*unreachable|access is denied') {
-			Write-Log -Message "Remote connection to '$ComputerName' failed while reading Directory Service events. Error: $errorMessage" -Component 'Get-LdapSigningEvents' -Type 3
+		if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') {
+			$queryResult.Succeeded = $true
+			Write-Log -Message "No supported LDAP signing or channel binding events were found on '$TargetComputerName'." -Component 'Get-LdapSigningEvents' -Type 1
+		} elseif (-not $IsLocalTarget -and $errorMessage -match '(?i)RPC server is unavailable|network path was not found|target computer.*unreachable|access is denied') {
+			Write-Log -Message "Remote connection to '$TargetComputerName' failed while reading Directory Service events. Error: $errorMessage" -Component 'Get-LdapSigningEvents' -Type 3
 		} else {
-			Write-Log -Message "Could not read Directory Service events. $errorMessage" -Component 'Get-LdapSigningEvents' -Type 2
+			Write-Log -Message "Could not read Directory Service events on '$TargetComputerName'. $errorMessage" -Component 'Get-LdapSigningEvents' -Type 2
 		}
-		return @()
 	}
+
+	return $queryResult
 }
 
 function Get-LdapEventDetailValue {
@@ -295,6 +442,7 @@ function ConvertTo-LdapSigningFinding {
 
 	return [PSCustomObject]@{
 		TimeCreated         = $LdapRecord.TimeCreated
+		DomainController    = $LdapRecord.MachineName
 		EventId             = [string]$LdapRecord.Id
 		EventName           = $eventName
 		Source              = if ($source -eq 'Unknown') { $LdapRecord.MachineName } else { $source }
@@ -310,7 +458,7 @@ function Show-LdapSigningFindings {
 		[array]$Findings
 	)
 
-	$gridData = $Findings | Select-Object TimeCreated, EventId, EventName, Source, Account, BindingType, Message
+	$gridData = $Findings | Select-Object TimeCreated, DomainController, EventId, EventName, Source, Account, BindingType, Message
 
 	if (Get-Command -Name Out-GridView -ErrorAction SilentlyContinue) {
 		$gridData | Out-GridView -Title 'LDAP Signing Analyzer - Unsigned or Failing LDAP Requests'
@@ -327,11 +475,39 @@ Initialize-Script
 try {
 	Write-Log -Message 'Starting LDAP signing analysis.' -Component 'Main' -Type 1
 
-	$auditStatus = Test-LdapSigningAuditConfiguration
-	Write-Log -Message ("Audit status: IsDomainController={0}; DirectoryServiceAuditPolicy={1}; LdapInterfaceEventsLevel={2}" -f $auditStatus.IsDomainController, $auditStatus.DirectoryServiceAuditPolicy, $auditStatus.LdapInterfaceEventsLevel) -Component 'Main' -Type 1
+	$targetComputers = @(Resolve-LdapSigningTarget -RequestedComputerName $ComputerName)
+	if ($targetComputers.Count -eq 0) {
+		Write-Log -Message 'No domain controllers were specified or detected. Specify one or more domain controllers with the ComputerName parameter.' -Component 'Main' -Type 3
+		exit 1
+	}
+	Write-Log -Message "Querying $($targetComputers.Count) domain controller(s): $($targetComputers.ComputerName -join ', ')" -Component 'Main' -Type 1
 
-	$events = Get-LdapSigningEvents
-	if (-not $events -or $events.Count -eq 0) {
+	$events = [System.Collections.Generic.List[object]]::new()
+	$failedTargets = [System.Collections.Generic.List[string]]::new()
+	foreach ($targetComputer in $targetComputers) {
+		$auditStatus = Test-LdapSigningAuditConfiguration -TargetComputerName $targetComputer.ComputerName -IsLocalTarget $targetComputer.IsLocal
+		Write-Log -Message ("Audit status for '{0}': IsDomainController={1}; DirectoryServiceAuditPolicy={2}; LdapInterfaceEventsLevel={3}" -f $targetComputer.ComputerName, $auditStatus.IsDomainController, $auditStatus.DirectoryServiceAuditPolicy, $auditStatus.LdapInterfaceEventsLevel) -Component 'Main' -Type 1
+
+		$queryResult = Get-LdapSigningEvents -TargetComputerName $targetComputer.ComputerName -IsLocalTarget $targetComputer.IsLocal
+		if ($queryResult.Succeeded) {
+			foreach ($ldapRecord in $queryResult.Events) {
+				$events.Add($ldapRecord)
+			}
+		} else {
+			$failedTargets.Add($targetComputer.ComputerName)
+		}
+	}
+
+	Write-Log -Message "Queried $($targetComputers.Count) domain controller(s). Succeeded: $($targetComputers.Count - $failedTargets.Count). Failed: $($failedTargets.Count)." -Component 'Main' -Type 1
+	if ($failedTargets.Count -gt 0) {
+		Write-Log -Message "Domain controllers that could not be queried: $($failedTargets -join ', ')" -Component 'Main' -Type 2
+	}
+	if ($failedTargets.Count -eq $targetComputers.Count) {
+		Write-Log -Message 'Directory Service events could not be read from any domain controller.' -Component 'Main' -Type 3
+		exit 1
+	}
+
+	if ($events.Count -eq 0) {
 		Write-Log -Message 'No supported LDAP signing or channel binding events were returned from the Directory Service log.' -Component 'Main' -Type 2
 		exit 0
 	}
