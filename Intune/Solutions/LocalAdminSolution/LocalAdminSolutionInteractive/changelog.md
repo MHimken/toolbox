@@ -2,6 +2,10 @@
 
 ## 2026
 
+### 10th of November
+
+* Updated BFF dependency `@azure/identity` from 4.13.3 to 4.14.1, which moves the transitive `@azure/msal-node` from 6.0.1 to 7.2.1 (CVE-2026-109461, fixed in 7.1.0). `npm audit` reports no vulnerabilities. Republish the BFF (`-RepublishBff`) to deploy the fix.
+
 ### 21st of October
 
 * Added local-first principal and assigned-through group lookup to rule proposals. SAS-only searches remain offline; authorized signed-in searches fall back to Entra only after no local match and an 800 ms typing pause. Results are bounded and cached in memory, obsolete searches are cancelled, and synced identities expose separate Entra and AD SID choices.

@@ -6,10 +6,18 @@
 .DESCRIPTION
     Runs weekly in Azure Automation. The runbook requires 28 complete daily collection partitions,
     combines their device/user counts, and assigns the highest-count user to each company-owned
-    Windows device. Equal counts are resolved by the latest successful sign-in.
+    Windows device. Equal counts are resolved by the latest successful sign-in. Preview runs print
+    a table of example devices that would change, and every run prints the number of changes per
+    change reason.
 .PARAMETER Preview
     Set to true to calculate and audit recommendations without changing Intune assignments.
     Defaults to false, which applies assignments. Accepts a Boolean Azure Automation input.
+.PARAMETER PreviewDeviceCount
+    Number of devices that would change to list in the preview output, from 0 to 1000. The first
+    devices found are listed sorted by device name, with Intune device ID, current and new primary
+    user, sign-in counts, the new user's share of device sign-ins, distinct users, latest sign-in,
+    last Intune sync, and change reason. Set to 0 to print only the totals. Defaults to 50. Every
+    recommendation is also written to the audit table.
 .PARAMETER AuditRetentionDays
     Days of audit rows and analysis run summaries to keep. Older rows are deleted in batches of up
     to 100 rows while the analysis lock is held, also in preview runs. Defaults to 180.
@@ -52,7 +60,10 @@ param(
     [ValidateRange(7, 3650)]
     [int]$AuditRetentionDays = 180,
 
-    [bool]$Preview = $false
+    [bool]$Preview = $false,
+
+    [ValidateRange(0, 1000)]
+    [int]$PreviewDeviceCount = 50
 )
 
 Set-StrictMode -Version Latest
@@ -62,6 +73,15 @@ $script:StorageBaseUri = 'https://{0}.table.core.windows.net' -f $StorageAccount
 $script:StorageToken = $null
 $script:GraphToken = $null
 $script:RunId = '{0}-{1}' -f [datetime]::UtcNow.ToString('yyyyMMddTHHmmssZ'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
+# Lowercase user ID to user principal name, from collected sign-ins and Intune primary users.
+$script:UserPrincipalNames = @{}
+$script:ChangeReasonLabels = [ordered]@{
+    NoPrimaryUser          = 'No primary user'
+    NoSignInsByPrimaryUser = 'Current user has no sign-ins'
+    MoreSignIns            = 'More sign-ins'
+    LatestSignIn           = 'Tie, latest sign-in'
+    UserIdOrder            = 'Tie, user ID order'
+}
 
 function ConvertFrom-SecureAccessToken {
     param([Parameter(Mandatory = $true)][object]$Token)
@@ -445,6 +465,181 @@ function Write-AuditEntity {
     Set-TableEntity -TableName $AuditTableName -Entity $entity
 }
 
+function Get-UserPrincipalName {
+    param([string]$UserId)
+
+    if ([string]::IsNullOrWhiteSpace($UserId)) { return '' }
+    $userKey = $UserId.ToLowerInvariant()
+    if ($script:UserPrincipalNames.ContainsKey($userKey)) { return [string]$script:UserPrincipalNames[$userKey] }
+    return ''
+}
+
+function Resolve-UserLabel {
+    param(
+        [string]$UserId,
+        [string]$UserPrincipalName
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($UserPrincipalName)) { return $UserPrincipalName }
+    if ([string]::IsNullOrWhiteSpace($UserId)) { return '(none)' }
+    $knownPrincipalName = Get-UserPrincipalName -UserId $UserId
+    if (-not [string]::IsNullOrWhiteSpace($knownPrincipalName)) { return $knownPrincipalName }
+    return $UserId
+}
+
+function Format-UtcTimestamp {
+    param([AllowNull()][object]$Value)
+
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return '' }
+    $timestamp = [datetime]::MinValue
+    if ($Value -is [datetime]) {
+        $timestamp = $Value.ToUniversalTime()
+    } else {
+        $parsedTimestamp = [DateTimeOffset]::MinValue
+        $parseStyles = [Globalization.DateTimeStyles]::AssumeUniversal
+        if (-not [DateTimeOffset]::TryParse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, $parseStyles, [ref]$parsedTimestamp)) {
+            return [string]$Value
+        }
+        $timestamp = $parsedTimestamp.UtcDateTime
+    }
+    # Intune reports devices that never synced with the minimum date.
+    if ($timestamp.Year -le 1) { return '' }
+    return $timestamp.ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+# Mirrors the winner ordering: sign-in count, then latest sign-in, then user ID.
+function Get-ChangeReason {
+    param(
+        [string]$CurrentUserId,
+        [AllowNull()][object]$CurrentCandidate,
+        [Parameter(Mandatory = $true)][object]$Winner
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CurrentUserId)) { return 'NoPrimaryUser' }
+    if ($null -eq $CurrentCandidate) { return 'NoSignInsByPrimaryUser' }
+    if ($Winner.Count -gt $CurrentCandidate.Count) { return 'MoreSignIns' }
+    if ($Winner.LatestSignIn -gt $CurrentCandidate.LatestSignIn) { return 'LatestSignIn' }
+    return 'UserIdOrder'
+}
+
+function New-DeviceAssessment {
+    param(
+        [Parameter(Mandatory = $true)][object]$Device,
+        [Parameter(Mandatory = $true)][hashtable]$Candidates,
+        [Parameter(Mandatory = $true)][object]$Winner
+    )
+
+    $currentUserId = [string]$Device.userId
+    $currentCandidate = $null
+    if (-not [string]::IsNullOrWhiteSpace($currentUserId) -and $Candidates.ContainsKey($currentUserId.ToLowerInvariant())) {
+        $currentCandidate = $Candidates[$currentUserId.ToLowerInvariant()]
+    }
+    $deviceSignInCount = [int64]0
+    foreach ($candidate in $Candidates.Values) { $deviceSignInCount += $candidate.Count }
+    $currentPrincipalName = [string](Get-OptionalProperty -InputObject $Device -Name 'userPrincipalName')
+    if ([string]::IsNullOrWhiteSpace($currentPrincipalName)) { $currentPrincipalName = Get-UserPrincipalName -UserId $currentUserId }
+    $changeReason = ''
+    if ($currentUserId -ne [string]$Winner.UserId) {
+        $changeReason = Get-ChangeReason -CurrentUserId $currentUserId -CurrentCandidate $currentCandidate -Winner $Winner
+    }
+
+    return [pscustomobject]@{
+        IntuneDeviceId               = [string]$Device.id
+        AzureDeviceId                = [string]$Device.azureADDeviceId
+        DeviceName                   = [string]$Device.deviceName
+        LastSyncDateTime             = Get-OptionalProperty -InputObject $Device -Name 'lastSyncDateTime'
+        CurrentUserId                = $currentUserId
+        CurrentUserPrincipalName     = $currentPrincipalName
+        CurrentUserSignInCount       = if ($null -eq $currentCandidate) { [int64]0 } else { [int64]$currentCandidate.Count }
+        RecommendedUserId            = [string]$Winner.UserId
+        RecommendedUserPrincipalName = Get-UserPrincipalName -UserId ([string]$Winner.UserId)
+        RecommendedUserSignInCount   = [int64]$Winner.Count
+        RecommendedUserLatestSignIn  = $Winner.LatestSignIn
+        DeviceSignInCount            = $deviceSignInCount
+        DistinctUserCount            = $Candidates.Count
+        ChangeReason                 = $changeReason
+    }
+}
+
+function ConvertTo-AuditProperty {
+    param(
+        [Parameter(Mandatory = $true)][object]$Assessment,
+        [Parameter(Mandatory = $true)][string]$Outcome,
+        [AllowNull()][object]$BatchResult
+    )
+
+    $properties = @{
+        DeviceId                     = $Assessment.IntuneDeviceId
+        AzureDeviceId                = $Assessment.AzureDeviceId
+        DeviceName                   = $Assessment.DeviceName
+        PreviousUserId               = $Assessment.CurrentUserId
+        PreviousUserPrincipalName    = $Assessment.CurrentUserPrincipalName
+        PreviousUserSignInCount      = $Assessment.CurrentUserSignInCount
+        RecommendedUserId            = $Assessment.RecommendedUserId
+        RecommendedUserPrincipalName = $Assessment.RecommendedUserPrincipalName
+        SignInCount                  = $Assessment.RecommendedUserSignInCount
+        LatestSignIn                 = $Assessment.RecommendedUserLatestSignIn.ToString('o')
+        DeviceSignInCount            = $Assessment.DeviceSignInCount
+        DistinctUserCount            = $Assessment.DistinctUserCount
+        Outcome                      = $Outcome
+        Preview                      = [bool]$Preview
+    }
+    if (-not [string]::IsNullOrEmpty($Assessment.ChangeReason)) { $properties.ChangeReason = $Assessment.ChangeReason }
+    if ($null -ne $BatchResult) {
+        $properties.HttpStatus = [int]$BatchResult.Status
+        $properties.ErrorMessage = [string]$BatchResult.Error
+    }
+    return $properties
+}
+
+function Submit-AssignmentBatch {
+    param(
+        [Parameter(Mandatory = $true)][Collections.Generic.List[object]]$Requests,
+        [Parameter(Mandatory = $true)][hashtable]$Assessments,
+        [Parameter(Mandatory = $true)][hashtable]$Summary
+    )
+
+    foreach ($result in @(Invoke-GraphBatch -Requests @($Requests))) {
+        $assessment = $Assessments[[string]$result.Request.id]
+        $outcome = if ($null -eq $result.Error) { $Summary.Updated++; 'Updated' } else { $Summary.Failed++; 'Failed' }
+        Write-AuditEntity -RowKey $assessment.IntuneDeviceId -Properties (ConvertTo-AuditProperty -Assessment $assessment -Outcome $outcome -BatchResult $result)
+    }
+    $Requests.Clear()
+    $Assessments.Clear()
+}
+
+function Write-PreviewExample {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Assessments,
+        [Parameter(Mandatory = $true)][int]$ChangeCount
+    )
+
+    Write-Output ("Preview examples: {0} of {1} devices that would change, sorted by device name. All {1} are in table '{2}', partition '{3}', with Outcome 'Preview'." -f
+        $Assessments.Count, $ChangeCount, $AuditTableName, $script:RunId)
+    $exampleRows = foreach ($assessment in @($Assessments | Sort-Object -Property DeviceName, IntuneDeviceId)) {
+        $signInShare = if ($assessment.DeviceSignInCount -gt 0) { [double]$assessment.RecommendedUserSignInCount / $assessment.DeviceSignInCount } else { 0 }
+        [pscustomobject]@{
+            DeviceName           = $assessment.DeviceName
+            IntuneDeviceId       = $assessment.IntuneDeviceId
+            CurrentPrimaryUser   = Resolve-UserLabel -UserId $assessment.CurrentUserId -UserPrincipalName $assessment.CurrentUserPrincipalName
+            CurrentUserSignIns   = $assessment.CurrentUserSignInCount
+            NewPrimaryUser       = Resolve-UserLabel -UserId $assessment.RecommendedUserId -UserPrincipalName $assessment.RecommendedUserPrincipalName
+            NewUserSignIns       = $assessment.RecommendedUserSignInCount
+            NewUserShare         = '{0}%' -f [int][math]::Round($signInShare * 100, [MidpointRounding]::AwayFromZero)
+            DeviceUsers          = $assessment.DistinctUserCount
+            NewUserLastSignInUtc = Format-UtcTimestamp -Value $assessment.RecommendedUserLatestSignIn
+            LastIntuneSyncUtc    = Format-UtcTimestamp -Value $assessment.LastSyncDateTime
+            Reason               = $script:ChangeReasonLabels[$assessment.ChangeReason]
+        }
+    }
+    # One output record per line keeps the table readable in the Automation job output.
+    $tableColumns = @('DeviceName', 'IntuneDeviceId', 'CurrentPrimaryUser', 'CurrentUserSignIns', 'NewPrimaryUser', 'NewUserSignIns',
+        'NewUserShare', 'DeviceUsers', 'NewUserLastSignInUtc', 'LastIntuneSyncUtc', 'Reason')
+    foreach ($tableLine in @($exampleRows | Format-Table -Property $tableColumns -AutoSize | Out-String -Stream -Width 4096)) {
+        if (-not [string]::IsNullOrWhiteSpace($tableLine)) { Write-Output $tableLine.TrimEnd() }
+    }
+}
+
 try {
     Initialize-ManagedIdentity
     Enter-AnalysisLock
@@ -490,6 +685,9 @@ try {
                 $candidate.Count += [int64]$row.SignInCount
                 $latest = ([datetime]$row.LatestSignIn).ToUniversalTime()
                 if ($latest -gt $candidate.LatestSignIn) { $candidate.LatestSignIn = $latest }
+                # Dates are read oldest first, so the most recent collected name is kept.
+                $rowPrincipalName = [string](Get-OptionalProperty -InputObject $row -Name 'UserPrincipalName')
+                if (-not [string]::IsNullOrWhiteSpace($rowPrincipalName)) { $script:UserPrincipalNames[$userId] = $rowPrincipalName }
             }
         }
 
@@ -501,37 +699,39 @@ try {
                 @{ Expression = 'UserId'; Descending = $false }
             ))[0]
         }
-        $countsByDevice = $null
 
         $requests = [Collections.Generic.List[object]]::new()
-        $requestMetadata = @{}
+        $requestAssessments = @{}
         $requestId = 0
+        $previewExamples = [Collections.Generic.List[object]]::new()
+        $changeReasonCounts = [ordered]@{}
+        foreach ($reasonKey in $script:ChangeReasonLabels.Keys) { $changeReasonCounts[$reasonKey] = 0 }
         $managedDeviceFilter = [uri]::EscapeDataString("operatingSystem eq 'Windows' and managedDeviceOwnerType eq 'Company'")
-        $deviceUri = 'https://graph.microsoft.com/beta/deviceManagement/managedDevices?$filter={0}&$select=id,azureADDeviceId,deviceName,userId&$top=1000' -f $managedDeviceFilter
+        $deviceUri = 'https://graph.microsoft.com/beta/deviceManagement/managedDevices?$filter={0}&$select=id,azureADDeviceId,deviceName,userId,userPrincipalName,lastSyncDateTime&$top=1000' -f $managedDeviceFilter
         while (-not [string]::IsNullOrWhiteSpace($deviceUri)) {
             $page = Invoke-GraphGet -Uri $deviceUri
             foreach ($device in @($page.value)) {
+                $primaryUserKey = ([string]$device.userId).ToLowerInvariant()
+                $primaryUserPrincipalName = [string](Get-OptionalProperty -InputObject $device -Name 'userPrincipalName')
+                if (-not [string]::IsNullOrWhiteSpace($primaryUserKey) -and -not [string]::IsNullOrWhiteSpace($primaryUserPrincipalName) -and
+                    -not $script:UserPrincipalNames.ContainsKey($primaryUserKey)) {
+                    $script:UserPrincipalNames[$primaryUserKey] = $primaryUserPrincipalName
+                }
                 $azureDeviceId = ([string]$device.azureADDeviceId).ToLowerInvariant()
                 if (-not $winners.ContainsKey($azureDeviceId)) { continue }
                 $summary.DevicesEvaluated++
-                $winner = $winners[$azureDeviceId]
-                if ([string]$device.userId -eq [string]$winner.UserId) {
+                $assessment = New-DeviceAssessment -Device $device -Candidates $countsByDevice[$azureDeviceId] -Winner $winners[$azureDeviceId]
+                if ([string]::IsNullOrEmpty($assessment.ChangeReason)) {
                     $summary.Unchanged++
-                    Write-AuditEntity -RowKey ([string]$device.id) -Properties @{
-                        DeviceId = [string]$device.id; AzureDeviceId = [string]$device.azureADDeviceId; DeviceName = [string]$device.deviceName
-                        PreviousUserId = [string]$device.userId; RecommendedUserId = [string]$winner.UserId; SignInCount = [int64]$winner.Count
-                        LatestSignIn = $winner.LatestSignIn.ToString('o'); Outcome = 'Unchanged'; Preview = [bool]$Preview
-                    }
+                    Write-AuditEntity -RowKey $assessment.IntuneDeviceId -Properties (ConvertTo-AuditProperty -Assessment $assessment -Outcome 'Unchanged')
                     continue
                 }
 
                 $summary.ChangesNeeded++
+                $changeReasonCounts[$assessment.ChangeReason]++
                 if ($Preview) {
-                    Write-AuditEntity -RowKey ([string]$device.id) -Properties @{
-                        DeviceId = [string]$device.id; AzureDeviceId = [string]$device.azureADDeviceId; DeviceName = [string]$device.deviceName
-                        PreviousUserId = [string]$device.userId; RecommendedUserId = [string]$winner.UserId; SignInCount = [int64]$winner.Count
-                        LatestSignIn = $winner.LatestSignIn.ToString('o'); Outcome = 'Preview'; Preview = $true
-                    }
+                    Write-AuditEntity -RowKey $assessment.IntuneDeviceId -Properties (ConvertTo-AuditProperty -Assessment $assessment -Outcome 'Preview')
+                    if ($previewExamples.Count -lt $PreviewDeviceCount) { $previewExamples.Add($assessment) }
                     continue
                 }
 
@@ -540,42 +740,22 @@ try {
                 $request = [pscustomobject]@{
                     id      = $id
                     method  = 'POST'
-                    url     = "/deviceManagement/managedDevices/$($device.id)/users/`$ref"
+                    url     = "/deviceManagement/managedDevices/$($assessment.IntuneDeviceId)/users/`$ref"
                     headers = @{ 'Content-Type' = 'application/json' }
-                    body    = @{ '@odata.id' = "https://graph.microsoft.com/beta/users/$($winner.UserId)" }
+                    body    = @{ '@odata.id' = "https://graph.microsoft.com/beta/users/$($assessment.RecommendedUserId)" }
                 }
                 $requests.Add($request)
-                $requestMetadata[$id] = [pscustomobject]@{ Device = $device; Winner = $winner }
+                $requestAssessments[$id] = $assessment
 
                 if ($requests.Count -eq 20) {
-                    foreach ($result in @(Invoke-GraphBatch -Requests @($requests))) {
-                        $metadata = $requestMetadata[[string]$result.Request.id]
-                        $outcome = if ($null -eq $result.Error) { $summary.Updated++; 'Updated' } else { $summary.Failed++; 'Failed' }
-                        Write-AuditEntity -RowKey ([string]$metadata.Device.id) -Properties @{
-                            DeviceId = [string]$metadata.Device.id; AzureDeviceId = [string]$metadata.Device.azureADDeviceId; DeviceName = [string]$metadata.Device.deviceName
-                            PreviousUserId = [string]$metadata.Device.userId; RecommendedUserId = [string]$metadata.Winner.UserId; SignInCount = [int64]$metadata.Winner.Count
-                            LatestSignIn = $metadata.Winner.LatestSignIn.ToString('o'); Outcome = $outcome; HttpStatus = [int]$result.Status
-                            ErrorMessage = [string]$result.Error; Preview = $false
-                        }
-                    }
-                    $requests.Clear()
-                    $requestMetadata.Clear()
+                    Submit-AssignmentBatch -Requests $requests -Assessments $requestAssessments -Summary $summary
                 }
             }
             $deviceUri = [string](Get-OptionalProperty -InputObject $page -Name '@odata.nextLink')
         }
 
         if ($requests.Count -gt 0) {
-            foreach ($result in @(Invoke-GraphBatch -Requests @($requests))) {
-                $metadata = $requestMetadata[[string]$result.Request.id]
-                $outcome = if ($null -eq $result.Error) { $summary.Updated++; 'Updated' } else { $summary.Failed++; 'Failed' }
-                Write-AuditEntity -RowKey ([string]$metadata.Device.id) -Properties @{
-                    DeviceId = [string]$metadata.Device.id; AzureDeviceId = [string]$metadata.Device.azureADDeviceId; DeviceName = [string]$metadata.Device.deviceName
-                    PreviousUserId = [string]$metadata.Device.userId; RecommendedUserId = [string]$metadata.Winner.UserId; SignInCount = [int64]$metadata.Winner.Count
-                    LatestSignIn = $metadata.Winner.LatestSignIn.ToString('o'); Outcome = $outcome; HttpStatus = [int]$result.Status
-                    ErrorMessage = [string]$result.Error; Preview = $false
-                }
-            }
+            Submit-AssignmentBatch -Requests $requests -Assessments $requestAssessments -Summary $summary
         }
 
         Set-TableEntity -TableName $StateTableName -Entity @{
@@ -583,6 +763,15 @@ try {
             StartedAt = $startedAt.ToString('o'); CompletedAt = [datetime]::UtcNow.ToString('o'); AnalysisEndDate = $endDate.ToString('yyyy-MM-dd')
             DaysAnalyzed = $DaysToAnalyze; Preview = [bool]$Preview; DevicesEvaluated = $summary.DevicesEvaluated; ChangesNeeded = $summary.ChangesNeeded
             Updated = $summary.Updated; Failed = $summary.Failed; Unchanged = $summary.Unchanged
+        }
+        if ($Preview -and $previewExamples.Count -gt 0) {
+            Write-PreviewExample -Assessments $previewExamples.ToArray() -ChangeCount $summary.ChangesNeeded
+        }
+        if ($summary.ChangesNeeded -gt 0) {
+            $reasonSummary = @(foreach ($reasonKey in $changeReasonCounts.Keys) {
+                if ($changeReasonCounts[$reasonKey] -gt 0) { '{0}: {1}' -f $script:ChangeReasonLabels[$reasonKey], $changeReasonCounts[$reasonKey] }
+            }) -join '; '
+            Write-Output "Change reasons: $reasonSummary."
         }
         Write-Output "Analysis $script:RunId complete. Evaluated: $($summary.DevicesEvaluated); changes: $($summary.ChangesNeeded); updated: $($summary.Updated); failed: $($summary.Failed); unchanged: $($summary.Unchanged)."
     } catch {

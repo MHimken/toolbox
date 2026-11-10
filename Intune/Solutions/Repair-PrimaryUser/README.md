@@ -33,7 +33,7 @@ If the deploying account cannot create role assignments, for example with only `
 
 Run the deployment from PowerShell 7.2 or later on an administration workstation or Azure Cloud Shell. The script uses `bicep` from PATH if available. On Windows, if it is missing, the script asks to download a temporary Bicep executable from the official Azure Bicep release. Use `-InstallTemporaryBicep` to approve this download without a prompt.
 
-Keep `main.bicep` from the same version beside `Deploy-RepairPrimaryUser.ps1`; the script stops if the template is older. For each runbook, the deployment checks `..\Runbooks` first, then the deployment script's own folder. If neither location contains the required file, deployment stops and reports both checked paths.
+Keep `main.bicep` from the same version beside `Deploy-RepairPrimaryUser.ps1`; the script stops if the template is older. For each runbook, the deployment checks `..\Runbooks` first, then the deployment script's own folder. If neither location contains the required file, deployment stops and reports both checked paths. A `-Resume` run is the exception for runbooks that an earlier run already imported: it verifies they are still published and skips content checks, so only the deployment script, `main.bicep`, and the checkpoint are needed.
 
 The downloaded executable must have a valid Microsoft Authenticode signature before it is run. It is added to PATH only for this deployment; the original PATH is restored and the temporary directory is removed on success or failure. No administrator rights are normally required. On other platforms, install Bicep on PATH before deploying.
 
@@ -76,12 +76,13 @@ For controlled testing, start the analyzer manually with a smaller `DaysToAnalyz
 - `RowKey`: `<device-guid>|<user-guid>`.
 - `DeviceId`: Microsoft Entra device ID.
 - `UserId`: Microsoft Entra user ID.
+- `UserPrincipalName`: user principal name from that user's latest sign-in on the device that day. Rows collected before this column was added have no value; recollect those dates with `ForceRecollect` to fill it.
 - `SignInCount`: successful sign-ins for that day.
 - `LatestSignIn`: latest successful sign-in in UTC.
 
 `PrimaryUserState` stores collection status, analysis locks, and run summaries. Collection rows use partition `Collection`; weekly summaries use `AnalysisRuns`.
 
-`PrimaryUserAudit` stores one row per evaluated Intune device and weekly run. Its partition key is the unique run ID. Outcomes include `Unchanged`, `Preview`, `Updated`, and `Failed`.
+`PrimaryUserAudit` stores one row per evaluated Intune device and weekly run. Its partition key is the unique run ID. Outcomes include `Unchanged`, `Preview`, `Updated`, and `Failed`. Besides device and user IDs, each row stores `PreviousUserPrincipalName`, `RecommendedUserPrincipalName`, `PreviousUserSignInCount`, `SignInCount` (recommended user), `DeviceSignInCount`, `DistinctUserCount`, and `LatestSignIn`. Rows for devices that change also store `ChangeReason`: `NoPrimaryUser`, `NoSignInsByPrimaryUser`, `MoreSignIns`, `LatestSignIn`, or `UserIdOrder`.
 
 ## Running a single job in the Azure portal
 
@@ -90,7 +91,7 @@ You can run either published runbook once with custom parameters without changin
 1. Open the deployed **Automation Account** in the Azure portal, select **Runbooks**, then select `Collect-PrimaryUserSignInData` or `Repair-PrimaryUserAssignments`.
 2. Select **Start** and enter `StorageAccountName`. Leave other inputs at their defaults unless you want to override them for this job.
 3. For collection, enter `CollectionDate` for a single completed UTC day, or also enter `CollectionEndDate` for an inclusive range. Use `yyyy-MM-dd`; set `ForceRecollect` to `true` only to rebuild already-completed days.
-4. For analysis, set `Preview` to `true` to write recommendations without changing Intune. For a historical window, also set `AnalysisEndDate` to its last completed UTC day and, if needed, `DaysToAnalyze`.
+4. For analysis, set `Preview` to `true` to write recommendations without changing Intune, and optionally set `PreviewDeviceCount` to the number of example devices to list. For a historical window, also set `AnalysisEndDate` to its last completed UTC day and, if needed, `DaysToAnalyze`.
 5. Confirm **Start**, then inspect the job's **Output** and **Errors**. Wait for collection to finish successfully before starting analysis.
 
 Boolean inputs use `true` or `false` in the portal, not PowerShell's `$true` or `$false`. Parameters apply only to that job; the weekly schedule still applies assignments by default.
@@ -154,12 +155,33 @@ Start-AzAutomationRunbook `
     -Parameters @{
         StorageAccountName = '<storage-account>'
         Preview = $true
+        PreviewDeviceCount = 100
     }
 ```
 
 Preview recommendations are written to `PrimaryUserAudit` and no Intune assignment request is submitted. The scheduled run omits `Preview` and therefore applies changes.
 
 `Preview` is a Boolean runbook input, defaulting to `false`. Select `true` in the portal to preview, or use `-Preview $true` when invoking the script directly.
+
+`PreviewDeviceCount` (0 to 1000, default 50) sets how many devices that would change are listed in the preview job output. The first devices found are listed as a table sorted by device name:
+
+| Column | Content |
+| --- | --- |
+| `DeviceName` | Intune device name. |
+| `IntuneDeviceId` | Intune managed device ID. |
+| `CurrentPrimaryUser` | Current primary user's UPN, the user ID when no UPN is known, or `(none)`. |
+| `CurrentUserSignIns` | Current primary user's sign-ins on the device in the analysis window. |
+| `NewPrimaryUser` | Recommended user's UPN, or the user ID when no UPN is known. |
+| `NewUserSignIns` | Recommended user's sign-ins on the device in the analysis window. |
+| `NewUserShare` | Recommended user's share of all sign-ins on the device. |
+| `DeviceUsers` | Distinct users who signed in on the device. |
+| `NewUserLastSignInUtc` | Recommended user's latest sign-in on the device. |
+| `LastIntuneSyncUtc` | Device's last Intune sync. |
+| `Reason` | No primary user, current user has no sign-ins, more sign-ins, or a tie resolved by latest sign-in or user ID order. |
+
+Set `PreviewDeviceCount` to 0 to print only the totals. Every recommendation, including those beyond the listed count, is in the run's `PrimaryUserAudit` partition. Each run, including scheduled runs, also prints the number of changes per reason.
+
+UPNs come from the collected sign-ins and from Intune's primary user data, so no additional Graph permission is needed. A recommended user who has no collected UPN and is not the primary user of any Intune device is shown by user ID.
 
 The analyzer:
 

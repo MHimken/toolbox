@@ -516,6 +516,16 @@ try {
     Assert-Condition ((Get-Content -LiteralPath $checkpointPath -Raw) -eq
         $checkpointBeforeMissingRunbook) 'Missing runbooks must fail before changing the deployment checkpoint.'
 
+    # A resume from a folder without runbook files verifies runbooks that the checkpoint already imported.
+    $importsBeforeSourcelessResume = $mockDeploymentEnvironment.Imports
+    $sourcelessOutput = & $deploymentScript @resumeParameters 3>&1 | Out-String -Width 4096
+    Assert-Condition ((Read-TestCheckpoint).deploymentCompleted -and
+        $mockDeploymentEnvironment.Imports -eq $importsBeforeSourcelessResume) 'Imported runbooks must not require source files on resume.'
+    Assert-Condition ($sourcelessOutput.Contains($parentCollectorPath) -and
+        $sourcelessOutput.Contains('content changes were not checked')) 'Sourceless resumes must report the unchecked runbook.'
+    $mockDeploymentEnvironment.Runbooks.Remove('Collect-PrimaryUserSignInData')
+    Assert-DeploymentFailure -Parameters $resumeParameters -ExpectedMessage 'is not published in Automation Account'
+
     $layoutTemplatePath = Join-Path $layoutDeploymentDirectory 'main.bicep'
     (Get-Content -LiteralPath $layoutTemplatePath -Raw) -replace '(?m)^param assignTableRoles bool = true\r?\n', '' |
         Set-Content -LiteralPath $layoutTemplatePath

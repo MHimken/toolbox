@@ -1,10 +1,10 @@
 # Third-party dependency and licence inventory
 
-Reviewed 21 October 2026 from the committed npm lockfiles. Versions and declared SPDX licence identifiers below are taken from each lockfile; the inventory includes direct and transitive packages, development dependencies, and platform-optional entries.
+Reviewed 21 October 2026 and updated 10 November 2026 (`@azure/identity` 4.14.1 / `@azure/msal-node` 7.2.1 for CVE-2026-109461) from the committed npm lockfiles. Versions and declared SPDX licence identifiers below are taken from each lockfile; the inventory includes direct and transitive packages, development dependencies, and platform-optional entries.
 
 ## Review summary
 
-- Backend lockfile: 112 package entries.
+- Backend lockfile: 115 package entries.
 - HTML lockfile: 2 package entries.
 - Every lockfile entry declares a licence. Declared licences are MIT, Apache-2.0, BSD-3-Clause, ISC, and 0BSD; no copyleft or source-available licence was found.
 - `HTML/vendor/LICENSE-msal-browser.txt` carries the MIT notice for the redistributed MSAL browser bundle.
@@ -26,11 +26,12 @@ Reviewed 21 October 2026 from the committed npm lockfiles. Versions and declared
 | Backend | `@azure/data-tables` | 13.3.2 | direct runtime | MIT |
 | Backend | `@azure/functions` | 4.16.5 | direct runtime | MIT |
 | Backend | `@azure/functions-extensions-base` | 0.3.0 | transitive runtime | MIT |
-| Backend | `@azure/identity` | 4.13.3 | direct runtime | MIT |
+| Backend | `@azure/identity` | 4.14.1 | direct runtime | MIT |
 | Backend | `@azure/logger` | 1.4.0 | transitive runtime | MIT |
 | Backend | `@azure/msal-browser` | 5.23.0 | transitive runtime | MIT |
 | Backend | `@azure/msal-common` | 16.14.1 | transitive runtime | MIT |
-| Backend | `@azure/msal-node` | 6.0.1 | transitive runtime | MIT |
+| Backend | `@azure/msal-node` | 7.2.1 | transitive runtime | MIT |
+| Backend | `@azure/msal-common` (nested under `@azure/msal-node`) | 16.16.1 | transitive runtime | MIT |
 | Backend | `@esbuild/aix-ppc64` | 0.25.12 | transitive development / optional | MIT |
 | Backend | `@esbuild/android-arm` | 0.25.12 | transitive development / optional | MIT |
 | Backend | `@esbuild/android-arm64` | 0.25.12 | transitive development / optional | MIT |
@@ -98,6 +99,7 @@ Reviewed 21 October 2026 from the committed npm lockfiles. Versions and declared
 | Backend | `http-proxy-agent` | 7.0.2 | transitive runtime | MIT |
 | Backend | `https-proxy-agent` | 7.0.6 | transitive runtime | MIT |
 | Backend | `is-docker` | 3.0.0 | transitive runtime | MIT |
+| Backend | `is-in-ssh` | 1.0.0 | transitive runtime | MIT |
 | Backend | `is-inside-container` | 1.0.0 | transitive runtime | MIT |
 | Backend | `is-unsafe` | 2.0.2 | transitive runtime | MIT |
 | Backend | `is-wsl` | 3.1.1 | transitive runtime | MIT |
@@ -113,18 +115,19 @@ Reviewed 21 October 2026 from the committed npm lockfiles. Versions and declared
 | Backend | `lodash.isstring` | 4.0.1 | transitive runtime | MIT |
 | Backend | `lodash.once` | 4.1.1 | transitive runtime | MIT |
 | Backend | `ms` | 2.1.3 | transitive runtime | MIT |
-| Backend | `open` | 10.2.0 | transitive runtime | MIT |
+| Backend | `open` | 11.0.4 | transitive runtime | MIT |
 | Backend | `path-expression-matcher` | 1.6.2 | transitive runtime | MIT |
+| Backend | `powershell-utils` | 0.2.1 | transitive runtime | MIT |
 | Backend | `resolve-pkg-maps` | 1.0.0 | transitive development | MIT |
 | Backend | `run-applescript` | 7.1.0 | transitive runtime | MIT |
 | Backend | `safe-buffer` | 5.2.1 | transitive runtime | MIT |
-| Backend | `semver` | 7.8.5 | transitive runtime | ISC |
+| Backend | `semver` | 7.8.6 | transitive runtime | ISC |
 | Backend | `strnum` | 2.4.2 | transitive runtime | MIT |
 | Backend | `tslib` | 2.8.1 | transitive runtime | 0BSD |
 | Backend | `tsx` | 4.20.6 | direct development | MIT |
 | Backend | `typescript` | 7.0.2 | direct development | Apache-2.0 |
 | Backend | `undici-types` | 7.14.0 | transitive development | MIT |
-| Backend | `wsl-utils` | 0.1.0 | transitive runtime | MIT |
+| Backend | `wsl-utils` | 1.0.1 | transitive runtime | MIT |
 | Backend | `xml-naming` | 0.3.0 | transitive runtime | MIT |
 | HTML | `@azure/msal-browser` | 5.23.0 | direct runtime | MIT |
 | HTML | `@azure/msal-common` | 16.14.1 | transitive runtime | MIT |

@@ -13,7 +13,7 @@
   "dependencies": {
     "@azure/data-tables": "13.3.2",
     "@azure/functions": "4.16.5",
-    "@azure/identity": "4.13.3",
+    "@azure/identity": "4.14.1",
     "jose": "6.2.12"
   },
   "devDependencies": {

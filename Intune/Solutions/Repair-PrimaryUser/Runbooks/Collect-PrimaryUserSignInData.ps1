@@ -6,9 +6,10 @@
 .DESCRIPTION
     Runs in Azure Automation with a managed identity. The runbook streams Microsoft Graph sign-in
     pages, counts successful Windows Sign In events by device and user, and replaces the selected
-    date partitions in Azure Table Storage one day at a time. A separate state row for each date
-    prevents completed days from being collected twice. A failed day stops the range; rerunning the
-    same range skips completed dates unless ForceRecollect is supplied.
+    date partitions in Azure Table Storage one day at a time. Each row also keeps the user principal
+    name from the user's latest sign-in on that device for the analyzer preview. A separate state
+    row for each date prevents completed days from being collected twice. A failed day stops the
+    range; rerunning the same range skips completed dates unless ForceRecollect is supplied.
 .PARAMETER StorageAccountName
     Storage account containing the solution tables.
 .PARAMETER CollectionDate
@@ -373,7 +374,7 @@ function Invoke-DailyCollection {
     $windowStart = $targetDate.ToString('yyyy-MM-ddTHH:mm:ssZ')
     $windowEnd = $targetDate.AddDays(1).ToString('yyyy-MM-ddTHH:mm:ssZ')
     $signInFilter = "createdDateTime ge $windowStart and createdDateTime lt $windowEnd and appDisplayName eq 'Windows Sign In'"
-    $requestUri = 'https://graph.microsoft.com/beta/auditLogs/signIns?$filter={0}&$select=createdDateTime,userId,deviceDetail,status&$top=1000' -f [uri]::EscapeDataString($signInFilter)
+    $requestUri = 'https://graph.microsoft.com/beta/auditLogs/signIns?$filter={0}&$select=createdDateTime,userId,userPrincipalName,deviceDetail,status&$top=1000' -f [uri]::EscapeDataString($signInFilter)
     $aggregates = @{}
     $eventCount = 0
 
@@ -394,10 +395,17 @@ function Invoke-DailyCollection {
             $key = '{0}|{1}' -f $deviceId, $userId
             $signInTime = ([datetime]$signIn.createdDateTime).ToUniversalTime()
             if (-not $aggregates.ContainsKey($key)) {
-                $aggregates[$key] = [pscustomobject]@{ DeviceId = $deviceId; UserId = $userId; Count = 0; LatestSignIn = [datetime]::MinValue }
+                $aggregates[$key] = [pscustomobject]@{ DeviceId = $deviceId; UserId = $userId; UserPrincipalName = ''; Count = 0; LatestSignIn = [datetime]::MinValue }
             }
-            $aggregates[$key].Count++
-            if ($signInTime -gt $aggregates[$key].LatestSignIn) { $aggregates[$key].LatestSignIn = $signInTime }
+            $aggregate = $aggregates[$key]
+            $aggregate.Count++
+            # Keeps the name from the latest sign-in so renamed accounts show their current name.
+            $userPrincipalName = [string](Get-OptionalProperty -InputObject $signIn -Name 'userPrincipalName')
+            if (-not [string]::IsNullOrWhiteSpace($userPrincipalName) -and
+                ($signInTime -ge $aggregate.LatestSignIn -or [string]::IsNullOrEmpty($aggregate.UserPrincipalName))) {
+                $aggregate.UserPrincipalName = $userPrincipalName
+            }
+            if ($signInTime -gt $aggregate.LatestSignIn) { $aggregate.LatestSignIn = $signInTime }
             $eventCount++
         }
         $requestUri = [string](Get-OptionalProperty -InputObject $page -Name '@odata.nextLink')
@@ -409,6 +417,7 @@ function Invoke-DailyCollection {
             RowKey       = ('{0}|{1}' -f $aggregate.DeviceId.ToLowerInvariant(), $aggregate.UserId.ToLowerInvariant())
             DeviceId     = $aggregate.DeviceId
             UserId       = $aggregate.UserId
+            UserPrincipalName = $aggregate.UserPrincipalName
             SignInCount  = [int]$aggregate.Count
             LatestSignIn = $aggregate.LatestSignIn.ToString('o')
         }

@@ -7,7 +7,8 @@
     weekly UTC schedules, and optionally grants the required Microsoft Graph application permissions
     to the Automation Account system-assigned managed identity. Saves configuration, resource IDs,
     and completed stages to a local JSON checkpoint so interrupted deployments can continue.
-    Finds each runbook in the parent Runbooks folder first, then beside this deployment script.
+    Finds each runbook in the parent Runbooks folder first, then beside this deployment script. A resume
+    without the runbook files verifies the runbooks that an earlier run imported.
     When the signed-in account cannot create Azure role assignments, for example with only the
     Contributor role, deploys everything else and prints the table role assignments that an
     administrator must create. A later -Resume verifies them and completes the deployment.
@@ -583,7 +584,13 @@ function Get-SolutionRunbookPath {
     foreach ($candidatePath in $candidatePaths) {
         if (Test-Path -LiteralPath $candidatePath -PathType Leaf) { return $candidatePath }
     }
-    throw "Required runbook '$Name' was not found. Checked: $($candidatePaths -join '; ')."
+    $notFoundMessage = "Required runbook '$Name' was not found. Checked: $($candidatePaths -join '; ')."
+    # A resume can verify a runbook imported by an earlier run; updating its content still requires the source file.
+    if ($script:DeploymentState.completedStages.Contains([IO.Path]::GetFileNameWithoutExtension($Name))) {
+        Write-Warning "$notFoundMessage Verifying the runbook already imported by this deployment instead."
+        return $null
+    }
+    throw $notFoundMessage
 }
 
 function Import-SolutionRunbook {
@@ -597,13 +604,19 @@ function Import-SolutionRunbook {
     Write-Output "Imported and published runbook $Name."
 }
 
+function Test-SolutionRunbookPublished {
+    param([string]$Name)
+
+    $runbooks = @(Get-AzAutomationRunbook -ResourceGroupName $ResourceGroupName `
+        -AutomationAccountName $script:ResolvedAutomationAccountName -ErrorAction Stop)
+    return @($runbooks | Where-Object { $_.Name -eq $Name -and $_.State -eq 'Published' }).Count -eq 1
+}
+
 function Test-SolutionRunbookReady {
     param([string]$Name, [string]$Fingerprint)
 
     if (-not (Test-DeploymentStageCompleted -Stage $Name -Fingerprint $Fingerprint)) { return $false }
-    $runbooks = @(Get-AzAutomationRunbook -ResourceGroupName $ResourceGroupName `
-        -AutomationAccountName $script:ResolvedAutomationAccountName -ErrorAction Stop)
-    return @($runbooks | Where-Object { $_.Name -eq $Name -and $_.State -eq 'Published' }).Count -eq 1
+    return Test-SolutionRunbookPublished -Name $Name
 }
 
 function Test-SolutionScheduleReady {
@@ -754,6 +767,15 @@ try {
             @{ Name = 'Collect-PrimaryUserSignInData'; Path = $collectorPath },
             @{ Name = 'Repair-PrimaryUserAssignments'; Path = $analyzerPath }
         )) {
+            if ($null -eq $runbookDefinition.Path) {
+                if (-not (Test-SolutionRunbookPublished -Name $runbookDefinition.Name)) {
+                    throw ("Runbook '$($runbookDefinition.Name)' is not published in Automation Account '$script:ResolvedAutomationAccountName', " +
+                        "and its source file was not found. Copy $($runbookDefinition.Name).ps1 into the Runbooks folder above this script " +
+                        'or beside this script, then resume.')
+                }
+                Write-Output "Verified published runbook $($runbookDefinition.Name); its source file is unavailable, so content changes were not checked."
+                continue
+            }
             $runbookFingerprint = (Get-FileHash -LiteralPath $runbookDefinition.Path -Algorithm SHA256).Hash
             if (-not (Test-SolutionRunbookReady -Name $runbookDefinition.Name -Fingerprint $runbookFingerprint)) {
                 Start-DeploymentStage -Stage $runbookDefinition.Name

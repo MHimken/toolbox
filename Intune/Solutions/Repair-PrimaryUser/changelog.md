@@ -2,6 +2,16 @@
 
 ## 2026
 
+### 10th of November
+
+* Analyzer previews now list example devices that would change. The new `PreviewDeviceCount` parameter (0 to 1000, default 50) sets how many. Each row shows device name, Intune device ID, current and new primary user, both users' sign-in counts, the new user's share of device sign-ins, distinct users, the new user's latest sign-in, last Intune sync, and change reason. Every run also prints the number of changes per reason.
+* Audit rows now also store both users' UPNs, the current user's sign-in count, total device sign-ins, distinct users, and a `ChangeReason` for changed devices.
+* The collector now stores the user principal name from each user's latest sign-in in `PrimaryUserDaily`. Older rows show user IDs in the preview until those dates are recollected with `ForceRecollect`.
+
+### 9th of November
+
+* A deployment resume no longer requires the runbook source files when the checkpoint shows they were already imported. Those runbooks are verified as published instead, and a warning reports that content changes were not checked. A runbook missing from both Azure and disk still stops the deployment.
+
 ### 3rd of November
 
 * The deployment script now finds each runbook in `..\Runbooks` first, then beside the deployment script. A missing runbook stops the deployment before the checkpoint changes and lists both checked paths.

@@ -98,6 +98,7 @@ function Invoke-GraphGet {
             for ($eventIndex = 0; $eventIndex -lt $dailyEventCount; $eventIndex++) {
                 [pscustomobject]@{
                     userId = '11111111-1111-1111-1111-111111111111'
+                    userPrincipalName = "user$eventIndex@contoso.com"
                     deviceDetail = [pscustomobject]@{ deviceId = '22222222-2222-2222-2222-222222222222' }
                     status = [pscustomobject]@{ errorCode = 0 }
                     createdDateTime = $windowDate.AddHours(12).AddMinutes($eventIndex).ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -120,6 +121,8 @@ foreach ($dateKey in @('20240228', '20240229', '20240301')) {
     $expectedEventCount = 1 + ([int]$dateKey.Substring(6, 2) % 3)
     Test-Condition ($collectorTestState.States[$dateKey].Status -eq 'Complete') 'Each day needs an independent completion state.'
     Test-Condition ($collectorTestState.Aggregates[$dateKey].SignInCount -eq $expectedEventCount) 'Aggregates must not leak between dates.'
+    Test-Condition ($collectorTestState.Aggregates[$dateKey].UserPrincipalName -eq "user$($expectedEventCount - 1)@contoso.com") `
+        'Aggregates must keep the user principal name from the latest sign-in.'
 }
 
 Reset-CollectorTestData
