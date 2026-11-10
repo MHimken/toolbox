@@ -9,7 +9,9 @@
     date partitions in Azure Table Storage one day at a time. Each row also keeps the user principal
     name from the user's latest sign-in on that device for the analyzer preview. A separate state
     row for each date prevents completed days from being collected twice. A failed day stops the
-    range; rerunning the same range skips completed dates unless ForceRecollect is supplied.
+    range; rerunning the same range skips completed dates unless ForceRecollect is supplied. A day
+    with fewer successful sign-ins than MinimumSignInCount receives status LowSignInCount, the range
+    continues, and the job fails at the end with the affected dates.
 .PARAMETER StorageAccountName
     Storage account containing the solution tables.
 .PARAMETER CollectionDate
@@ -24,6 +26,10 @@
     Days of aggregates to keep, counted back from the last collected date. After a successful job,
     all older aggregate rows and collection state rows are deleted in batches of up to 100 rows,
     including days that never completed. Defaults to 35.
+.PARAMETER MinimumSignInCount
+    Lowest number of successful sign-ins accepted for one day. A day below it receives status
+    LowSignInCount, which the analyzer treats as incomplete, and is collected again by the next run
+    for that date. Set to 0 to accept a day that is expected to have no sign-ins. Defaults to 1.
 .NOTES
     Runtime: PowerShell 7.2 or later
     Required module: Az.Accounts
@@ -57,7 +63,10 @@ param(
     [ValidateRange(29, 365)]
     [int]$RetentionDays = 35,
 
-    [bool]$ForceRecollect = $false
+    [bool]$ForceRecollect = $false,
+
+    [ValidateRange(0, 1000000)]
+    [int]$MinimumSignInCount = 1
 )
 
 Set-StrictMode -Version Latest
@@ -66,6 +75,7 @@ $ErrorActionPreference = 'Stop'
 $script:StorageBaseUri = 'https://{0}.table.core.windows.net' -f $StorageAccountName
 $script:StorageToken = $null
 $script:GraphToken = $null
+$script:LowSignInDates = [Collections.Generic.List[string]]::new()
 
 function ConvertFrom-SecureAccessToken {
     param([Parameter(Mandatory = $true)][object]$Token)
@@ -354,10 +364,17 @@ function Invoke-DailyCollection {
     param([Parameter(Mandatory = $true)][datetime]$TargetDate)
 
     $dateKey = $targetDate.ToString('yyyyMMdd')
+    $dateText = $targetDate.ToString('yyyy-MM-dd')
     $state = Get-CollectionState -DateKey $dateKey
     if ($null -ne $state -and [string]$state.Status -eq 'Complete' -and -not $ForceRecollect) {
-        Write-Output "The $($targetDate.ToString('yyyy-MM-dd')) partition is already complete. Nothing to do."
-        return
+        # Days completed before MinimumSignInCount was recorded are checked against the current minimum.
+        $recordedMinimum = Get-OptionalProperty -InputObject $state -Name 'MinimumSignInCount'
+        $recordedEventCount = [int64](Get-OptionalProperty -InputObject $state -Name 'EventCount')
+        if ($null -ne $recordedMinimum -or $recordedEventCount -ge $MinimumSignInCount) {
+            Write-Output "The $dateText partition is already complete. Nothing to do."
+            return
+        }
+        Write-Output "The $dateText partition is complete with $recordedEventCount successful sign-ins, below MinimumSignInCount $MinimumSignInCount. Collecting it again."
     }
 
     $startedAt = [datetime]::UtcNow.ToString('o')
@@ -423,17 +440,23 @@ function Invoke-DailyCollection {
         }
     }
 
+    $collectionStatus = if ($eventCount -ge $MinimumSignInCount) { 'Complete' } else { 'LowSignInCount' }
     Set-TableEntity -TableName $StateTableName -Entity @{
-        PartitionKey  = 'Collection'
-        RowKey        = $dateKey
-        Status        = 'Complete'
-        StartedAt     = $startedAt
-        CompletedAt   = [datetime]::UtcNow.ToString('o')
-        EventCount    = $eventCount
-        AggregateRows = $aggregates.Count
+        PartitionKey       = 'Collection'
+        RowKey             = $dateKey
+        Status             = $collectionStatus
+        StartedAt          = $startedAt
+        CompletedAt        = [datetime]::UtcNow.ToString('o')
+        EventCount         = $eventCount
+        AggregateRows      = $aggregates.Count
+        MinimumSignInCount = $MinimumSignInCount
     }
 
-    Write-Output "Collected $eventCount successful sign-ins into $($aggregates.Count) aggregate rows for $($targetDate.ToString('yyyy-MM-dd'))."
+    Write-Output "Collected $eventCount successful sign-ins into $($aggregates.Count) aggregate rows for $dateText."
+    if ($collectionStatus -eq 'LowSignInCount') {
+        $script:LowSignInDates.Add(('{0} ({1})' -f $dateText, $eventCount))
+        Write-Warning "$dateText has $eventCount successful sign-ins, below MinimumSignInCount $MinimumSignInCount. Its status is LowSignInCount, so the analyzer stops until the date is collected again."
+    }
 }
 
 try {
@@ -473,6 +496,10 @@ try {
         Invoke-DailyCollection -TargetDate $targetDate
     }
     Remove-ExpiredDailyPartitions -CurrentDate $lastDate
+    if ($script:LowSignInDates.Count -gt 0) {
+        throw ("Successful sign-ins are below MinimumSignInCount {0} for: {1}. These dates have status LowSignInCount and the analyzer stops until they are collected again. Rerunning the collector for these dates collects them again without ForceRecollect. If the low count is expected, collect these dates with MinimumSignInCount 0." -f
+            $MinimumSignInCount, ($script:LowSignInDates -join ', '))
+    }
 } finally {
     $ErrorActionPreference = $script:OriginalErrorActionPreference
 }

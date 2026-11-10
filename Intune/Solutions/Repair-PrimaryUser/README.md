@@ -80,7 +80,7 @@ For controlled testing, start the analyzer manually with a smaller `DaysToAnalyz
 - `SignInCount`: successful sign-ins for that day.
 - `LatestSignIn`: latest successful sign-in in UTC.
 
-`PrimaryUserState` stores collection status, analysis locks, and run summaries. Collection rows use partition `Collection`; weekly summaries use `AnalysisRuns`.
+`PrimaryUserState` stores collection status, analysis locks, and run summaries. Collection rows use partition `Collection` and row key `yyyyMMdd`. Their `Status` is `Collecting`, `Complete`, or `LowSignInCount`; `EventCount` holds the day's successful sign-ins and `MinimumSignInCount` the minimum that applied. Weekly summaries use `AnalysisRuns`.
 
 `PrimaryUserAudit` stores one row per evaluated Intune device and weekly run. Its partition key is the unique run ID. Outcomes include `Unchanged`, `Preview`, `Updated`, and `Failed`. Besides device and user IDs, each row stores `PreviousUserPrincipalName`, `RecommendedUserPrincipalName`, `PreviousUserSignInCount`, `SignInCount` (recommended user), `DeviceSignInCount`, `DistinctUserCount`, and `LatestSignIn`. Rows for devices that change also store `ChangeReason`: `NoPrimaryUser`, `NoSignInsByPrimaryUser`, `MoreSignIns`, `LatestSignIn`, or `UserIdOrder`.
 
@@ -134,11 +134,21 @@ This collects all 28 days from September 24 through October 21, oldest first, pr
 
 Each day has its own completion state. If one day fails, the job stops; rerun the same range to skip completed dates and retry the failed and remaining dates. `ForceRecollect` rebuilds every date in the range, including completed dates. Keep ranges within your tenant's available sign-in log history and the Automation job runtime limit; use smaller ranges or separate jobs for larger environments. Do not overlap range jobs with another collector job for the same dates.
 
+### Days with too few sign-ins
+
+A day whose successful sign-ins are below `MinimumSignInCount` (default 1) is saved with status `LowSignInCount` instead of `Complete`. This catches days where the sign-in log query returned no data. The job writes a warning for the day, continues with the remaining dates, and then fails with a list of the affected dates and their counts. The analyzer stops until those dates are `Complete`, and its error shows each date's status.
+
+- To collect a low day again, rerun the collector for that date or the same range. `LowSignInCount` dates are collected again without `ForceRecollect`, while complete dates are skipped.
+- To accept a low count that is expected, for example a holiday, collect that date with `MinimumSignInCount` set to `0`. The date then stays complete for later runs.
+- For stricter detection, set `MinimumSignInCount` to a value below your normal daily volume, for example `100`. The deployed daily schedule uses the default; add the parameter to the schedule link to change it.
+
+Complete dates collected before `MinimumSignInCount` existed are collected again when their `EventCount` is below the minimum, so an earlier empty day is repaired by rerunning its range.
+
 ## Data retention
 
 Both runbooks delete expired rows in Table Storage entity group transactions of up to 100 rows per request. Queries request only `PartitionKey` and `RowKey` and are processed page by page, so deleting a day with tens of thousands of device/user rows takes a few hundred requests instead of one request per row.
 
-- **Collector (`RetentionDays`, default 35):** after a successful job, every `PrimaryUserDaily` row and `Collection` state row dated more than `RetentionDays` before the last collected date is deleted. This includes days left incomplete by failed collections. Keep retention greater than the analysis window; 35 days provides seven days of recovery margin.
+- **Collector (`RetentionDays`, default 35):** after every date in the job is collected, including jobs that end with `LowSignInCount` dates, every `PrimaryUserDaily` row and `Collection` state row dated more than `RetentionDays` before the last collected date is deleted. This includes days left incomplete by failed collections. Keep retention greater than the analysis window; 35 days provides seven days of recovery margin.
 - **Analyzer (`AuditRetentionDays`, default 180):** at the end of each weekly run, including preview runs and failed analyses, `PrimaryUserAudit` partitions and `AnalysisRuns` summaries older than `AuditRetentionDays` are deleted while the analysis lock is still held. A failed cleanup is reported as a warning and does not change the run result.
 
 The deployed weekly schedule does not pass `AuditRetentionDays`, so the default applies. To keep a different period, add the parameter to the `RepairPrimaryUser-WeeklyAnalysis` schedule link or start the runbook manually with it.
@@ -197,8 +207,8 @@ The analyzer:
 ## Monitoring and recovery
 
 - Check Azure Automation job output and errors for both runbooks.
-- Inspect the `Collection` partition in `PrimaryUserState` for missing or non-`Complete` dates.
-- Recollect a missing date with `CollectionDate` and `ForceRecollect`, then rerun the analyzer.
+- Inspect the `Collection` partition in `PrimaryUserState` for missing or non-`Complete` dates, including `LowSignInCount` dates.
+- Recollect a missing date with `CollectionDate` and `ForceRecollect`, then rerun the analyzer. `LowSignInCount` dates are collected again without `ForceRecollect`.
 - Inspect `AnalysisRuns` in `PrimaryUserState` for weekly totals and terminal status.
 - Inspect the matching run-ID partition in `PrimaryUserAudit` for device-level recommendations and failures.
 - A stale analysis lock is replaced after 12 hours by default. Lower `StaleLockHours` only when a complete analysis is known to finish sooner.

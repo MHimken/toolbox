@@ -7,6 +7,8 @@
 * Analyzer previews now list example devices that would change. The new `PreviewDeviceCount` parameter (0 to 1000, default 50) sets how many. Each row shows device name, Intune device ID, current and new primary user, both users' sign-in counts, the new user's share of device sign-ins, distinct users, the new user's latest sign-in, last Intune sync, and change reason. Every run also prints the number of changes per reason.
 * Audit rows now also store both users' UPNs, the current user's sign-in count, total device sign-ins, distinct users, and a `ChangeReason` for changed devices.
 * The collector now stores the user principal name from each user's latest sign-in in `PrimaryUserDaily`. Older rows show user IDs in the preview until those dates are recollected with `ForceRecollect`.
+* The collector has a new `MinimumSignInCount` parameter (default 1). A day below it is saved as `LowSignInCount` instead of `Complete`, with a warning. The range continues, then the job fails and lists the affected dates. Rerunning the range collects those dates again; `MinimumSignInCount 0` accepts an expected empty day. Complete dates from earlier versions below the minimum are also collected again.
+* The analyzer's incomplete-collection error now shows each date's collection status.
 
 ### 9th of November
 

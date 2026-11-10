@@ -666,7 +666,10 @@ try {
             $dateKey = $date.ToString('yyyyMMdd')
             $dateKeys.Add($dateKey)
             $state = Get-TableEntity -TableName $StateTableName -PartitionKey 'Collection' -RowKey $dateKey
-            if ($null -eq $state -or [string]$state.Status -ne 'Complete') { $missingDates.Add($date.ToString('yyyy-MM-dd')) }
+            if ($null -eq $state -or [string]$state.Status -ne 'Complete') {
+                $collectionStatus = if ($null -eq $state) { 'not collected' } else { [string]$state.Status }
+                $missingDates.Add(('{0} ({1})' -f $date.ToString('yyyy-MM-dd'), $collectionStatus))
+            }
         }
         if ($missingDates.Count -gt 0) {
             throw "No assignments were changed because collection is incomplete for: $($missingDates -join ', ')."

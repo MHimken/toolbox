@@ -51,6 +51,7 @@ function Reset-AnalysisTestData {
     $analysisTestState.Summary = $null
     $analysisTestState.HistoryCleanups = 0
     $analysisTestState.LockHeldDuringCleanup = $true
+    $analysisTestState.CollectionStatus = 'Complete'
     $analysisTestState.Rows = @([pscustomobject]@{
         DeviceId = '11111111-1111-1111-1111-111111111111'
         UserId = '22222222-2222-2222-2222-222222222222'
@@ -120,7 +121,7 @@ function Initialize-ManagedIdentity {}
 function Get-TableEntity {
     param([string]$TableName, [string]$PartitionKey, [string]$RowKey)
     if ($PartitionKey -eq 'Analysis') { return $analysisTestState.ActiveLock }
-    return [pscustomobject]@{ Status = 'Complete' }
+    return [pscustomobject]@{ Status = $analysisTestState.CollectionStatus }
 }
 function Set-TableEntity {
     param([string]$TableName, [hashtable]$Entity)
@@ -293,4 +294,11 @@ $analysisTestState.Devices = @(for ($deviceIndex = 1; $deviceIndex -le 21; $devi
 Test-Condition ($analysisTestState.BatchCount -eq 2 -and $analysisTestState.Summary.Updated -eq 21 -and
     @($analysisTestState.Audits | Where-Object { $_.Outcome -eq 'Updated' }).Count -eq 21) `
     'Apply mode must submit full batches of 20 and the remaining requests.'
+
+Reset-AnalysisTestData
+$analysisTestState.CollectionStatus = 'LowSignInCount'
+$incompleteMessage = ''
+try { & $analyzerUnderTest @analysisParameters | Out-Null } catch { $incompleteMessage = $_.Exception.Message }
+Test-Condition ($incompleteMessage -like '*incomplete for: 2024-02-29 (LowSignInCount).' -and $analysisTestState.BatchCount -eq 0 -and
+    $analysisTestState.Audits.Count -eq 0) 'Days that are not complete must stop the analysis and show their collection status.'
 Write-Output 'Analyzer Boolean input, lock, and preview example tests passed.'

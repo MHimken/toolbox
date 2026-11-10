@@ -43,6 +43,7 @@ function Reset-CollectorTestData {
     $collectorTestState.RemovedDates = [Collections.Generic.List[string]]::new()
     $collectorTestState.CleanupDates = [Collections.Generic.List[string]]::new()
     $collectorTestState.FailDateKey = ''
+    $collectorTestState.EmptyDateKeys = @()
     $collectorTestState.IdentityConnections = 0
 }
 
@@ -50,7 +51,7 @@ function Invoke-ExpectedCollectorFailure {
     param([hashtable]$Parameters, [string]$ExpectedMessage)
     $previousPreference = $ErrorActionPreference
     try {
-        & $collectorUnderTest -StorageAccountName 'rpucollectiontest' @Parameters | Out-Null
+        & $collectorUnderTest -StorageAccountName 'rpucollectiontest' @Parameters 3>$null | Out-Null
     } catch {
         if ($_.Exception.Message -notlike "*$ExpectedMessage*") { throw }
         Test-Condition ($ErrorActionPreference -eq $previousPreference) 'The error preference must be restored after failure.'
@@ -92,7 +93,7 @@ function Invoke-GraphGet {
     $dateKey = $windowDate.ToString('yyyyMMdd')
     $collectorTestState.GraphDates.Add($dateKey)
     if ($dateKey -eq $collectorTestState.FailDateKey) { throw 'Simulated Graph collection failure' }
-    $dailyEventCount = 1 + ($windowDate.Day % 3)
+    $dailyEventCount = if ($dateKey -in $collectorTestState.EmptyDateKeys) { 0 } else { 1 + ($windowDate.Day % 3) }
     [pscustomobject]@{
         value = @(
             for ($eventIndex = 0; $eventIndex -lt $dailyEventCount; $eventIndex++) {
@@ -126,9 +127,9 @@ foreach ($dateKey in @('20240228', '20240229', '20240301')) {
 }
 
 Reset-CollectorTestData
-foreach ($dateKey in @('20240228', '20240301')) {
-    $collectorTestState.States[$dateKey] = [pscustomobject]@{ Status = 'Complete' }
-}
+# A row from before MinimumSignInCount was recorded and a row accepted with MinimumSignInCount 0.
+$collectorTestState.States['20240228'] = [pscustomobject]@{ Status = 'Complete'; EventCount = 2 }
+$collectorTestState.States['20240301'] = [pscustomobject]@{ Status = 'Complete'; EventCount = 0; MinimumSignInCount = 0 }
 $collectorTestState.States['20240229'] = [pscustomobject]@{ Status = 'Collecting' }
 & $collectorUnderTest -StorageAccountName 'rpucollectiontest' -CollectionDate '2024-02-28' -CollectionEndDate '2024-03-01' -ForceRecollect $false | Out-Null
 Test-Condition (($collectorTestState.GraphDates -join ',') -eq '20240229') 'Boolean false must skip completed days without returning from the entire range.'
@@ -147,6 +148,37 @@ Test-Condition ($collectorTestState.States['20240301'].Status -eq 'Complete') 'T
 $collectorTestState.GraphDates.Clear()
 & $collectorUnderTest -StorageAccountName 'rpucollectiontest' @rangeParameters -ForceRecollect $true | Out-Null
 Test-Condition (($collectorTestState.GraphDates -join ',') -eq '20240228,20240229,20240301') 'ForceRecollect must rebuild all completed days in the range.'
+
+Reset-CollectorTestData
+$collectorTestState.EmptyDateKeys = @('20240229')
+Invoke-ExpectedCollectorFailure -Parameters $rangeParameters -ExpectedMessage 'below MinimumSignInCount 1 for: 2024-02-29 (0).'
+$lowState = $collectorTestState.States['20240229']
+Test-Condition ($lowState.Status -eq 'LowSignInCount' -and $lowState.EventCount -eq 0 -and $lowState.MinimumSignInCount -eq 1) `
+    'A day without sign-ins must be recorded as LowSignInCount.'
+Test-Condition (($collectorTestState.GraphDates -join ',') -eq '20240228,20240229,20240301' -and
+    $collectorTestState.States['20240301'].Status -eq 'Complete' -and ($collectorTestState.CleanupDates -join ',') -eq '20240301') `
+    'A low day must not stop the remaining range or its retention cleanup.'
+$collectorTestState.EmptyDateKeys = @()
+$collectorTestState.GraphDates.Clear()
+& $collectorUnderTest -StorageAccountName 'rpucollectiontest' @rangeParameters | Out-Null
+Test-Condition (($collectorTestState.GraphDates -join ',') -eq '20240229' -and $collectorTestState.States['20240229'].Status -eq 'Complete') `
+    'Rerunning the range must collect only the low day again.'
+
+Reset-CollectorTestData
+$collectorTestState.States['20240229'] = [pscustomobject]@{ Status = 'Complete'; EventCount = 0 }
+& $collectorUnderTest -StorageAccountName 'rpucollectiontest' -CollectionDate '2024-02-29' | Out-Null
+Test-Condition (($collectorTestState.GraphDates -join ',') -eq '20240229' -and $collectorTestState.States['20240229'].MinimumSignInCount -eq 1) `
+    'A complete day from before MinimumSignInCount was recorded must be collected again when it is below the minimum.'
+
+Reset-CollectorTestData
+$collectorTestState.EmptyDateKeys = @('20240229')
+& $collectorUnderTest -StorageAccountName 'rpucollectiontest' -CollectionDate '2024-02-29' -MinimumSignInCount 0 | Out-Null
+Test-Condition ($collectorTestState.States['20240229'].Status -eq 'Complete') 'MinimumSignInCount 0 must accept a day without sign-ins.'
+& $collectorUnderTest -StorageAccountName 'rpucollectiontest' -CollectionDate '2024-02-29' | Out-Null
+Test-Condition ($collectorTestState.GraphDates.Count -eq 1) 'A day accepted with MinimumSignInCount 0 must stay complete for later runs.'
+
+Reset-CollectorTestData
+Invoke-ExpectedCollectorFailure -Parameters @{ CollectionDate = '2024-02-29'; MinimumSignInCount = 10 } -ExpectedMessage 'below MinimumSignInCount 10 for: 2024-02-29 (3).'
 
 Reset-CollectorTestData
 & $collectorUnderTest -StorageAccountName 'rpucollectiontest' -CollectionDate '2024-02-29' -CollectionEndDate '2024-02-29' | Out-Null
