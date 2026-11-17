@@ -2,6 +2,13 @@
 
 ## 2026
 
+### 11th of November
+
+* Devices can now be excluded from primary-user assignment by Microsoft Entra group, including nested groups, and by device name prefix, for example shared devices. The analyzer reads the exclusions from the new Automation variables `RepairPrimaryUser-ExcludedGroupIds` and `RepairPrimaryUser-ExcludedDeviceNamePrefixes`. Excluded devices never get a primary user, and an existing primary user is removed, even without collected sign-ins. Removals appear in previews, are audited with `ChangeReason` `Excluded` and the matching rule in `ExcludedBy`, and are counted in `AnalysisRuns`.
+* The analyzer fails closed when an exclusion variable is missing or contains an invalid entry, when an excluded group cannot be read, or when a group member has no device ID. A group without device members produces a warning.
+* The deployment script has new `-ExcludedGroupIds` and `-ExcludedDeviceNamePrefixes` parameters. It creates both variables empty before importing the analyzer and changes a variable only when its parameter is supplied, so portal edits are kept. Lists can be passed as one comma-separated value for `pwsh -File`; invalid entries stop the script before any change.
+* The deployment now also grants the Microsoft Graph application permissions `GroupMember.Read.All` and `Device.Read.All`. Rerun existing deployments with `-Resume` before using the updated analyzer, because it stops when the exclusion variables are missing.
+
 ### 10th of November
 
 * Analyzer previews now list example devices that would change. The new `PreviewDeviceCount` parameter (0 to 1000, default 50) sets how many. Each row shows device name, Intune device ID, current and new primary user, both users' sign-in counts, the new user's share of device sign-ins, distinct users, the new user's latest sign-in, last Intune sync, and change reason. Every run also prints the number of changes per reason.

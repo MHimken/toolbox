@@ -8,7 +8,7 @@ This Azure Automation solution repairs Microsoft Intune primary-user assignments
 
 The daily collector reads the previous completed UTC day, counts successful `Windows Sign In` events by device and user, and stores only the count and latest sign-in timestamp. Raw audit events are not stored.
 
-The weekly analyzer requires every expected daily partition to be marked `Complete`. It totals the previous 28 days, selects the user with the most sign-ins, and uses the latest successful sign-in as a deterministic tie-breaker. Devices without eligible sign-ins are unchanged.
+The weekly analyzer requires every expected daily partition to be marked `Complete`. It totals the previous 28 days, selects the user with the most sign-ins, and uses the latest successful sign-in as a deterministic tie-breaker. Devices excluded by Microsoft Entra group or device name prefix, such as shared devices, never get a primary user, and an existing primary user is removed. Other devices without eligible sign-ins are unchanged.
 
 ## Azure resources
 
@@ -17,15 +17,18 @@ The deployment creates:
 - One StorageV2 account with shared-key access disabled.
 - `PrimaryUserDaily`, `PrimaryUserState`, and `PrimaryUserAudit` Azure Tables.
 - One Azure Automation Account with a system-assigned managed identity.
+- Two Automation String variables for [device exclusions](#excluding-devices), empty by default.
 - `Storage Table Data Contributor` assignments scoped to the three solution tables.
 - Published daily and weekly runbooks with UTC schedules. They are imported with the PowerShell 7.2 runtime; you can switch them to a newer PowerShell 7.x runtime in the Automation Account.
 
 The managed identity requires these Microsoft Graph application permissions:
 
-- `AuditLog.Read.All`
-- `DeviceManagementManagedDevices.ReadWrite.All`
+- `AuditLog.Read.All`: reads the sign-in logs.
+- `DeviceManagementManagedDevices.ReadWrite.All`: reads Intune devices and sets or removes primary users.
+- `GroupMember.Read.All`: reads device exclusion groups and their members.
+- `Device.Read.All`: reads the device IDs of exclusion group members.
 
-The deployment script can grant both permissions. The administrator running it needs permission to deploy Azure resources and role assignments, plus a Microsoft Entra role permitted to grant application permissions. Microsoft Entra audit-log licensing and retention must cover the configured analysis period.
+The deployment script can grant all four permissions. It grants the last two even when no exclusion group is configured, so groups can be added later without redeploying. The administrator running it needs permission to deploy Azure resources and role assignments, plus a Microsoft Entra role permitted to grant application permissions. Microsoft Entra audit-log licensing and retention must cover the configured analysis period.
 
 If the deploying account cannot create role assignments, for example with only `Contributor`, the script deploys everything else without the table role assignments. It then prints a `New-AzRoleAssignment` block and an Azure portal alternative for an `Owner`, `User Access Administrator`, or `Role Based Access Control Administrator`. Assigning `Storage Table Data Contributor` on the storage account or on each solution table is accepted. Until the assignments exist, the runbooks cannot use their tables and the checkpoint stays incomplete. After they are created, rerun the deployment with `-Resume` to verify them and complete the checkpoint. Role assignments created outside the template are also detected when an `Owner` later redeploys.
 
@@ -55,10 +58,11 @@ Defaults:
 - Analysis window: 28 completed UTC days.
 - Daily aggregate retention: 35 days.
 - Assignment mode: apply changes.
+- Device exclusions: none.
 
 The weekly time must be at least one hour after the daily collection time. Override the defaults with `-CollectorStartTimeUtc`, `-AnalyzerStartTimeUtc`, and `-AnalyzerDayOfWeek`.
 
-Use `-SkipGraphPermissionGrant` only when both Graph application permissions will be assigned to the Automation Account managed identity separately.
+Use `-SkipGraphPermissionGrant` only when all four Graph application permissions will be assigned to the Automation Account managed identity separately.
 
 ## Initial warm-up
 
@@ -80,9 +84,9 @@ For controlled testing, start the analyzer manually with a smaller `DaysToAnalyz
 - `SignInCount`: successful sign-ins for that day.
 - `LatestSignIn`: latest successful sign-in in UTC.
 
-`PrimaryUserState` stores collection status, analysis locks, and run summaries. Collection rows use partition `Collection` and row key `yyyyMMdd`. Their `Status` is `Collecting`, `Complete`, or `LowSignInCount`; `EventCount` holds the day's successful sign-ins and `MinimumSignInCount` the minimum that applied. Weekly summaries use `AnalysisRuns`.
+`PrimaryUserState` stores collection status, analysis locks, and run summaries. Collection rows use partition `Collection` and row key `yyyyMMdd`. Their `Status` is `Collecting`, `Complete`, or `LowSignInCount`; `EventCount` holds the day's successful sign-ins and `MinimumSignInCount` the minimum that applied. Weekly summaries use `AnalysisRuns`; they include the number of excluded devices in `Excluded` and the exclusions in effect in `ExcludedGroupIds` and `ExcludedDeviceNamePrefixes`.
 
-`PrimaryUserAudit` stores one row per evaluated Intune device and weekly run. Its partition key is the unique run ID. Outcomes include `Unchanged`, `Preview`, `Updated`, and `Failed`. Besides device and user IDs, each row stores `PreviousUserPrincipalName`, `RecommendedUserPrincipalName`, `PreviousUserSignInCount`, `SignInCount` (recommended user), `DeviceSignInCount`, `DistinctUserCount`, and `LatestSignIn`. Rows for devices that change also store `ChangeReason`: `NoPrimaryUser`, `NoSignInsByPrimaryUser`, `MoreSignIns`, `LatestSignIn`, or `UserIdOrder`.
+`PrimaryUserAudit` stores one row per evaluated Intune device and weekly run. Its partition key is the unique run ID. Outcomes include `Unchanged`, `Preview`, `Updated`, and `Failed`. Besides device and user IDs, each row stores `PreviousUserPrincipalName`, `RecommendedUserPrincipalName`, `PreviousUserSignInCount`, `SignInCount` (recommended user), `DeviceSignInCount`, `DistinctUserCount`, and `LatestSignIn`. Rows for devices that change also store `ChangeReason`: `NoPrimaryUser`, `NoSignInsByPrimaryUser`, `MoreSignIns`, `LatestSignIn`, `UserIdOrder`, or `Excluded` for a removed primary user. Rows for excluded devices have no recommended user and store the matching rule in `ExcludedBy`, for example `Prefix KIOSK-`.
 
 ## Running a single job in the Azure portal
 
@@ -181,15 +185,15 @@ Preview recommendations are written to `PrimaryUserAudit` and no Intune assignme
 | `IntuneDeviceId` | Intune managed device ID. |
 | `CurrentPrimaryUser` | Current primary user's UPN, the user ID when no UPN is known, or `(none)`. |
 | `CurrentUserSignIns` | Current primary user's sign-ins on the device in the analysis window. |
-| `NewPrimaryUser` | Recommended user's UPN, or the user ID when no UPN is known. |
+| `NewPrimaryUser` | Recommended user's UPN, the user ID when no UPN is known, or `(none)` when an excluded device's primary user is removed. |
 | `NewUserSignIns` | Recommended user's sign-ins on the device in the analysis window. |
 | `NewUserShare` | Recommended user's share of all sign-ins on the device. |
 | `DeviceUsers` | Distinct users who signed in on the device. |
 | `NewUserLastSignInUtc` | Recommended user's latest sign-in on the device. |
 | `LastIntuneSyncUtc` | Device's last Intune sync. |
-| `Reason` | No primary user, current user has no sign-ins, more sign-ins, or a tie resolved by latest sign-in or user ID order. |
+| `Reason` | No primary user, current user has no sign-ins, more sign-ins, a tie resolved by latest sign-in or user ID order, or `Excluded device` with the matching rule. |
 
-Set `PreviewDeviceCount` to 0 to print only the totals. Every recommendation, including those beyond the listed count, is in the run's `PrimaryUserAudit` partition. Each run, including scheduled runs, also prints the number of changes per reason.
+For excluded devices, the new user's sign-in columns are empty. Set `PreviewDeviceCount` to 0 to print only the totals. Every recommendation, including those beyond the listed count, is in the run's `PrimaryUserAudit` partition. Each run, including scheduled runs, also prints the number of changes per reason.
 
 UPNs come from the collected sign-ins and from Intune's primary user data, so no additional Graph permission is needed. A recommended user who has no collected UPN and is not the primary user of any Intune device is shown by user ID.
 
@@ -197,12 +201,46 @@ The analyzer:
 
 1. Acquires an Azure Table lock to prevent overlapping weekly runs.
 2. Verifies all expected collection states.
-3. Aggregates daily device/user counts.
-4. Pages company-owned Windows Intune devices.
-5. Skips unchanged devices.
-6. Sends changed assignments in Microsoft Graph batches of at most 20.
-7. Retries throttled and transient requests and records each outcome.
-8. Deletes audit history older than `AuditRetentionDays`, then releases the lock.
+3. Reads the device exclusions and the device members of excluded groups.
+4. Aggregates daily device/user counts.
+5. Pages company-owned Windows Intune devices.
+6. Skips unchanged devices.
+7. Sends changed assignments and primary-user removals in Microsoft Graph batches of at most 20.
+8. Retries throttled and transient requests and records each outcome.
+9. Deletes audit history older than `AuditRetentionDays`, then releases the lock.
+
+## Excluding devices
+
+Devices that must never have a primary user, such as shared, kiosk, or lab devices, can be excluded by Microsoft Entra group, by device name prefix, or both. The analyzer never assigns a primary user to an excluded device. If an excluded device already has one, for example from enrollment or a manual assignment, the analyzer removes it, even when the device has no collected sign-ins.
+
+The exclusions are stored in two String variables in the Automation Account. The deployment creates both empty, which means no exclusions.
+
+| Variable | Content |
+| --- | --- |
+| `RepairPrimaryUser-ExcludedGroupIds` | Object IDs of Microsoft Entra groups. Their device members, including devices in nested groups, are excluded. |
+| `RepairPrimaryUser-ExcludedDeviceNamePrefixes` | Device name prefixes, such as `KIOSK-`. Matching ignores case; a single trailing `*` is optional. |
+
+Separate entries with commas, semicolons, spaces, or line breaks, without quotation marks. Prefixes are checked before groups; the first matching rule is recorded for the device.
+
+Set the variables with the deployment script. An omitted parameter keeps its variable's current value, including edits made in the portal, and `''` removes all entries:
+
+```powershell
+pwsh.exe -NoProfile -File .\Deployment\Deploy-RepairPrimaryUser.ps1 -Resume `
+    -ExcludedGroupIds '<group-object-id>' `
+    -ExcludedDeviceNamePrefixes 'KIOSK-,LAB-'
+```
+
+With `pwsh.exe -File`, pass several entries as one comma-separated value as shown; PowerShell array syntax does not reach the script intact. When you run the script in the current PowerShell session, arrays such as `'KIOSK-', 'LAB-'` and `@()` also work. Invalid entries stop the script before any change. Alternatively, edit the variables in the Automation Account under **Shared Resources** > **Variables**. Changes apply from the next analyzer run.
+
+- Add the devices themselves to an exclusion group, not their users. A group without device members produces a warning in the job output.
+- Group membership is read from an eventually consistent Microsoft Graph index, so a device added shortly before a run might not be excluded until the next run.
+- Exclusion groups require the `GroupMember.Read.All` and `Device.Read.All` permissions. Managed identity tokens are cached, so newly granted permissions can take several hours to take effect.
+- The analyzer fails closed when an exclusion variable is missing or contains an invalid entry, when an excluded group is not found or cannot be read, or when a group member has no device ID. That run changes no primary users.
+- Exclusions apply to the devices that the analyzer evaluates: company-owned Windows devices.
+
+Run a preview after changing exclusions. Planned removals are listed with the reason `Excluded device` and the matching rule. Removals are audited with `ChangeReason` `Excluded` and the rule in `ExcludedBy`.
+
+To add device exclusions to an existing deployment, rerun the deployment script with `-Resume`, or with the original parameters if the checkpoint file is not available. The run grants the two additional permissions and creates both variables before it imports the updated analyzer, which stops when they are missing. Granting the permissions requires the same Microsoft Entra role as the first deployment; with `-SkipGraphPermissionGrant`, assign them separately.
 
 ## Monitoring and recovery
 
@@ -213,7 +251,7 @@ The analyzer:
 - Inspect the matching run-ID partition in `PrimaryUserAudit` for device-level recommendations and failures.
 - A stale analysis lock is replaced after 12 hours by default. Lower `StaleLockHours` only when a complete analysis is known to finish sooner.
 
-The analyzer fails closed: missing daily data, Graph retrieval failures, or lock conflicts stop the run before new assignments are submitted. Individual batch failures are audited and do not hide successful updates from the same run.
+The analyzer fails closed: missing daily data, invalid or unreadable device exclusions, Graph retrieval failures, or lock conflicts stop the run before new assignments or removals are submitted. Individual batch failures are audited and do not hide successful updates from the same run.
 
 ## Cost and scale
 
@@ -221,7 +259,7 @@ Storage contains compact aggregates rather than raw audit events. Approximate da
 
 ## Removal
 
-Unregister and remove the two schedules, remove the two Automation runbooks, revoke the managed identity's two Graph app-role assignments, and delete the resource group if it contains only this solution. Deleting the resource group permanently removes aggregate and audit history.
+Unregister and remove the two schedules, remove the two Automation runbooks and the two exclusion variables, revoke the managed identity's four Graph app-role assignments, and delete the resource group if it contains only this solution. Deleting the resource group permanently removes aggregate and audit history.
 
 ## Change history
 

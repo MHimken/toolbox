@@ -1,0 +1,3 @@
+# Generated group data and reports contain tenant information. Keep them local.
+*
+!.gitignore

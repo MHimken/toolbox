@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="__EXPLORER_CSP__">
+  <title>__EXPLORER_TITLE__</title>
+  <style>__EXPLORER_CSS__</style>
+</head>
+<body>
+  <main id="explorer">
+    <h1 class="visually-hidden">Entra group explorer</h1>
+    <section id="searchShell" class="search-shell" aria-label="Group search">
+      <label for="groupSearch">Search groups by name</label>
+      <input id="groupSearch" type="search" role="combobox" aria-autocomplete="list" aria-expanded="false"
+        aria-controls="groupSuggestions" aria-activedescendant="" autocomplete="off" spellcheck="false">
+      <div id="groupSuggestions" class="suggestions" role="listbox" aria-label="Matching groups" hidden></div>
+      <p id="searchStatus" class="status" role="status" aria-live="polite"></p>
+    </section>
+    <section id="selectedView" class="selected-view" aria-label="Selected group" hidden>
+      <div id="parentsRegion" class="relation-region">
+        <h2>Groups this group is a member of</h2>
+        <ul id="parentsTree" class="tree tree-up"></ul>
+      </div>
+      <article id="centerCard" class="center-card"></article>
+      <div id="childrenRegion" class="relation-region">
+        <h2>Groups nested in this group</h2>
+        <ul id="childrenTree" class="tree tree-down"></ul>
+      </div>
+      <div class="toolbar" aria-label="Diagram controls">
+        <button id="expandAll" type="button">Expand all</button>
+        <button id="collapseAll" type="button">Collapse all</button>
+        <button id="zoomOut" type="button" aria-label="Zoom out">-</button>
+        <button id="zoomIn" type="button" aria-label="Zoom in">+</button>
+        <button id="zoomReset" type="button">Reset zoom</button>
+      </div>
+      <p id="snapshotLine" class="snapshot"></p>
+    </section>
+    <script id="explorerData" type="application/json">__EXPLORER_DATA__</script>
+    <script>__EXPLORER_JS__</script>
+  </main>
+</body>
+</html>

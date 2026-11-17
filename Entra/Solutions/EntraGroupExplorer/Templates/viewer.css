@@ -1,0 +1,266 @@
+:root {
+  color-scheme: light;
+  --ink: #202626;
+  --ink-max: #000000;
+  --band: #242c31;
+  --accent: #ea2c48;
+  --accent-text: #9f2f45;
+  --line: #737b80;
+  --paper: #ffffff;
+  --wash: #f3f4f4;
+  --warn-fill: #ffb000;
+  --warn-bg: #fff4d6;
+  --warn-ink: #8a5700;
+  font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+}
+* { box-sizing: border-box; }
+body { min-width: 320px; min-height: 100vh; margin: 0; background: var(--paper); }
+button, input { font: inherit; }
+button { cursor: pointer; }
+button:focus-visible, input:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+#explorer { min-height: 100vh; }
+.search-shell {
+  position: fixed;
+  z-index: 5;
+  top: 50%;
+  left: 50%;
+  width: min(680px, calc(100vw - 32px));
+  padding: 20px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  transform: translate(-50%, -50%);
+  transition: width 250ms ease, top 250ms ease, left 250ms ease, transform 250ms ease;
+}
+.search-shell label { display: block; margin-bottom: 8px; color: var(--ink); font-weight: 700; }
+#groupSearch {
+  width: 100%;
+  min-height: 48px;
+  border: 2px solid var(--band);
+  padding: 10px 12px;
+  color: var(--ink);
+  background: var(--paper);
+  font-size: 1.1rem;
+}
+.status { min-height: 1.25em; margin: 8px 0 0; color: var(--ink); }
+.suggestions {
+  position: absolute;
+  top: calc(100% - 1px);
+  left: -1px;
+  width: calc(100% + 2px);
+  max-height: min(50vh, 420px);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-top: 0;
+  background: var(--paper);
+}
+.suggestion {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 14px;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--wash);
+  padding: 12px;
+  color: var(--ink);
+  background: var(--paper);
+  text-align: left;
+}
+.suggestion[aria-selected="true"], .suggestion:hover { background: var(--wash); }
+.suggestion-name { overflow: hidden; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.suggestion-detail { grid-column: 1 / -1; color: var(--ink); font-size: .875rem; overflow-wrap: anywhere; }
+.warning-symbol { display: inline-flex; align-items: center; gap: 4px; color: var(--ink); font-weight: 700; white-space: nowrap; }
+/* clip-path clips borders, so the triangle is a solid fill; "Dangerous" is red, indirect "Warning" is amber. */
+.warning-symbol::before {
+  display: inline-grid;
+  flex: none;
+  width: 1.3em;
+  height: 1.15em;
+  place-items: end center;
+  padding-bottom: .05em;
+  color: var(--paper);
+  background: var(--accent);
+  content: "!";
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  font-size: .85em;
+  font-weight: 800;
+  line-height: 1;
+}
+.warning-symbol.outlined::before { color: var(--ink-max); background: var(--warn-fill); }
+.center-card .center-heading .warning-symbol { color: var(--paper); }
+.selected-view { padding: 22px 18px 40px; }
+.search-shell.is-selected {
+  position: relative;
+  top: auto;
+  left: auto;
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  transform: none;
+}
+.selected-view[hidden], [hidden] { display: none !important; }
+.relation-region { width: 100%; margin: 0 auto; text-align: center; }
+.relation-region h2 { margin: 24px 0 14px; color: var(--band); font-size: 1rem; }
+/* Relations spread across the full width in rows of equally wide cards; one connector links each tree to the center card. */
+.tree {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 16px 20px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tree > li, .branch-list > li { min-width: 0; max-width: 100%; }
+/* The upper tree grows upward: a group's own parents sit above it, further away from the center. */
+.tree-up, .tree-up .branch-list { align-items: flex-end; }
+.tree-up .node > .branch-list { order: -2; padding: 10px 10px 14px; }
+.tree-up .node > .branch-toggle { order: -1; border-top: 0; border-bottom: 1px solid var(--line); }
+.tree-up { padding-bottom: 18px; }
+.tree-down { padding-top: 18px; }
+.tree-up::after, .tree-down::before {
+  position: absolute;
+  left: 50%;
+  width: 2px;
+  height: 18px;
+  background: var(--accent);
+  content: "";
+}
+.tree-up::after { bottom: 0; }
+.tree-down::before { top: 0; }
+.tree:has(> li > .empty-message)::after, .tree:has(> li > .empty-message)::before { display: none; }
+.branch-list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 16px 20px;
+  margin: 0;
+  padding: 14px 10px 10px;
+  list-style: none;
+}
+/* --name-chars comes from MaxNameLength; --depth narrows nested cards by the branch inset so columns stay aligned at every level. */
+.node {
+  --node-width: calc(var(--name-chars, 30) * .55em + 150px);
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  width: calc(var(--node-width) - var(--depth, 0) * 22px);
+  max-width: 100%;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  text-align: left;
+}
+/* An expanded node grows to fit its nested groups, which then wrap into rows instead of one tall column. */
+.node:has(> .branch-list:not([hidden])) { width: auto; }
+.node-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  min-height: 44px;
+  border: 0;
+  padding: 10px 12px;
+  color: var(--ink);
+  background: var(--paper);
+  font-weight: 700;
+  text-align: left;
+}
+.node-label:hover { background: var(--wash); }
+.node-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node-label .warning-symbol { flex: none; }
+.branch-toggle {
+  min-height: 32px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  padding: 5px 10px;
+  color: var(--accent-text);
+  background: var(--paper);
+  text-align: left;
+}
+.more-toggle {
+  min-height: 36px;
+  border: 1px solid var(--band);
+  padding: 6px 10px;
+  color: var(--band);
+  background: var(--paper);
+}
+.meta-panel { border-top: 1px solid var(--line); padding: 12px; background: var(--wash); }
+.meta-panel dl { display: grid; grid-template-columns: minmax(90px, auto) minmax(0, 1fr); gap: 5px 12px; margin: 0; font-size: .875rem; overflow-wrap: anywhere; }
+.meta-panel dt { font-weight: 700; }
+.meta-panel dd { margin: 0; }
+.count-table { width: 100%; margin-top: 12px; border-collapse: collapse; font-size: .875rem; }
+.count-table caption { padding: 4px; font-weight: 700; text-align: left; }
+.count-table th, .count-table td { border: 1px solid var(--line); padding: 5px 7px; text-align: right; }
+.count-table th:first-child, .count-table td:first-child { text-align: left; }
+.warning-line { margin: 10px 0 0; border-left: 4px solid var(--warn-fill); padding: 8px; color: var(--warn-ink); background: var(--warn-bg); }
+.use-center {
+  min-height: 36px;
+  margin-top: 12px;
+  border: 1px solid var(--band);
+  padding: 6px 10px;
+  color: var(--paper);
+  background: var(--band);
+}
+.center-card {
+  width: min(760px, 100%);
+  margin: 0 auto;
+  border: 2px solid var(--band);
+  background: var(--paper);
+}
+.center-card .center-heading { border-bottom: 5px solid var(--accent); padding: 16px; color: var(--paper); background: var(--band); }
+.center-heading h2 { margin: 0 0 6px; overflow-wrap: anywhere; font-size: 1.35rem; }
+.center-heading p { margin: 0; color: var(--paper); overflow-wrap: anywhere; }
+.center-content { padding: 14px 16px; }
+.center-content dl { display: grid; grid-template-columns: minmax(110px, auto) minmax(0, 1fr); gap: 5px 12px; margin: 0; overflow-wrap: anywhere; }
+.center-content dt { font-weight: 700; }
+.center-content dd { margin: 0; }
+.toolbar { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin: 24px auto 0; }
+.toolbar button {
+  min-height: 40px;
+  min-width: 40px;
+  border: 1px solid var(--band);
+  padding: 7px 10px;
+  color: var(--band);
+  background: var(--paper);
+}
+.snapshot { margin: 16px 0 0; color: var(--band); text-align: center; }
+.diagram-viewport { max-width: 100%; overflow: auto; }
+.diagram-content { transform-origin: top center; }
+.empty-message { padding: 14px; text-align: center; }
+#selectedView.zoom-60 { zoom: .6; }
+#selectedView.zoom-70 { zoom: .7; }
+#selectedView.zoom-80 { zoom: .8; }
+#selectedView.zoom-90 { zoom: .9; }
+#selectedView.zoom-100 { zoom: 1; }
+#selectedView.zoom-110 { zoom: 1.1; }
+#selectedView.zoom-120 { zoom: 1.2; }
+#selectedView.zoom-130 { zoom: 1.3; }
+#selectedView.zoom-140 { zoom: 1.4; }
+#selectedView.zoom-150 { zoom: 1.5; }
+@media (max-width: 640px) {
+  .selected-view { padding-inline: 10px; }
+  .search-shell.is-selected { padding: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}

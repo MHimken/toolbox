@@ -9,6 +9,10 @@
     Windows device. Equal counts are resolved by the latest successful sign-in. Preview runs print
     a table of example devices that would change, and every run prints the number of changes per
     change reason.
+    Devices excluded by group or device name prefix in the Automation variables
+    RepairPrimaryUser-ExcludedGroupIds and RepairPrimaryUser-ExcludedDeviceNamePrefixes, such as
+    shared devices, never get a primary user. An existing primary user on an excluded device is
+    removed, even when the device has no collected sign-ins.
 .PARAMETER Preview
     Set to true to calculate and audit recommendations without changing Intune assignments.
     Defaults to false, which applies assignments. Accepts a Boolean Azure Automation input.
@@ -24,7 +28,10 @@
 .NOTES
     Runtime: PowerShell 7.2 or later
     Required module: Az.Accounts
-    Graph application permission: DeviceManagementManagedDevices.ReadWrite.All
+    Graph application permissions: DeviceManagementManagedDevices.ReadWrite.All; GroupMember.Read.All
+    and Device.Read.All when excluded groups are configured
+    Automation variables (String, empty means no exclusions): RepairPrimaryUser-ExcludedGroupIds,
+    RepairPrimaryUser-ExcludedDeviceNamePrefixes
     Azure role: Storage Table Data Contributor
 #>
 
@@ -81,7 +88,14 @@ $script:ChangeReasonLabels = [ordered]@{
     MoreSignIns            = 'More sign-ins'
     LatestSignIn           = 'Tie, latest sign-in'
     UserIdOrder            = 'Tie, user ID order'
+    Excluded               = 'Excluded device'
 }
+$script:ExcludedGroupIdsVariableName = 'RepairPrimaryUser-ExcludedGroupIds'
+$script:ExcludedPrefixesVariableName = 'RepairPrimaryUser-ExcludedDeviceNamePrefixes'
+$script:ExcludedGroupIds = @()
+$script:ExcludedDeviceNamePrefixes = @()
+# Lowercase Microsoft Entra device ID to the label of the first configured group that contains the device.
+$script:ExcludedGroupDevices = @{}
 
 function ConvertFrom-SecureAccessToken {
     param([Parameter(Mandatory = $true)][object]$Token)
@@ -400,11 +414,16 @@ function Exit-AnalysisLock {
 }
 
 function Invoke-GraphGet {
-    param([Parameter(Mandatory = $true)][uri]$Uri)
+    param(
+        [Parameter(Mandatory = $true)][uri]$Uri,
+        [hashtable]$Headers = @{}
+    )
 
+    $requestHeaders = @{ Authorization = "Bearer $script:GraphToken" }
+    foreach ($headerName in $Headers.Keys) { $requestHeaders[$headerName] = $Headers[$headerName] }
     for ($attempt = 1; $attempt -le $MaximumRetryCount; $attempt++) {
         try {
-            return Invoke-RestMethod -Method Get -Uri $Uri -Headers @{ Authorization = "Bearer $script:GraphToken" } -ErrorAction Stop
+            return Invoke-RestMethod -Method Get -Uri $Uri -Headers $requestHeaders -ErrorAction Stop
         } catch {
             if ($attempt -eq $MaximumRetryCount -or -not (Test-RetryableError -ErrorRecord $_)) { throw }
             Start-Sleep -Seconds (Get-RetryDelaySeconds -ErrorRecord $_ -Attempt $attempt)
@@ -452,6 +471,112 @@ function Invoke-GraphBatch {
         if ($pending.Count -gt 0) { Start-Sleep -Seconds ([math]::Min([math]::Pow(2, $attempt), 30)) }
     }
     return $results
+}
+
+function Read-ExclusionVariable {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    try {
+        $value = Get-AutomationVariable -Name $Name -ErrorAction Stop
+    } catch {
+        throw ("Automation variable '$Name' could not be read: $($_.Exception.Message) Create it as a String variable " +
+            '(an empty value means no exclusions) or rerun the deployment script with -Resume.')
+    }
+    # Windows device names and group object IDs contain no commas, semicolons, or white space.
+    return @([string]$value -split '[\s,;]+' | Where-Object { $_ -ne '' })
+}
+
+function Add-ExcludedGroupDevice {
+    param([Parameter(Mandatory = $true)][string]$GroupId)
+
+    try {
+        $group = Invoke-GraphGet -Uri "https://graph.microsoft.com/v1.0/groups/$GroupId`?`$select=id,displayName"
+        $groupLabel = 'Group {0} ({1})' -f [string](Get-OptionalProperty -InputObject $group -Name 'displayName'), $GroupId
+        $memberCount = 0
+        $memberUri = "https://graph.microsoft.com/v1.0/groups/$GroupId/transitiveMembers/microsoft.graph.device?`$count=true&`$select=id,deviceId,displayName&`$top=999"
+        while (-not [string]::IsNullOrWhiteSpace($memberUri)) {
+            # Casting members to devices is an advanced query that requires eventual consistency and $count.
+            $page = Invoke-GraphGet -Uri $memberUri -Headers @{ ConsistencyLevel = 'eventual' }
+            foreach ($member in @($page.value)) {
+                $memberDeviceId = [string](Get-OptionalProperty -InputObject $member -Name 'deviceId')
+                # Without Device.Read.All, Graph returns device members with only their object ID.
+                if ([string]::IsNullOrWhiteSpace($memberDeviceId)) {
+                    throw ("$groupLabel returned a device member without a device ID. Grant the managed identity the " +
+                        'Microsoft Graph application permission Device.Read.All.')
+                }
+                $memberCount++
+                $deviceKey = $memberDeviceId.ToLowerInvariant()
+                if (-not $script:ExcludedGroupDevices.ContainsKey($deviceKey)) { $script:ExcludedGroupDevices[$deviceKey] = $groupLabel }
+            }
+            $memberUri = [string](Get-OptionalProperty -InputObject $page -Name '@odata.nextLink')
+        }
+    } catch {
+        $statusCode = Get-HttpStatusCode -ErrorRecord $_
+        if ($statusCode -eq 404) {
+            throw "Excluded group '$GroupId' was not found. Correct or remove it in Automation variable '$script:ExcludedGroupIdsVariableName'."
+        }
+        if ($statusCode -eq 403) {
+            throw ("Excluded group '$GroupId' could not be read. Grant the managed identity the Microsoft Graph application " +
+                'permissions GroupMember.Read.All and Device.Read.All.')
+        }
+        if ($statusCode -gt 0) { throw "Excluded group '$GroupId' could not be read (HTTP $statusCode). $($_.Exception.Message)" }
+        throw
+    }
+    if ($memberCount -eq 0) {
+        Write-Warning "$groupLabel has no device members and excludes no devices. Add the devices, not their users, to the group."
+    }
+    return '{0} with {1} devices' -f $groupLabel, $memberCount
+}
+
+# Fails closed: an unreadable or invalid exclusion stops the run before any assignment changes.
+function Initialize-DeviceExclusion {
+    $groupIds = [Collections.Generic.List[string]]::new()
+    foreach ($entry in @(Read-ExclusionVariable -Name $script:ExcludedGroupIdsVariableName)) {
+        $groupId = [guid]::Empty
+        if (-not [guid]::TryParse($entry, [ref]$groupId)) {
+            throw "Automation variable '$script:ExcludedGroupIdsVariableName' contains '$entry', which is not a group object ID."
+        }
+        if (-not $groupIds.Contains($groupId.ToString())) { $groupIds.Add($groupId.ToString()) }
+    }
+    $prefixes = [Collections.Generic.List[string]]::new()
+    foreach ($entry in @(Read-ExclusionVariable -Name $script:ExcludedPrefixesVariableName)) {
+        # A quoted entry, such as "KIOSK-", would silently match no device name.
+        if ($entry.IndexOfAny([char[]]@('"', "'")) -ge 0) {
+            throw ("Automation variable '$script:ExcludedPrefixesVariableName' contains $entry. Enter the prefixes without " +
+                'quotation marks, separated by commas, for example: KIOSK-, LAB-')
+        }
+        $prefix = if ($entry.EndsWith('*')) { $entry.Substring(0, $entry.Length - 1) } else { $entry }
+        # A lone or embedded wildcard could exclude every device, so only a trailing * is accepted.
+        if ($prefix.Length -eq 0 -or $prefix.IndexOfAny([char[]]@('*', '?')) -ge 0) {
+            throw ("Automation variable '$script:ExcludedPrefixesVariableName' contains '$entry'. Use device name prefixes " +
+                "such as 'KIOSK-'; only a single trailing '*' is allowed.")
+        }
+        if (@($prefixes | Where-Object { $_ -eq $prefix }).Count -eq 0) { $prefixes.Add($prefix) }
+    }
+    $script:ExcludedGroupIds = $groupIds.ToArray()
+    $script:ExcludedDeviceNamePrefixes = $prefixes.ToArray()
+
+    $exclusionRules = [Collections.Generic.List[string]]::new()
+    foreach ($prefix in $script:ExcludedDeviceNamePrefixes) { $exclusionRules.Add("Prefix $prefix") }
+    foreach ($groupId in $script:ExcludedGroupIds) { $exclusionRules.Add((Add-ExcludedGroupDevice -GroupId $groupId)) }
+    if ($exclusionRules.Count -eq 0) {
+        Write-Output 'Device exclusions: none configured.'
+    } else {
+        Write-Output ('Device exclusions: {0}.' -f ($exclusionRules -join '; '))
+    }
+}
+
+# Returns the first matching rule, checking prefixes before groups, or an empty string.
+function Get-DeviceExclusion {
+    param([Parameter(Mandatory = $true)][object]$Device)
+
+    $deviceName = [string]$Device.deviceName
+    foreach ($prefix in $script:ExcludedDeviceNamePrefixes) {
+        if ($deviceName.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return "Prefix $prefix" }
+    }
+    $deviceKey = ([string]$Device.azureADDeviceId).ToLowerInvariant()
+    if ($script:ExcludedGroupDevices.ContainsKey($deviceKey)) { return [string]$script:ExcludedGroupDevices[$deviceKey] }
+    return ''
 }
 
 function Write-AuditEntity {
@@ -526,7 +651,8 @@ function New-DeviceAssessment {
     param(
         [Parameter(Mandatory = $true)][object]$Device,
         [Parameter(Mandatory = $true)][hashtable]$Candidates,
-        [Parameter(Mandatory = $true)][object]$Winner
+        [AllowNull()][object]$Winner,
+        [string]$ExcludedBy
     )
 
     $currentUserId = [string]$Device.userId
@@ -538,8 +664,13 @@ function New-DeviceAssessment {
     foreach ($candidate in $Candidates.Values) { $deviceSignInCount += $candidate.Count }
     $currentPrincipalName = [string](Get-OptionalProperty -InputObject $Device -Name 'userPrincipalName')
     if ([string]::IsNullOrWhiteSpace($currentPrincipalName)) { $currentPrincipalName = Get-UserPrincipalName -UserId $currentUserId }
+    # An excluded device is recommended to have no primary user.
+    $recommendedUser = if ([string]::IsNullOrEmpty($ExcludedBy)) { $Winner } else { $null }
+    $recommendedUserId = if ($null -eq $recommendedUser) { '' } else { [string]$recommendedUser.UserId }
     $changeReason = ''
-    if ($currentUserId -ne [string]$Winner.UserId) {
+    if (-not [string]::IsNullOrEmpty($ExcludedBy)) {
+        if (-not [string]::IsNullOrWhiteSpace($currentUserId)) { $changeReason = 'Excluded' }
+    } elseif ($currentUserId -ne $recommendedUserId) {
         $changeReason = Get-ChangeReason -CurrentUserId $currentUserId -CurrentCandidate $currentCandidate -Winner $Winner
     }
 
@@ -551,12 +682,13 @@ function New-DeviceAssessment {
         CurrentUserId                = $currentUserId
         CurrentUserPrincipalName     = $currentPrincipalName
         CurrentUserSignInCount       = if ($null -eq $currentCandidate) { [int64]0 } else { [int64]$currentCandidate.Count }
-        RecommendedUserId            = [string]$Winner.UserId
-        RecommendedUserPrincipalName = Get-UserPrincipalName -UserId ([string]$Winner.UserId)
-        RecommendedUserSignInCount   = [int64]$Winner.Count
-        RecommendedUserLatestSignIn  = $Winner.LatestSignIn
+        RecommendedUserId            = $recommendedUserId
+        RecommendedUserPrincipalName = Get-UserPrincipalName -UserId $recommendedUserId
+        RecommendedUserSignInCount   = if ($null -eq $recommendedUser) { [int64]0 } else { [int64]$recommendedUser.Count }
+        RecommendedUserLatestSignIn  = if ($null -eq $recommendedUser) { $null } else { $recommendedUser.LatestSignIn }
         DeviceSignInCount            = $deviceSignInCount
         DistinctUserCount            = $Candidates.Count
+        ExcludedBy                   = [string]$ExcludedBy
         ChangeReason                 = $changeReason
     }
 }
@@ -578,12 +710,13 @@ function ConvertTo-AuditProperty {
         RecommendedUserId            = $Assessment.RecommendedUserId
         RecommendedUserPrincipalName = $Assessment.RecommendedUserPrincipalName
         SignInCount                  = $Assessment.RecommendedUserSignInCount
-        LatestSignIn                 = $Assessment.RecommendedUserLatestSignIn.ToString('o')
         DeviceSignInCount            = $Assessment.DeviceSignInCount
         DistinctUserCount            = $Assessment.DistinctUserCount
         Outcome                      = $Outcome
         Preview                      = [bool]$Preview
     }
+    if ($null -ne $Assessment.RecommendedUserLatestSignIn) { $properties.LatestSignIn = $Assessment.RecommendedUserLatestSignIn.ToString('o') }
+    if (-not [string]::IsNullOrEmpty($Assessment.ExcludedBy)) { $properties.ExcludedBy = $Assessment.ExcludedBy }
     if (-not [string]::IsNullOrEmpty($Assessment.ChangeReason)) { $properties.ChangeReason = $Assessment.ChangeReason }
     if ($null -ne $BatchResult) {
         $properties.HttpStatus = [int]$BatchResult.Status
@@ -617,19 +750,22 @@ function Write-PreviewExample {
     Write-Output ("Preview examples: {0} of {1} devices that would change, sorted by device name. All {1} are in table '{2}', partition '{3}', with Outcome 'Preview'." -f
         $Assessments.Count, $ChangeCount, $AuditTableName, $script:RunId)
     $exampleRows = foreach ($assessment in @($Assessments | Sort-Object -Property DeviceName, IntuneDeviceId)) {
+        $hasNewUser = -not [string]::IsNullOrEmpty($assessment.RecommendedUserId)
         $signInShare = if ($assessment.DeviceSignInCount -gt 0) { [double]$assessment.RecommendedUserSignInCount / $assessment.DeviceSignInCount } else { 0 }
+        $reason = $script:ChangeReasonLabels[$assessment.ChangeReason]
+        if ($assessment.ChangeReason -eq 'Excluded') { $reason = '{0}: {1}' -f $reason, $assessment.ExcludedBy }
         [pscustomobject]@{
             DeviceName           = $assessment.DeviceName
             IntuneDeviceId       = $assessment.IntuneDeviceId
             CurrentPrimaryUser   = Resolve-UserLabel -UserId $assessment.CurrentUserId -UserPrincipalName $assessment.CurrentUserPrincipalName
             CurrentUserSignIns   = $assessment.CurrentUserSignInCount
             NewPrimaryUser       = Resolve-UserLabel -UserId $assessment.RecommendedUserId -UserPrincipalName $assessment.RecommendedUserPrincipalName
-            NewUserSignIns       = $assessment.RecommendedUserSignInCount
-            NewUserShare         = '{0}%' -f [int][math]::Round($signInShare * 100, [MidpointRounding]::AwayFromZero)
+            NewUserSignIns       = if ($hasNewUser) { $assessment.RecommendedUserSignInCount } else { '' }
+            NewUserShare         = if ($hasNewUser) { '{0}%' -f [int][math]::Round($signInShare * 100, [MidpointRounding]::AwayFromZero) } else { '' }
             DeviceUsers          = $assessment.DistinctUserCount
             NewUserLastSignInUtc = Format-UtcTimestamp -Value $assessment.RecommendedUserLatestSignIn
             LastIntuneSyncUtc    = Format-UtcTimestamp -Value $assessment.LastSyncDateTime
-            Reason               = $script:ChangeReasonLabels[$assessment.ChangeReason]
+            Reason               = $reason
         }
     }
     # One output record per line keeps the table readable in the Automation job output.
@@ -644,7 +780,7 @@ try {
     Initialize-ManagedIdentity
     Enter-AnalysisLock
     $startedAt = [datetime]::UtcNow
-    $summary = @{ DevicesEvaluated = 0; ChangesNeeded = 0; Updated = 0; Failed = 0; Unchanged = 0 }
+    $summary = @{ DevicesEvaluated = 0; ChangesNeeded = 0; Updated = 0; Failed = 0; Unchanged = 0; Excluded = 0 }
 
     try {
         $endDate = if ([string]::IsNullOrWhiteSpace($AnalysisEndDate)) {
@@ -674,6 +810,7 @@ try {
         if ($missingDates.Count -gt 0) {
             throw "No assignments were changed because collection is incomplete for: $($missingDates -join ', ')."
         }
+        Initialize-DeviceExclusion
 
         $countsByDevice = @{}
         foreach ($dateKey in $dateKeys) {
@@ -721,9 +858,13 @@ try {
                     $script:UserPrincipalNames[$primaryUserKey] = $primaryUserPrincipalName
                 }
                 $azureDeviceId = ([string]$device.azureADDeviceId).ToLowerInvariant()
-                if (-not $winners.ContainsKey($azureDeviceId)) { continue }
+                $excludedBy = Get-DeviceExclusion -Device $device
+                # Excluded devices are evaluated without sign-ins too, so an existing primary user is removed.
+                if ([string]::IsNullOrEmpty($excludedBy) -and -not $winners.ContainsKey($azureDeviceId)) { continue }
                 $summary.DevicesEvaluated++
-                $assessment = New-DeviceAssessment -Device $device -Candidates $countsByDevice[$azureDeviceId] -Winner $winners[$azureDeviceId]
+                if (-not [string]::IsNullOrEmpty($excludedBy)) { $summary.Excluded++ }
+                $candidates = if ($countsByDevice.ContainsKey($azureDeviceId)) { $countsByDevice[$azureDeviceId] } else { @{} }
+                $assessment = New-DeviceAssessment -Device $device -Candidates $candidates -Winner $winners[$azureDeviceId] -ExcludedBy $excludedBy
                 if ([string]::IsNullOrEmpty($assessment.ChangeReason)) {
                     $summary.Unchanged++
                     Write-AuditEntity -RowKey $assessment.IntuneDeviceId -Properties (ConvertTo-AuditProperty -Assessment $assessment -Outcome 'Unchanged')
@@ -740,12 +881,17 @@ try {
 
                 $requestId++
                 $id = [string]$requestId
-                $request = [pscustomobject]@{
-                    id      = $id
-                    method  = 'POST'
-                    url     = "/deviceManagement/managedDevices/$($assessment.IntuneDeviceId)/users/`$ref"
-                    headers = @{ 'Content-Type' = 'application/json' }
-                    body    = @{ '@odata.id' = "https://graph.microsoft.com/beta/users/$($assessment.RecommendedUserId)" }
+                $requestUrl = "/deviceManagement/managedDevices/$($assessment.IntuneDeviceId)/users/`$ref"
+                $request = if ($assessment.ChangeReason -eq 'Excluded') {
+                    [pscustomobject]@{ id = $id; method = 'DELETE'; url = $requestUrl }
+                } else {
+                    [pscustomobject]@{
+                        id      = $id
+                        method  = 'POST'
+                        url     = $requestUrl
+                        headers = @{ 'Content-Type' = 'application/json' }
+                        body    = @{ '@odata.id' = "https://graph.microsoft.com/beta/users/$($assessment.RecommendedUserId)" }
+                    }
                 }
                 $requests.Add($request)
                 $requestAssessments[$id] = $assessment
@@ -765,7 +911,8 @@ try {
             PartitionKey = 'AnalysisRuns'; RowKey = $script:RunId; Status = if ($summary.Failed -gt 0) { 'CompletedWithErrors' } else { 'Complete' }
             StartedAt = $startedAt.ToString('o'); CompletedAt = [datetime]::UtcNow.ToString('o'); AnalysisEndDate = $endDate.ToString('yyyy-MM-dd')
             DaysAnalyzed = $DaysToAnalyze; Preview = [bool]$Preview; DevicesEvaluated = $summary.DevicesEvaluated; ChangesNeeded = $summary.ChangesNeeded
-            Updated = $summary.Updated; Failed = $summary.Failed; Unchanged = $summary.Unchanged
+            Updated = $summary.Updated; Failed = $summary.Failed; Unchanged = $summary.Unchanged; Excluded = $summary.Excluded
+            ExcludedGroupIds = $script:ExcludedGroupIds -join ', '; ExcludedDeviceNamePrefixes = $script:ExcludedDeviceNamePrefixes -join ', '
         }
         if ($Preview -and $previewExamples.Count -gt 0) {
             Write-PreviewExample -Assessments $previewExamples.ToArray() -ChangeCount $summary.ChangesNeeded
@@ -776,7 +923,7 @@ try {
             }) -join '; '
             Write-Output "Change reasons: $reasonSummary."
         }
-        Write-Output "Analysis $script:RunId complete. Evaluated: $($summary.DevicesEvaluated); changes: $($summary.ChangesNeeded); updated: $($summary.Updated); failed: $($summary.Failed); unchanged: $($summary.Unchanged)."
+        Write-Output "Analysis $script:RunId complete. Evaluated: $($summary.DevicesEvaluated); changes: $($summary.ChangesNeeded); updated: $($summary.Updated); failed: $($summary.Failed); unchanged: $($summary.Unchanged); excluded: $($summary.Excluded)."
     } catch {
         Set-TableEntity -TableName $StateTableName -Entity @{
             PartitionKey = 'AnalysisRuns'; RowKey = $script:RunId; Status = 'Failed'; StartedAt = $startedAt.ToString('o')

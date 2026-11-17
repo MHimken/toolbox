@@ -12,6 +12,19 @@
     When the signed-in account cannot create Azure role assignments, for example with only the
     Contributor role, deploys everything else and prints the table role assignments that an
     administrator must create. A later -Resume verifies them and completes the deployment.
+    Creates the Automation variables RepairPrimaryUser-ExcludedGroupIds and
+    RepairPrimaryUser-ExcludedDeviceNamePrefixes, empty by default. Devices excluded through them,
+    such as shared devices, never get a primary user, and an existing primary user is removed.
+.PARAMETER ExcludedGroupIds
+    Microsoft Entra group object IDs whose device members, including members of nested groups, never
+    get a primary user. Accepts an array or a comma-separated list. Writes the Automation variable
+    RepairPrimaryUser-ExcludedGroupIds. When omitted, the existing variable is kept. Use @() or an
+    empty string to remove all group exclusions.
+.PARAMETER ExcludedDeviceNamePrefixes
+    Device name prefixes, such as KIOSK-, whose devices never get a primary user. Matching ignores
+    case; a single trailing * is optional. Accepts an array or a comma-separated list. Writes the
+    Automation variable RepairPrimaryUser-ExcludedDeviceNamePrefixes. When omitted, the existing
+    variable is kept. Use @() or an empty string to remove all prefix exclusions.
 .PARAMETER DeploymentStatePath
     Checkpoint file path. Defaults to .repair-primary-user-deployment-state.json beside this script.
 .PARAMETER Resume
@@ -58,6 +71,10 @@ param(
 
     [ValidateRange(29, 365)]
     [int]$RetentionDays = 35,
+
+    [string[]]$ExcludedGroupIds,
+
+    [string[]]$ExcludedDeviceNamePrefixes,
 
     [switch]$InstallMissingModules,
 
@@ -550,7 +567,8 @@ function Grant-ManagedIdentityGraphPermissions {
     }
 
     $assignments = Invoke-MgGraphRequest -Method Get -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$ManagedIdentityPrincipalId/appRoleAssignments?`$select=appRoleId,resourceId" -OutputType PSObject
-    foreach ($permissionValue in @('AuditLog.Read.All', 'DeviceManagementManagedDevices.ReadWrite.All')) {
+    # GroupMember.Read.All and Device.Read.All resolve excluded groups; granting them always keeps later variable edits working.
+    foreach ($permissionValue in @('AuditLog.Read.All', 'DeviceManagementManagedDevices.ReadWrite.All', 'GroupMember.Read.All', 'Device.Read.All')) {
         $appRole = @($graphServicePrincipal.appRoles | Where-Object {
             $_.value -eq $permissionValue -and $_.isEnabled -and $_.allowedMemberTypes -contains 'Application'
         })[0]
@@ -571,6 +589,62 @@ function Grant-ManagedIdentityGraphPermissions {
         } | ConvertTo-Json -Compress
         Invoke-MgGraphRequest -Method Post -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$ManagedIdentityPrincipalId/appRoleAssignments" -Body $body -ContentType 'application/json' | Out-Null
         Write-Output "Granted Microsoft Graph permission $permissionValue."
+    }
+}
+
+# Accepts arrays and comma-separated lists, because pwsh -File passes a list as one string. Uses the analyzer's rules.
+function ConvertTo-ExclusionValue {
+    param(
+        [AllowNull()][AllowEmptyCollection()][string[]]$Entries,
+        [Parameter(Mandatory = $true)][ValidateSet('ExcludedGroupIds', 'ExcludedDeviceNamePrefixes')][string]$ParameterName
+    )
+
+    $values = [Collections.Generic.List[string]]::new()
+    foreach ($entry in @($Entries -split '[\s,;]+' | Where-Object { $_ -ne '' })) {
+        # pwsh -File passes PowerShell array syntax, such as 'A', 'B', through as literal text.
+        if ($entry.IndexOfAny([char[]]@('"', "'")) -ge 0) {
+            throw ("Parameter $ParameterName contains $entry, including quotation marks. With pwsh -File, pass several " +
+                "entries as one comma-separated value, for example -$ParameterName '<first>,<second>'.")
+        }
+        if ($ParameterName -eq 'ExcludedGroupIds') {
+            $groupId = [guid]::Empty
+            if (-not [guid]::TryParse($entry, [ref]$groupId)) {
+                throw "Parameter ExcludedGroupIds contains '$entry', which is not a group object ID."
+            }
+            $values.Add($groupId.ToString())
+        } elseif ($entry -notmatch '^[^*?]+\*?$') {
+            throw "Parameter ExcludedDeviceNamePrefixes contains '$entry'. Use device name prefixes such as 'KIOSK-'; only a single trailing '*' is allowed."
+        } else {
+            $values.Add($entry)
+        }
+    }
+    return $values -join ', '
+}
+
+# Creates a missing variable, overwrites it only when its parameter was supplied, and otherwise keeps portal edits.
+function Set-ExclusionVariable {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value,
+        [Parameter(Mandatory = $true)][bool]$ValueSupplied,
+        [Parameter(Mandatory = $true)][string]$ParameterName,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $existingVariables = @(Get-AzAutomationVariable -ResourceGroupName $ResourceGroupName `
+        -AutomationAccountName $script:ResolvedAutomationAccountName -ErrorAction Stop | Where-Object { $_.Name -eq $Name })
+    $displayValue = if ([string]::IsNullOrWhiteSpace($Value)) { 'empty, no exclusions' } else { "'$Value'" }
+    if ($existingVariables.Count -eq 0) {
+        New-AzAutomationVariable -ResourceGroupName $ResourceGroupName -AutomationAccountName $script:ResolvedAutomationAccountName `
+            -Name $Name -Value $Value -Encrypted $false -Description $Description -ErrorAction Stop | Out-Null
+        Write-Output "Created Automation variable $Name ($displayValue)."
+    } elseif ($ValueSupplied) {
+        # Set-AzAutomationVariable cannot change encryption, so the existing setting is kept.
+        Set-AzAutomationVariable -ResourceGroupName $ResourceGroupName -AutomationAccountName $script:ResolvedAutomationAccountName `
+            -Name $Name -Value $Value -Encrypted ([bool]$existingVariables[0].Encrypted) -ErrorAction Stop | Out-Null
+        Write-Output "Updated Automation variable $Name ($displayValue)."
+    } else {
+        Write-Output "Kept Automation variable $Name. Use -$ParameterName to change it."
     }
 }
 
@@ -671,6 +745,9 @@ function Set-RunbookSchedule {
 
 try {
     $script:DeploymentStarted = $false
+    # Invalid exclusions stop the run before the checkpoint or any Azure resource changes.
+    $excludedGroupIdsValue = ConvertTo-ExclusionValue -Entries $ExcludedGroupIds -ParameterName 'ExcludedGroupIds'
+    $excludedPrefixesValue = ConvertTo-ExclusionValue -Entries $ExcludedDeviceNamePrefixes -ParameterName 'ExcludedDeviceNamePrefixes'
     $script:DeploymentStatePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($DeploymentStatePath)
     Initialize-DeploymentState -DeploymentArguments $PSBoundParameters
     $script:SolutionRoot = Split-Path -Path $PSScriptRoot -Parent
@@ -762,6 +839,19 @@ try {
         }
         $script:DeploymentState.graphPermissionGrantSkipped = [bool]$SkipGraphPermissionGrant
         $automationResourceId = "$($script:DeploymentState.resourceGroupId)/providers/Microsoft.Automation/automationAccounts/$script:ResolvedAutomationAccountName"
+
+        # The analyzer stops when these variables are missing, so they are created before it is imported.
+        Start-DeploymentStage -Stage 'ExclusionVariables'
+        Set-ExclusionVariable -Name 'RepairPrimaryUser-ExcludedGroupIds' -Value $excludedGroupIdsValue `
+            -ValueSupplied $PSBoundParameters.ContainsKey('ExcludedGroupIds') -ParameterName 'ExcludedGroupIds' `
+            -Description 'Microsoft Entra group object IDs whose device members never get a primary user. Separate entries with commas; empty means none.'
+        Set-ExclusionVariable -Name 'RepairPrimaryUser-ExcludedDeviceNamePrefixes' -Value $excludedPrefixesValue `
+            -ValueSupplied $PSBoundParameters.ContainsKey('ExcludedDeviceNamePrefixes') -ParameterName 'ExcludedDeviceNamePrefixes' `
+            -Description 'Device name prefixes, such as KIOSK-, whose devices never get a primary user. Separate entries with commas; empty means none.'
+        foreach ($variableName in @('RepairPrimaryUser-ExcludedGroupIds', 'RepairPrimaryUser-ExcludedDeviceNamePrefixes')) {
+            $script:DeploymentState.automationResourceIds[$variableName] = "$automationResourceId/variables/$variableName"
+        }
+        Write-DeploymentState -Stage 'ExclusionVariables'
 
         foreach ($runbookDefinition in @(
             @{ Name = 'Collect-PrimaryUserSignInData'; Path = $collectorPath },

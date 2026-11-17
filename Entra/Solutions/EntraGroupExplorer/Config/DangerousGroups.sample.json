@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "namePattern": "SG-Tier0-*",
+      "reason": "Example only: privileged access group"
+    }
+  ]
+}

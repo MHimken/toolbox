@@ -52,6 +52,12 @@ function Reset-AnalysisTestData {
     $analysisTestState.HistoryCleanups = 0
     $analysisTestState.LockHeldDuringCleanup = $true
     $analysisTestState.CollectionStatus = 'Complete'
+    $analysisTestState.ExclusionVariables = @{
+        'RepairPrimaryUser-ExcludedGroupIds' = ''
+        'RepairPrimaryUser-ExcludedDeviceNamePrefixes' = $null
+    }
+    $analysisTestState.Groups = @{}
+    $analysisTestState.BatchRequests = [Collections.Generic.List[object]]::new()
     $analysisTestState.Rows = @([pscustomobject]@{
         DeviceId = '11111111-1111-1111-1111-111111111111'
         UserId = '22222222-2222-2222-2222-222222222222'
@@ -97,10 +103,36 @@ function Set-PreviewScenario {
     )
 }
 
+# Group members and devices use mixed case to verify case-insensitive matching.
+function Set-ExclusionScenario {
+    $alice = 'aaaaaaaa-0000-0000-0000-000000000001'
+    $bob = 'aaaaaaaa-0000-0000-0000-000000000002'
+    $analysisTestState.ExclusionVariables['RepairPrimaryUser-ExcludedGroupIds'] = '99999999-0000-0000-0000-000000000001;99999999-0000-0000-0000-000000000002'
+    $analysisTestState.ExclusionVariables['RepairPrimaryUser-ExcludedDeviceNamePrefixes'] = "kiosk-*`r`nLAB-"
+    $analysisTestState.Groups = @{
+        '99999999-0000-0000-0000-000000000001' = @{ DisplayName = 'Shared devices'; Members = @(
+            [pscustomobject]@{ id = 'object-1'; deviceId = 'FFFFFFFF-0000-0000-0000-000000000001'; displayName = 'SHARED-01' }
+            [pscustomobject]@{ id = 'object-2'; deviceId = 'ffffffff-0000-0000-0000-000000000002'; displayName = 'SHARED-02' }
+        ) }
+        '99999999-0000-0000-0000-000000000002' = @{ DisplayName = 'Kiosk users'; Members = @() }
+    }
+    $analysisTestState.Rows = @(
+        New-AggregateRow 'ffffffff-0000-0000-0000-00000000000a' $alice 5 '2024-02-29T11:00:00Z' 'alice@contoso.com'
+        New-AggregateRow 'ffffffff-0000-0000-0000-00000000000b' $alice 3 '2024-02-29T12:00:00Z'
+    )
+    $analysisTestState.Devices = @(
+        [pscustomobject]@{ id = 'intune-kiosk'; azureADDeviceId = 'ffffffff-0000-0000-0000-00000000000a'; deviceName = 'KIOSK-01'; userId = $bob; userPrincipalName = 'bob@contoso.com' }
+        [pscustomobject]@{ id = 'intune-normal'; azureADDeviceId = 'ffffffff-0000-0000-0000-00000000000b'; deviceName = 'OFFICE-01'; userId = $null }
+        [pscustomobject]@{ id = 'intune-shared-1'; azureADDeviceId = 'ffffffff-0000-0000-0000-000000000001'; deviceName = 'SHARED-01'; userId = $bob; userPrincipalName = 'bob@contoso.com' }
+        [pscustomobject]@{ id = 'intune-shared-2'; azureADDeviceId = 'FFFFFFFF-0000-0000-0000-000000000002'; deviceName = 'SHARED-02'; userId = $null }
+        [pscustomobject]@{ id = 'intune-other'; azureADDeviceId = 'ffffffff-0000-0000-0000-00000000000c'; deviceName = 'OTHER-01'; userId = $bob; userPrincipalName = 'bob@contoso.com' }
+    )
+}
+
 function Get-OutputLineIndex {
     param([object[]]$OutputLines, [string]$Text)
     for ($lineIndex = 0; $lineIndex -lt $OutputLines.Count; $lineIndex++) {
-        if ([string]$OutputLines[$lineIndex] -like "*$Text*") { return $lineIndex }
+        if ([string]$OutputLines[$lineIndex] -clike "*$Text*") { return $lineIndex }
     }
     return -1
 }
@@ -134,16 +166,36 @@ function Set-TableEntity {
 function Get-TableEntitiesByPartition {
     $analysisTestState.Rows
 }
+function Get-AutomationVariable {
+    [CmdletBinding()]
+    param([string]$Name)
+    if (-not $analysisTestState.ExclusionVariables.ContainsKey($Name)) { throw "Variable '$Name' was not found." }
+    $analysisTestState.ExclusionVariables[$Name]
+}
 function Invoke-GraphGet {
-    param([uri]$Uri)
-    Test-Condition ([uri]::UnescapeDataString($Uri.Query) -like '*$select=*userPrincipalName,lastSyncDateTime*') `
-        'The device query must request the primary user name and last sync time.'
-    [pscustomobject]@{ value = @($analysisTestState.Devices) }
+    param([uri]$Uri, [hashtable]$Headers = @{})
+    if ($Uri.AbsolutePath -eq '/beta/deviceManagement/managedDevices') {
+        Test-Condition ([uri]::UnescapeDataString($Uri.Query) -like '*$select=*userPrincipalName,lastSyncDateTime*') `
+            'The device query must request the primary user name and last sync time.'
+        return [pscustomobject]@{ value = @($analysisTestState.Devices) }
+    }
+    $groupMatch = [regex]::Match($Uri.AbsolutePath, '^/v1\.0/groups/([^/]+)(/transitiveMembers/microsoft\.graph\.device)?$')
+    if (-not $groupMatch.Success) { throw "Unexpected Graph request '$Uri'." }
+    $group = $analysisTestState.Groups[$groupMatch.Groups[1].Value]
+    if ($null -eq $group) {
+        $response = [Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode]::NotFound)
+        throw [Microsoft.PowerShell.Commands.HttpResponseException]::new('Request_ResourceNotFound', $response)
+    }
+    if (-not $groupMatch.Groups[2].Success) { return [pscustomobject]@{ id = $groupMatch.Groups[1].Value; displayName = $group.DisplayName } }
+    Test-Condition ($Headers['ConsistencyLevel'] -eq 'eventual' -and [uri]::UnescapeDataString($Uri.Query) -like '*$count=true*') `
+        'Device members must be read with an advanced query.'
+    return [pscustomobject]@{ value = @($group.Members) }
 }
 function Invoke-GraphBatch {
     param([object[]]$Requests)
     $analysisTestState.BatchCount++
     foreach ($request in $Requests) {
+        $analysisTestState.BatchRequests.Add($request)
         [pscustomobject]@{ Request = $request; Status = 204; Error = $null }
     }
 }
@@ -225,6 +277,8 @@ foreach ($lockScenario in @('InsertConflict', 'ActiveLock', 'StaleLock')) {
 Reset-AnalysisTestData
 Set-PreviewScenario
 $previewOutput = @(& $analyzerUnderTest @analysisParameters -Preview $true)
+Test-Condition ((Get-OutputLine $previewOutput 'Device exclusions:') -eq 'Device exclusions: none configured.') `
+    'Empty exclusion variables must exclude no devices.'
 Test-Condition ((Get-OutputLine $previewOutput 'Preview examples:') -like '*4 of 4 devices that would change*') `
     'Preview must report how many of the planned changes are listed.'
 $tableHeader = Get-OutputLine $previewOutput 'IntuneDeviceId'
@@ -301,4 +355,73 @@ $incompleteMessage = ''
 try { & $analyzerUnderTest @analysisParameters | Out-Null } catch { $incompleteMessage = $_.Exception.Message }
 Test-Condition ($incompleteMessage -like '*incomplete for: 2024-02-29 (LowSignInCount).' -and $analysisTestState.BatchCount -eq 0 -and
     $analysisTestState.Audits.Count -eq 0) 'Days that are not complete must stop the analysis and show their collection status.'
-Write-Output 'Analyzer Boolean input, lock, and preview example tests passed.'
+
+Reset-AnalysisTestData
+Set-ExclusionScenario
+$exclusionOutput = @(& $analyzerUnderTest @analysisParameters -Preview $true 3>&1)
+Test-Condition ((Get-OutputLine $exclusionOutput 'Device exclusions:') -eq ('Device exclusions: Prefix kiosk-; Prefix LAB-; ' +
+    'Group Shared devices (99999999-0000-0000-0000-000000000001) with 2 devices; Group Kiosk users (99999999-0000-0000-0000-000000000002) with 0 devices.')) `
+    "Every run must report the exclusion rules and the devices per group. Line: $(Get-OutputLine $exclusionOutput 'Device exclusions:')"
+Test-Condition ((Get-OutputLine $exclusionOutput 'has no device members') -like 'Group Kiosk users (*) has no device members*') `
+    'A group without device members must be reported, because it usually contains users instead of devices.'
+$kioskLine = Get-OutputLine $exclusionOutput 'KIOSK-01'
+Test-Condition ($kioskLine -match 'intune-kiosk\s+bob@contoso\.com\s+0\s+\(none\)\s+1\s+Excluded device: Prefix kiosk-$') `
+    "A prefix match must remove the primary user even when another user signs in most. Line: $kioskLine"
+$sharedLine = Get-OutputLine $exclusionOutput 'SHARED-01'
+Test-Condition ($sharedLine -match 'intune-shared-1\s+bob@contoso\.com\s+0\s+\(none\)\s+0\s+Excluded device: Group Shared devices \(99999999-0000-0000-0000-000000000001\)$') `
+    "A group member without collected sign-ins must have its primary user removed. Line: $sharedLine"
+Test-Condition ((Get-OutputLine $exclusionOutput 'OFFICE-01') -match 'intune-normal\s+\(none\)\s+0\s+alice@contoso\.com\s+3\s+100%.+No primary user$') `
+    'Devices that are not excluded must still be assigned.'
+Test-Condition ((Get-OutputLineIndex $exclusionOutput 'SHARED-02') -lt 0 -and (Get-OutputLineIndex $exclusionOutput 'OTHER-01') -lt 0) `
+    'Excluded devices without a primary user and devices without sign-ins must not be listed as changes.'
+Test-Condition ((Get-OutputLine $exclusionOutput 'Change reasons:') -eq 'Change reasons: No primary user: 1; Excluded device: 2.' -and
+    (Get-OutputLine $exclusionOutput 'complete. Evaluated:') -like '*Evaluated: 4; changes: 3; updated: 0; failed: 0; unchanged: 1; excluded: 3.') `
+    'Removals must be counted as changes, and every excluded device must be counted.'
+$kioskAudit = @($analysisTestState.Audits | Where-Object { $_.RowKey -eq 'intune-kiosk' })[0]
+Test-Condition ($kioskAudit.Outcome -eq 'Preview' -and $kioskAudit.ChangeReason -eq 'Excluded' -and $kioskAudit.ExcludedBy -eq 'Prefix kiosk-' -and
+    $kioskAudit.RecommendedUserId -eq '' -and $kioskAudit.SignInCount -eq 0 -and $kioskAudit.DeviceSignInCount -eq 5 -and
+    -not $kioskAudit.ContainsKey('LatestSignIn')) 'Audit rows must store the rule that excluded a device.'
+$sharedAudit = @($analysisTestState.Audits | Where-Object { $_.RowKey -eq 'intune-shared-2' })[0]
+Test-Condition ($sharedAudit.Outcome -eq 'Unchanged' -and $sharedAudit.ExcludedBy -like 'Group Shared devices (*' -and
+    -not $sharedAudit.ContainsKey('ChangeReason')) 'An excluded device without a primary user must be audited as unchanged.'
+Test-Condition ($analysisTestState.Summary.Excluded -eq 3 -and $analysisTestState.Summary.ExcludedDeviceNamePrefixes -eq 'kiosk-, LAB-' -and
+    $analysisTestState.Summary.ExcludedGroupIds -eq '99999999-0000-0000-0000-000000000001, 99999999-0000-0000-0000-000000000002' -and
+    @($analysisTestState.Audits | Where-Object { $_.RowKey -eq 'intune-other' }).Count -eq 0) `
+    'The run summary must store the applied exclusions.'
+
+Reset-AnalysisTestData
+Set-ExclusionScenario
+& $analyzerUnderTest @analysisParameters 3>$null | Out-Null
+$removalRequests = @($analysisTestState.BatchRequests | Where-Object { $_.method -eq 'DELETE' })
+Test-Condition ($analysisTestState.BatchRequests.Count -eq 3 -and $removalRequests.Count -eq 2 -and
+    @($removalRequests | Where-Object { $_.url -match '^/deviceManagement/managedDevices/intune-(kiosk|shared-1)/users/\$ref$' -and
+        $null -eq $_.PSObject.Properties['body'] }).Count -eq 2 -and
+    @($analysisTestState.BatchRequests | Where-Object { $_.method -eq 'POST' -and $_.url -like '*/intune-normal/*' }).Count -eq 1 -and
+    $analysisTestState.Summary.Updated -eq 3) 'Apply mode must remove the primary user of excluded devices and assign the others.'
+
+$invalidExclusions = @(
+    @{ Name = 'MissingVariable'; Expected = "*'RepairPrimaryUser-ExcludedDeviceNamePrefixes' could not be read*" }
+    @{ Name = 'GroupName'; Expected = "*contains 'Shared', which is not a group object ID." }
+    @{ Name = 'Wildcard'; Expected = "*contains '[*]'. Use device name prefixes*" }
+    @{ Name = 'QuotedPrefix'; Expected = '*contains "KIOSK-". Enter the prefixes without quotation marks*' }
+    @{ Name = 'UnknownGroup'; Expected = "Excluded group '99999999-0000-0000-0000-000000000003' was not found.*" }
+    @{ Name = 'MissingDeviceId'; Expected = '*without a device ID*Device.Read.All.' }
+)
+foreach ($invalidExclusion in $invalidExclusions) {
+    Reset-AnalysisTestData
+    Set-ExclusionScenario
+    if ($invalidExclusion.Name -eq 'MissingVariable') { $analysisTestState.ExclusionVariables.Remove('RepairPrimaryUser-ExcludedDeviceNamePrefixes') }
+    if ($invalidExclusion.Name -eq 'GroupName') { $analysisTestState.ExclusionVariables['RepairPrimaryUser-ExcludedGroupIds'] = 'Shared devices' }
+    if ($invalidExclusion.Name -eq 'Wildcard') { $analysisTestState.ExclusionVariables['RepairPrimaryUser-ExcludedDeviceNamePrefixes'] = 'KIOSK-, *' }
+    if ($invalidExclusion.Name -eq 'QuotedPrefix') { $analysisTestState.ExclusionVariables['RepairPrimaryUser-ExcludedDeviceNamePrefixes'] = '"KIOSK-","LAB-"' }
+    if ($invalidExclusion.Name -eq 'UnknownGroup') { $analysisTestState.ExclusionVariables['RepairPrimaryUser-ExcludedGroupIds'] = '99999999-0000-0000-0000-000000000003' }
+    if ($invalidExclusion.Name -eq 'MissingDeviceId') {
+        $analysisTestState.Groups['99999999-0000-0000-0000-000000000001'].Members += [pscustomobject]@{ id = 'object-3'; deviceId = $null; displayName = 'SHARED-03' }
+    }
+    $exclusionMessage = ''
+    try { & $analyzerUnderTest @analysisParameters 3>$null | Out-Null } catch { $exclusionMessage = $_.Exception.Message }
+    Test-Condition ($exclusionMessage -like $invalidExclusion.Expected -and $analysisTestState.BatchCount -eq 0 -and
+        $analysisTestState.Audits.Count -eq 0 -and $analysisTestState.Summary.Status -eq 'Failed') `
+        "An invalid exclusion ($($invalidExclusion.Name)) must stop the analysis before any change. Message: $exclusionMessage"
+}
+Write-Output 'Analyzer Boolean input, lock, preview example, and device exclusion tests passed.'

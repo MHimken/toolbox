@@ -1,0 +1,137 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-12T12:00:00Z",
+  "generator": {
+    "script": "Export-EntraGroupExplorer.ps1",
+    "version": "0.1.0"
+  },
+  "tenantId": "00000000-0000-0000-0000-000000000000",
+  "options": {
+    "maxNameLength": 30,
+    "abbreviationStyle": "Middle",
+    "initialDepth": 2,
+    "autoExpandLimit": 10
+  },
+  "dangerRules": [
+    {
+      "match": "namePattern",
+      "value": "SG-Tier0-*",
+      "reason": "Synthetic demo rule"
+    }
+  ],
+  "summary": {
+    "groups": 5,
+    "groupEdges": 3,
+    "dangerousGroups": 1,
+    "unavailableCounts": 0
+  },
+  "groups": [
+    {
+      "id": "11111111-1111-1111-1111-111111111111",
+      "name": "SG-Tier0-Administrators",
+      "description": "Synthetic privileged group for the demo.",
+      "type": "security",
+      "membership": "assigned",
+      "roleAssignable": true,
+      "onPremSynced": false,
+      "created": "2024-01-15T10:00:00Z",
+      "counts": {
+        "direct": { "users": 2, "devices": 0, "groups": 1 },
+        "nested": { "users": 5, "devices": 1, "groups": 3 }
+      },
+      "children": ["22222222-2222-2222-2222-222222222222"],
+      "parents": [],
+      "danger": {
+        "self": true,
+        "reason": ["Synthetic demo rule"],
+        "nestedCount": 0,
+        "ancestorCount": 0
+      }
+    },
+    {
+      "id": "22222222-2222-2222-2222-222222222222",
+      "name": "SG-Operations-Extended-Read-Only",
+      "description": "Synthetic group with a long display name for abbreviation examples.",
+      "type": "security",
+      "membership": "assigned",
+      "roleAssignable": false,
+      "onPremSynced": true,
+      "created": "2023-08-03T08:30:00Z",
+      "counts": {
+        "direct": { "users": 1, "devices": 0, "groups": 1 },
+        "nested": { "users": 3, "devices": 1, "groups": 2 }
+      },
+      "children": ["33333333-3333-3333-3333-333333333333"],
+      "parents": ["11111111-1111-1111-1111-111111111111"],
+      "danger": {
+        "self": false,
+        "reason": [],
+        "nestedCount": 0,
+        "ancestorCount": 1
+      }
+    },
+    {
+      "id": "33333333-3333-3333-3333-333333333333",
+      "name": "SG-Workstations-Operators",
+      "description": "Synthetic child group.",
+      "type": "security",
+      "membership": "assigned",
+      "roleAssignable": false,
+      "onPremSynced": false,
+      "counts": {
+        "direct": { "users": 1, "devices": 1, "groups": 1 },
+        "nested": { "users": 2, "devices": 1, "groups": 1 }
+      },
+      "children": ["44444444-4444-4444-4444-444444444444"],
+      "parents": ["22222222-2222-2222-2222-222222222222"],
+      "danger": {
+        "self": false,
+        "reason": [],
+        "nestedCount": 0,
+        "ancestorCount": 1
+      }
+    },
+    {
+      "id": "44444444-4444-4444-4444-444444444444",
+      "name": "SG-Field-Devices",
+      "description": "Synthetic leaf group.",
+      "type": "security",
+      "membership": "assigned",
+      "roleAssignable": false,
+      "onPremSynced": false,
+      "counts": {
+        "direct": { "users": 0, "devices": 1, "groups": 0 },
+        "nested": { "users": 0, "devices": 1, "groups": 0 }
+      },
+      "children": [],
+      "parents": ["33333333-3333-3333-3333-333333333333"],
+      "danger": {
+        "self": false,
+        "reason": [],
+        "nestedCount": 0,
+        "ancestorCount": 1
+      }
+    },
+    {
+      "id": "55555555-5555-5555-5555-555555555555",
+      "name": "Unified Collaboration Team",
+      "description": "Synthetic Microsoft 365 group with user-only membership.",
+      "type": "m365",
+      "membership": "assigned",
+      "roleAssignable": false,
+      "onPremSynced": false,
+      "counts": {
+        "direct": { "users": 12, "devices": 0, "groups": 0 },
+        "nested": { "users": 12, "devices": 0, "groups": 0 }
+      },
+      "children": [],
+      "parents": [],
+      "danger": {
+        "self": false,
+        "reason": [],
+        "nestedCount": 0,
+        "ancestorCount": 0
+      }
+    }
+  ]
+}

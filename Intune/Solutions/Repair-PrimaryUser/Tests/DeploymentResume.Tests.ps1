@@ -27,6 +27,9 @@ $mockDeploymentEnvironment = @{
     ImportedRunbookPaths = @{}
     Schedules = @{}
     Links = @{}
+    Variables = @{}
+    VariableCreations = 0
+    VariableUpdates = 0
     Assignments = @()
     Deployments = 0
     Imports = 0
@@ -238,6 +241,14 @@ function Invoke-MgGraphRequest {
                     [pscustomobject]@{
                         id = '66666666-6666-6666-6666-666666666666'
                         value = 'DeviceManagementManagedDevices.ReadWrite.All'; isEnabled = $true; allowedMemberTypes = @('Application')
+                    },
+                    [pscustomobject]@{
+                        id = '88888888-8888-8888-8888-888888888888'
+                        value = 'GroupMember.Read.All'; isEnabled = $true; allowedMemberTypes = @('Application')
+                    },
+                    [pscustomobject]@{
+                        id = '99999999-9999-9999-9999-999999999999'
+                        value = 'Device.Read.All'; isEnabled = $true; allowedMemberTypes = @('Application')
                     }
                 )
             })
@@ -281,6 +292,20 @@ function Unregister-AzAutomationScheduledRunbook {
     param([string]$ScheduleName)
     $mockDeploymentEnvironment.Links.Remove($ScheduleName) | Out-Null
 }
+function Get-AzAutomationVariable { $mockDeploymentEnvironment.Variables.Values }
+function New-AzAutomationVariable {
+    param([string]$Name, [object]$Value, [bool]$Encrypted, [string]$Description)
+    Assert-Condition ($Value -is [string] -and -not $Encrypted -and -not [string]::IsNullOrWhiteSpace($Description)) `
+        'Exclusion variables must be unencrypted, described String variables.'
+    $mockDeploymentEnvironment.VariableCreations++
+    $mockDeploymentEnvironment.Variables[$Name] = [pscustomobject]@{ Name = $Name; Value = $Value; Encrypted = $Encrypted }
+}
+function Set-AzAutomationVariable {
+    param([string]$Name, [object]$Value, [bool]$Encrypted)
+    Assert-Condition ($Value -is [string] -and $mockDeploymentEnvironment.Variables.ContainsKey($Name)) 'Only existing variables must be updated.'
+    $mockDeploymentEnvironment.VariableUpdates++
+    $mockDeploymentEnvironment.Variables[$Name].Value = $Value
+}
 
 try {
     # Adopt accounts left by an older deployment, then interrupt the Graph stage.
@@ -305,8 +330,8 @@ try {
     Assert-Condition ($mockDeploymentEnvironment.Imports -eq 2) 'Completed runbook imports must be skipped.'
     Assert-Condition ($mockDeploymentEnvironment.ScheduleCreations -eq 3) 'Only the interrupted schedule must be retried.'
     Assert-Condition ($mockDeploymentEnvironment.ScheduleRemovals -eq 1) 'Only the uncheckpointed partial schedule must be replaced.'
-    Assert-Condition ($mockDeploymentEnvironment.GraphPosts -eq 2) 'Existing Graph assignments must not be duplicated.'
-    Assert-Condition ((Read-TestCheckpoint).automationResourceIds.Count -eq 4) 'Both runbook and schedule resource IDs must be recorded.'
+    Assert-Condition ($mockDeploymentEnvironment.GraphPosts -eq 4) 'Existing Graph assignments must not be duplicated.'
+    Assert-Condition ((Read-TestCheckpoint).automationResourceIds.Count -eq 6) 'Runbook, schedule, and variable resource IDs must be recorded.'
 
     # Repeated successful resumes preserve existing schedules and runbooks.
     & $deploymentScript @resumeParameters | Out-Null
@@ -317,6 +342,35 @@ try {
     $mockDeploymentEnvironment.ConfirmationAnswer = 'YES'
     & $deploymentScript -DeploymentStatePath $checkpointPath | Out-Null
     Assert-Condition ($mockDeploymentEnvironment.Deployments -eq 1) 'A confirmed parameterless resume must reuse saved configuration.'
+
+    # Exclusion variables start empty, change only when their parameter is supplied, and otherwise keep portal edits.
+    $groupVariable = $mockDeploymentEnvironment.Variables['RepairPrimaryUser-ExcludedGroupIds']
+    $prefixVariable = $mockDeploymentEnvironment.Variables['RepairPrimaryUser-ExcludedDeviceNamePrefixes']
+    Assert-Condition ($mockDeploymentEnvironment.VariableCreations -eq 2 -and $mockDeploymentEnvironment.VariableUpdates -eq 0 -and
+        $groupVariable.Value -eq '' -and $prefixVariable.Value -eq '') 'Exclusion variables must be created once, without exclusions.'
+    & $deploymentScript @resumeParameters -ExcludedGroupIds '77777777-7777-7777-7777-777777777777' -ExcludedDeviceNamePrefixes 'KIOSK-', 'LAB-*' | Out-Null
+    Assert-Condition ($mockDeploymentEnvironment.VariableUpdates -eq 2 -and $groupVariable.Value -eq '77777777-7777-7777-7777-777777777777' -and
+        $prefixVariable.Value -eq 'KIOSK-, LAB-*') 'Supplied exclusions must update the variables on resume.'
+    $clearOutput = & $deploymentScript @resumeParameters -ExcludedDeviceNamePrefixes @() | Out-String -Width 4096
+    Assert-Condition ($mockDeploymentEnvironment.VariableUpdates -eq 3 -and $prefixVariable.Value -eq '' -and
+        $groupVariable.Value -eq '77777777-7777-7777-7777-777777777777' -and
+        $clearOutput.Contains('Updated Automation variable RepairPrimaryUser-ExcludedDeviceNamePrefixes (empty, no exclusions).') -and
+        $clearOutput.Contains('Kept Automation variable RepairPrimaryUser-ExcludedGroupIds. Use -ExcludedGroupIds to change it.')) `
+        'An empty list must clear only its own variable.'
+    # pwsh -File passes a list as one comma-separated string.
+    & $deploymentScript @resumeParameters -ExcludedGroupIds '77777777-7777-7777-7777-777777777777,88888888-8888-8888-8888-888888888888' `
+        -ExcludedDeviceNamePrefixes 'KIOSK-,LAB-*' | Out-Null
+    Assert-Condition ($mockDeploymentEnvironment.VariableUpdates -eq 5 -and
+        $groupVariable.Value -eq '77777777-7777-7777-7777-777777777777, 88888888-8888-8888-8888-888888888888' -and
+        $prefixVariable.Value -eq 'KIOSK-, LAB-*') 'Comma-separated lists must be stored like arrays.'
+    Assert-DeploymentFailure -Parameters ($resumeParameters + @{ ExcludedDeviceNamePrefixes = @('KIOSK-', '*') }) `
+        -ExpectedMessage "Parameter ExcludedDeviceNamePrefixes contains '[*]'."
+    Assert-DeploymentFailure -Parameters ($resumeParameters + @{ ExcludedGroupIds = 'Shared-Devices' }) `
+        -ExpectedMessage "Parameter ExcludedGroupIds contains 'Shared-Devices', which is not a group object ID."
+    # pwsh -File turns -ExcludedDeviceNamePrefixes 'KIOSK-', 'LAB-' into the literal text 'KIOSK-',
+    Assert-DeploymentFailure -Parameters ($resumeParameters + @{ ExcludedDeviceNamePrefixes = "'KIOSK-'," }) `
+        -ExpectedMessage "Parameter ExcludedDeviceNamePrefixes contains 'KIOSK-', including quotation marks."
+    Assert-Condition ($mockDeploymentEnvironment.VariableUpdates -eq 5) 'Invalid exclusions must not change the variables.'
 
     # Deleted cloud objects and changed source fingerprints invalidate only their stages.
     $mockDeploymentEnvironment.Runbooks.Remove('Collect-PrimaryUserSignInData')

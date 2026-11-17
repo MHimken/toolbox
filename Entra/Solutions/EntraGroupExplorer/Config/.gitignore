@@ -1,0 +1,4 @@
+# Real dangerous-group lists name tenant groups. Commit only *.sample.json files.
+*
+!.gitignore
+!*.sample.json
