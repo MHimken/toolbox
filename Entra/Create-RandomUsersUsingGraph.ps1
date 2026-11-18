@@ -9,7 +9,8 @@
     Microsoft Graph JSON batches of 20 requests.
     The batches run in parallel thread jobs. Each thread job loads its own copy of the GraphRetry block from the
     handle-graph-throttling skill, so every batch honors Retry-After on 429 and 503 responses and sends only the
-    throttled inner requests again. The main thread writes the log entries of all thread jobs to the log file and
+    throttled inner requests again. Only the main thread runs Set-MgRequestContext, because the setting applies to the
+    whole process and running it in a thread job breaks the Graph authentication context. The main thread writes the log entries of all thread jobs to the log file and
     adds their retry statistics to the final Graph retry summary.
     The script writes one summary object to the pipeline. Passwords are never logged or returned.
     Required Microsoft Graph permission: User.ReadWrite.All (application or delegated).
@@ -44,12 +45,14 @@
     .\Create-RandomUsersUsingGraph.ps1 -Mode Delete -ClientId <AppId> -TenantId <TenantId> -CertificateThumbprint <Thumbprint>
     Connects with a certificate and deletes all users created by this script.
 .NOTES
-    Version: 2.0
+    Version: 2.1
     Author: Martin Himken
     Original script name: Create-RandomUsersUsingGraph.ps1
     Initial creation date: 2025-07-29
-    Last change: 2026-11-17
-    Changes: Refactored with the create-powershell-script and handle-graph-throttling skills. Added the PowerShell 7.4
+    Last change: 2026-11-18
+    Changes: 2.1: Thread jobs no longer run Set-MgRequestContext. Before this fix, every batch after the first
+    ThrottleLimit batches failed with 'Invalid URI: The format of the URI could not be determined'.
+    2.0: Refactored with the create-powershell-script and handle-graph-throttling skills. Added the PowerShell 7.4
     check, the Mode parameter (default Create), LogPath and LogFile parameters, interactive and certificate
     authentication, unique user names, and a summary object. Every Graph request now runs through
     the GraphRetry block, and each parallel thread job loads its own copy of the block. Removed WorkingDirectory,
@@ -164,6 +167,10 @@ function Initialize-Script {
                 })
         }
         . ([scriptblock]::Create($GraphRetryBlockText))
+        # Set-MgRequestContext in a thread job breaks the process-wide Graph authentication context, and every later
+        # request fails with 'Invalid URI'. The main thread already set MaxRetry 0 for the whole process, so this
+        # empty function hides the cmdlet from Initialize-GraphRetry inside the thread job.
+        function Set-MgRequestContext { }
         $BatchResults = @()
         $BatchFailureMessage = $null
         try {
