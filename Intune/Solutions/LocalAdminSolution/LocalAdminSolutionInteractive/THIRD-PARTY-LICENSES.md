@@ -92,8 +92,8 @@ Reviewed 21 October 2026 and updated 10 November 2026 (`@azure/identity` 4.14.1 
 | Backend | `define-lazy-prop` | 3.0.0 | transitive runtime | MIT |
 | Backend | `ecdsa-sig-formatter` | 1.0.11 | transitive runtime | Apache-2.0 |
 | Backend | `esbuild` | 0.25.12 | transitive development | MIT |
-| Backend | `fast-xml-builder` | 1.3.1 | transitive runtime | MIT |
-| Backend | `fast-xml-parser` | 5.11.2 | transitive runtime | MIT |
+| Backend | `fast-xml-builder` | 1.3.2 | transitive runtime | MIT |
+| Backend | `fast-xml-parser` | 5.12.1 | transitive runtime | MIT |
 | Backend | `fsevents` | 2.3.3 | transitive development / optional | MIT |
 | Backend | `get-tsconfig` | 4.14.3 | transitive development | MIT |
 | Backend | `http-proxy-agent` | 7.0.2 | transitive runtime | MIT |
@@ -101,7 +101,7 @@ Reviewed 21 October 2026 and updated 10 November 2026 (`@azure/identity` 4.14.1 
 | Backend | `is-docker` | 3.0.0 | transitive runtime | MIT |
 | Backend | `is-in-ssh` | 1.0.0 | transitive runtime | MIT |
 | Backend | `is-inside-container` | 1.0.0 | transitive runtime | MIT |
-| Backend | `is-unsafe` | 2.0.2 | transitive runtime | MIT |
+| Backend | `is-unsafe` | 2.0.3 | transitive runtime | MIT |
 | Backend | `is-wsl` | 3.1.1 | transitive runtime | MIT |
 | Backend | `jose` | 6.2.12 | direct runtime | MIT |
 | Backend | `jsonwebtoken` | 9.0.3 | transitive runtime | MIT |
@@ -122,7 +122,7 @@ Reviewed 21 October 2026 and updated 10 November 2026 (`@azure/identity` 4.14.1 
 | Backend | `run-applescript` | 7.1.0 | transitive runtime | MIT |
 | Backend | `safe-buffer` | 5.2.1 | transitive runtime | MIT |
 | Backend | `semver` | 7.8.6 | transitive runtime | ISC |
-| Backend | `strnum` | 2.4.2 | transitive runtime | MIT |
+| Backend | `strnum` | 2.5.1 | transitive runtime | MIT |
 | Backend | `tslib` | 2.8.1 | transitive runtime | 0BSD |
 | Backend | `tsx` | 4.20.6 | direct development | MIT |
 | Backend | `typescript` | 7.0.2 | direct development | Apache-2.0 |
